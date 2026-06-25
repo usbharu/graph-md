@@ -1,0 +1,294 @@
+package dev.usbharu.graphmd.core
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+class GraphDocumentParserTest {
+    private val compiler = GraphCompiler()
+
+    @Test
+    fun `parses node document from markdown front matter`() {
+        val parsed = compiler.parseDocument(
+            text = """
+                ---
+                id: alice
+                kind: Node
+                type: Person
+                props:
+                  name: Alice
+                  aliases:
+                    - Al
+                  birthDate:
+                    timeline: CommonEra
+                    value: "AD 2001-04-12"
+                ---
+                Alice is friends with @[Bob](bob friendOf)
+            """.trimIndent(),
+            sourcePath = "/tmp/alice.md",
+        )
+
+        assertTrue(parsed.diagnostics.isEmpty(), parsed.diagnostics.joinToString("\n") { it.message })
+        val document = parsed.document as? NodeDocument
+        assertNotNull(document)
+        assertEquals("alice", document.id)
+        assertEquals("Person", document.type)
+        assertEquals("Alice", (document.props.getValue("name") as RawString).value)
+        assertEquals("Al", ((document.props.getValue("aliases") as RawArray).values.single() as RawString).value)
+        assertTrue(document.body.contains("@[Bob](bob friendOf)"))
+        assertTrue("type" in document.topLevelFields)
+    }
+
+    @Test
+    fun `parses node type rel type and timeline documents`() {
+        val nodeType = compiler.parseDocument(
+            """
+                ---
+                id: Person
+                kind: NodeType
+                extends:
+                  - Entity
+                props:
+                  name:
+                    type: text
+                    required: true
+                    index: fulltext
+                ---
+            """.trimIndent(),
+            "/tmp/person.md",
+        ).document as? NodeTypeDocument
+        val relType = compiler.parseDocument(
+            """
+                ---
+                id: worksAt
+                kind: RelType
+                from:
+                  - Person
+                to:
+                  - Organization
+                props:
+                  since:
+                    type: instant
+                    timeline: CommonEra
+                ---
+            """.trimIndent(),
+            "/tmp/works-at.md",
+        ).document as? RelTypeDocument
+        val timeline = compiler.parseDocument(
+            """
+                ---
+                id: CommonEra
+                kind: Timeline
+                calendar:
+                  type: gregorian
+                continuous: true
+                yearZero: false
+                defaultEra: AD
+                eras:
+                  AD:
+                    direction: forward
+                units: [year, month, day]
+                mapping:
+                  kind: none
+                ---
+            """.trimIndent(),
+            "/tmp/timeline.md",
+        ).document as? TimelineDocument
+
+        assertNotNull(nodeType)
+        assertEquals(listOf("Entity"), nodeType.extends)
+        assertEquals(PropType.text, nodeType.props.getValue("name").type)
+        assertNotNull(relType)
+        assertEquals(listOf("Person"), relType.from)
+        assertEquals("CommonEra", relType.props.getValue("since").timeline)
+        assertNotNull(timeline)
+        assertEquals("gregorian", timeline.calendarType)
+        assertEquals(listOf("year", "month", "day"), timeline.units)
+        assertTrue(timeline.mapping is NoTimelineMapping)
+    }
+
+    @Test
+    fun `reports missing front matter and invalid kind`() {
+        val missingFrontMatter = compiler.parseDocument(
+            text = "id: alice\nkind: Node",
+            sourcePath = "/tmp/no-frontmatter.md",
+        )
+        val invalidKind = compiler.parseDocument(
+            text = """
+                ---
+                id: alice
+                kind: Unknown
+                ---
+            """.trimIndent(),
+            sourcePath = "/tmp/unknown.md",
+        )
+
+        assertNull(missingFrontMatter.document)
+        assertTrue(missingFrontMatter.diagnostics.any { "YAML front matter" in it.message })
+        assertNull(invalidKind.document)
+        assertTrue(invalidKind.diagnostics.any { "Unknown document kind" in it.message })
+    }
+
+    @Test
+    fun `compile sources resolves references across documents`() {
+        val result = compiler.compileSources(
+            listOf(
+                SourceDocument(
+                    text = """
+                        ---
+                        id: CommonEra
+                        kind: Timeline
+                        calendar:
+                          type: gregorian
+                        continuous: true
+                        yearZero: false
+                        defaultEra: AD
+                        eras:
+                          AD:
+                            direction: forward
+                        units:
+                          - year
+                          - month
+                          - day
+                        ---
+                    """.trimIndent(),
+                    sourcePath = "/tmp/timeline.md",
+                ),
+                SourceDocument(
+                    text = """
+                        ---
+                        id: Person
+                        kind: NodeType
+                        props:
+                          name:
+                            type: text
+                            required: true
+                          birthDate:
+                            type: instant
+                            timeline: CommonEra
+                        ---
+                    """.trimIndent(),
+                    sourcePath = "/tmp/person.md",
+                ),
+                SourceDocument(
+                    text = """
+                        ---
+                        id: friendOf
+                        kind: RelType
+                        from:
+                          - Person
+                        to:
+                          - Person
+                        ---
+                    """.trimIndent(),
+                    sourcePath = "/tmp/friend.md",
+                ),
+                SourceDocument(
+                    text = """
+                        ---
+                        id: bob
+                        kind: Node
+                        type: Person
+                        props:
+                          name: Bob
+                        ---
+                    """.trimIndent(),
+                    sourcePath = "/tmp/bob.md",
+                ),
+                SourceDocument(
+                    text = """
+                        ---
+                        id: alice
+                        kind: Node
+                        type: Person
+                        props:
+                          name: Alice
+                          birthDate:
+                            timeline: CommonEra
+                            value: "AD 2001-04-12"
+                        ---
+                        Alice knows @[Bob](bob "friendOf")
+                    """.trimIndent(),
+                    sourcePath = "/tmp/alice.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.diagnostics.none { it.severity == Severity.Error }, result.diagnostics.joinToString("\n") { it.message })
+        assertEquals(2, result.nodes.size)
+        assertEquals(1, result.relations.size)
+        assertEquals("bob", result.relations.single().to)
+    }
+
+    @Test
+    fun `compile sources respects document set boundaries`() {
+        val result = compiler.compileSources(
+            listOf(
+                SourceDocument(
+                    text = """
+                        ---
+                        id: Person
+                        kind: NodeType
+                        props:
+                          name:
+                            type: text
+                            required: true
+                        ---
+                    """.trimIndent(),
+                    sourcePath = "/tmp/person.md",
+                ),
+                SourceDocument(
+                    text = """
+                        ---
+                        id: mentions
+                        kind: RelType
+                        ---
+                    """.trimIndent(),
+                    sourcePath = "/tmp/mentions.md",
+                ),
+                SourceDocument(
+                    text = """
+                        ---
+                        id: alice
+                        kind: Node
+                        type: Person
+                        props:
+                          name: Alice
+                        ---
+                        Missing @[Bob](bob mentions)
+                    """.trimIndent(),
+                    sourcePath = "/tmp/alice.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.diagnostics.any { it.category == DiagnosticCategory.ReferenceError && "Unknown Node target" in it.message })
+    }
+
+    @Test
+    fun `parses valid front matter with deeper indentation`() {
+        val parsed = compiler.parseDocument(
+            """
+                ---
+                id: Person
+                kind: NodeType
+                props:
+                    profile:
+                        type: object
+                        properties:
+                            displayName:
+                                type: string
+                ---
+            """.trimIndent(),
+            "/tmp/person-deep-indent.md",
+        )
+
+        assertTrue(parsed.diagnostics.isEmpty(), parsed.diagnostics.joinToString("\n") { it.message })
+        val document = parsed.document as? NodeTypeDocument
+        assertNotNull(document)
+        assertEquals(PropType.`object`, document.props.getValue("profile").type)
+        assertEquals(PropType.string, document.props.getValue("profile").properties.getValue("displayName").type)
+    }
+}

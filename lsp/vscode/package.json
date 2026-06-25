@@ -1,0 +1,82 @@
+{
+  "name": "graph-md-vscode",
+  "displayName": "GraphMD VSCode",
+  "version": "0.1.0",
+  "publisher": "usbharu",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "activationEvents": [
+    "onLanguage:markdown"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "grammars": [
+      {
+        "scopeName": "graphmd.injection.markdown",
+        "path": "./syntaxes/graphmd.tmLanguage.json",
+        "injectTo": [
+          "text.html.markdown"
+        ]
+      }
+    ],
+    "semanticTokenTypes": [
+      {
+        "id": "graphmdRelationOperator",
+        "description": "GraphMD relation operator"
+      },
+      {
+        "id": "graphmdRelationLabel",
+        "description": "GraphMD relation label"
+      },
+      {
+        "id": "graphmdRelationTarget",
+        "description": "GraphMD relation target"
+      },
+      {
+        "id": "graphmdRelationType",
+        "description": "GraphMD relation type"
+      },
+      {
+        "id": "graphmdProperty",
+        "description": "GraphMD property"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "markdown",
+        "scopes": {
+          "graphmdRelationOperator": [
+            "keyword.control.graphmd",
+            "punctuation.definition.link.graphmd"
+          ],
+          "graphmdRelationLabel": [
+            "string.other.link.title.markdown"
+          ],
+          "graphmdRelationTarget": [
+            "constant.other.reference.link.markdown",
+            "entity.name.reference"
+          ],
+          "graphmdRelationType": [
+            "entity.name.type.class"
+          ],
+          "graphmdProperty": [
+            "variable.other.property.graphmd",
+            "variable.other.member.graphmd"
+          ]
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./tsconfig.json"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.12",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.8.3"
+  }
+}

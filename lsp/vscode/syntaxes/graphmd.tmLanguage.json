@@ -1,0 +1,210 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "GraphMD Markdown Injection",
+  "scopeName": "graphmd.injection.markdown",
+  "injectionSelector": "L:text.html.markdown",
+  "patterns": [
+    {
+      "include": "#graphmd-props"
+    },
+    {
+      "include": "#graphmd-link"
+    }
+  ],
+  "repository": {
+    "graphmd-props": {
+      "name": "meta.graphmd.props.inline.markdown",
+      "begin": "(@props)(\\s*)(\\{)",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.control.graphmd"
+        },
+        "3": {
+          "name": "punctuation.section.block.begin.graphmd"
+        }
+      },
+      "end": "(\\})",
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.section.block.end.graphmd"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#graphmd-object-content"
+        }
+      ]
+    },
+    "graphmd-link": {
+      "name": "meta.graphmd.relation.inline.markdown",
+      "begin": "(@\\[)",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.control.graphmd"
+        }
+      },
+      "end": "(?<=\\))(?!\\{)|(?<=\\})",
+      "patterns": [
+        {
+          "name": "meta.graphmd.relation.label.markdown",
+          "begin": "(?<=@\\[)",
+          "end": "\\](?=\\()",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.link.graphmd"
+            }
+          },
+          "patterns": [
+            {
+              "match": "\\\\.",
+              "name": "constant.character.escape.graphmd"
+            },
+            {
+              "match": "[^\\\\\\]]+",
+              "name": "string.other.link.title.markdown"
+            }
+          ]
+        },
+        {
+          "name": "meta.graphmd.relation.target.markdown",
+          "begin": "\\]\\(",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.group.begin.graphmd"
+            }
+          },
+          "end": "\\)",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.group.end.graphmd"
+            }
+          },
+          "patterns": [
+            {
+              "match": "(?<=\\()[^\\s)]+",
+              "name": "constant.other.reference.link.markdown"
+            },
+            {
+              "match": "(?<=\\s)[^\\s)]+",
+              "name": "entity.name.type.class"
+            }
+          ]
+        },
+        {
+          "name": "meta.graphmd.relation.props.markdown",
+          "begin": "\\{",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.section.block.begin.graphmd"
+            }
+          },
+          "end": "\\}",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.section.block.end.graphmd"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#graphmd-object-content"
+            }
+          ]
+        }
+      ]
+    },
+    "graphmd-object-content": {
+      "patterns": [
+        {
+          "match": "\\b([A-Za-z_][A-Za-z0-9_-]*)(\\s*=)",
+          "captures": {
+            "1": {
+              "name": "variable.other.property.graphmd"
+            },
+            "2": {
+              "name": "keyword.operator.assignment"
+            }
+          }
+        },
+        {
+          "include": "#graphmd-object"
+        },
+        {
+          "include": "#graphmd-array"
+        },
+        {
+          "include": "#graphmd-scalars"
+        }
+      ]
+    },
+    "graphmd-object": {
+      "name": "meta.graphmd.object",
+      "begin": "\\{",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.section.block.begin.graphmd"
+        }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.block.end.graphmd"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#graphmd-object-content"
+        }
+      ]
+    },
+    "graphmd-array": {
+      "name": "meta.graphmd.array",
+      "begin": "\\[",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.section.brackets.begin.graphmd"
+        }
+      },
+      "end": "\\]",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.brackets.end.graphmd"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#graphmd-object"
+        },
+        {
+          "include": "#graphmd-array"
+        },
+        {
+          "include": "#graphmd-scalars"
+        },
+        {
+          "match": ",",
+          "name": "punctuation.separator.delimiter.graphmd"
+        }
+      ]
+    },
+    "graphmd-scalars": {
+      "patterns": [
+        {
+          "match": "\"(?:\\\\.|[^\"])*\"|'(?:''|[^'])*'",
+          "name": "string.quoted.double"
+        },
+        {
+          "match": "\\b(?:true|false|null)\\b",
+          "name": "constant.language"
+        },
+        {
+          "match": "\\b[-+]?[0-9]+(?:\\.[0-9]+)?\\b",
+          "name": "constant.numeric"
+        },
+        {
+          "match": "\\b[A-Za-z_][A-Za-z0-9_-]*\\b",
+          "name": "support.type"
+        }
+      ]
+    }
+  }
+}
