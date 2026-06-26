@@ -558,7 +558,7 @@ class GraphMdLanguageServerTest {
         val propKeyItems = FrontMatterCompletionResolver(
             text = propKeyText,
             offset = propKeyText.indexOf("req") + 3,
-            parsedDocument = dev.usbharu.graphmd.core.model.NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md"),
+            parsedDocument = NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md"),
             nodeTypeIds = emptyList(),
             relTypeIds = emptyList(),
             timelineIds = listOf("CommonEra"),
@@ -577,7 +577,7 @@ class GraphMdLanguageServerTest {
         val propTypeItems = FrontMatterCompletionResolver(
             text = propTypeText,
             offset = propTypeText.indexOf("st") + 2,
-            parsedDocument = dev.usbharu.graphmd.core.model.NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md"),
+            parsedDocument = NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md"),
             nodeTypeIds = emptyList(),
             relTypeIds = emptyList(),
             timelineIds = listOf("CommonEra"),
@@ -597,7 +597,7 @@ class GraphMdLanguageServerTest {
         val nextKeyItems = FrontMatterCompletionResolver(
             text = nextKeyText,
             offset = nextKeyText.lastIndexOf("ind") + 3,
-            parsedDocument = dev.usbharu.graphmd.core.model.NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md"),
+            parsedDocument = NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md"),
             nodeTypeIds = emptyList(),
             relTypeIds = emptyList(),
             timelineIds = listOf("CommonEra"),
@@ -619,7 +619,7 @@ class GraphMdLanguageServerTest {
         val blankNextKeyItems = FrontMatterCompletionResolver(
             text = blankNextKeyText,
             offset = blankNextKeyOffset,
-            parsedDocument = dev.usbharu.graphmd.core.model.NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md"),
+            parsedDocument = NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md"),
             nodeTypeIds = emptyList(),
             relTypeIds = emptyList(),
             timelineIds = listOf("CommonEra"),
@@ -638,7 +638,7 @@ class GraphMdLanguageServerTest {
         val listItems = FrontMatterCompletionResolver(
             text = listText,
             offset = listText.indexOf("En") + 2,
-            parsedDocument = dev.usbharu.graphmd.core.model.NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md"),
+            parsedDocument = NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md"),
             nodeTypeIds = listOf("Entity"),
             relTypeIds = emptyList(),
             timelineIds = emptyList(),

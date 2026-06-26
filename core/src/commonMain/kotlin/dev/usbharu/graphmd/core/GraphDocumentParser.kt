@@ -116,7 +116,7 @@ class GraphDocumentParser {
         body: String,
         sourcePath: String,
         diagnostics: MutableList<Diagnostic>,
-    ): GraphDocument? {
+    ): GraphDocument {
         val allowedFields = setOf("id", "kind", "extends", "timecode", "mappings", "props")
         root.map.keys.filterNot { it in allowedFields }.forEach { field ->
             diagnostics += schemaError("Unknown top-level field: $field", sourcePath, id)
@@ -542,8 +542,7 @@ private class MiniYamlParser(
                 i++
                 continue
             }
-            val next = value.getOrNull(i + 1)
-            when (next) {
+            when (val next = value.getOrNull(i + 1)) {
                 'n' -> result.append('\n')
                 'r' -> result.append('\r')
                 't' -> result.append('\t')

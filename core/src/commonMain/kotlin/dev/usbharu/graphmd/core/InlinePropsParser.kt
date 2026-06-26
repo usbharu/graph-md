@@ -76,8 +76,7 @@ class InlinePropsParser(private val input: String) {
                 else -> fail("Invalid numeric token: $token")
             }
         }
-        val token = parseIdentifier()
-        return when (token) {
+        return when (val token = parseIdentifier()) {
             "true" -> RawBoolean(true)
             "false" -> RawBoolean(false)
             "null" -> RawNull

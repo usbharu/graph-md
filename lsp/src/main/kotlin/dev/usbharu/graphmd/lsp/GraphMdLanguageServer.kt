@@ -372,7 +372,7 @@ private class GraphMdWorkspaceIndex {
         }
     }
 
-    private fun inferredDiagnosticRange(document: IndexedDocument, diagnostic: dev.usbharu.graphmd.core.model.Diagnostic): SourceRange? {
+    private fun inferredDiagnosticRange(document: IndexedDocument, diagnostic: Diagnostic): SourceRange? {
         if (diagnostic.category != DiagnosticCategory.ReferenceError) return null
         val reference = referenceTargetForDiagnostic(diagnostic.message) ?: return null
         return document.analysis.references.firstOrNull { ref ->
