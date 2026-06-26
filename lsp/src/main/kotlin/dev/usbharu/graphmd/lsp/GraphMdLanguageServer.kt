@@ -1,6 +1,7 @@
 package dev.usbharu.graphmd.lsp
 
 import dev.usbharu.graphmd.core.*
+import dev.usbharu.graphmd.core.model.*
 import org.eclipse.lsp4j.*
 import org.eclipse.lsp4j.jsonrpc.messages.Either
 import org.eclipse.lsp4j.services.LanguageClient
@@ -371,7 +372,7 @@ private class GraphMdWorkspaceIndex {
         }
     }
 
-    private fun inferredDiagnosticRange(document: IndexedDocument, diagnostic: dev.usbharu.graphmd.core.Diagnostic): SourceRange? {
+    private fun inferredDiagnosticRange(document: IndexedDocument, diagnostic: dev.usbharu.graphmd.core.model.Diagnostic): SourceRange? {
         if (diagnostic.category != DiagnosticCategory.ReferenceError) return null
         val reference = referenceTargetForDiagnostic(diagnostic.message) ?: return null
         return document.analysis.references.firstOrNull { ref ->

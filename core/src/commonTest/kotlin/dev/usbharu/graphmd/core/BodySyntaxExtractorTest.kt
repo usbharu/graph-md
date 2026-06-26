@@ -1,5 +1,6 @@
 package dev.usbharu.graphmd.core
 
+import dev.usbharu.graphmd.core.model.*
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue

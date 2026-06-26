@@ -1,5 +1,7 @@
 package dev.usbharu.graphmd.core
 
+import dev.usbharu.graphmd.core.model.*
+
 enum class ReferenceTargetKind {
     Node,
     NodeType,

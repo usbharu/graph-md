@@ -1,5 +1,7 @@
 package dev.usbharu.graphmd.core
 
+import dev.usbharu.graphmd.core.model.*
+
 class GraphDocumentParser {
     fun parseDocument(text: String, sourcePath: String): ParsedGraphDocumentResult {
         val diagnostics = mutableListOf<Diagnostic>()

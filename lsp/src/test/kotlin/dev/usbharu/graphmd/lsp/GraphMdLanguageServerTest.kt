@@ -2,15 +2,15 @@ package dev.usbharu.graphmd.lsp
 
 import dev.usbharu.graphmd.core.GraphDocumentAnalyzer
 import dev.usbharu.graphmd.core.GraphCompiler
-import dev.usbharu.graphmd.core.NodeDocument
-import dev.usbharu.graphmd.core.NodeTypeDocument
-import dev.usbharu.graphmd.core.PropIndex
-import dev.usbharu.graphmd.core.PropType
 import dev.usbharu.graphmd.core.ReferenceTargetKind
-import dev.usbharu.graphmd.core.ResolvedPropSchema
-import dev.usbharu.graphmd.core.DocumentKind
-import dev.usbharu.graphmd.core.SourceDocument
-import dev.usbharu.graphmd.core.TimelineSelector
+import dev.usbharu.graphmd.core.model.DocumentKind
+import dev.usbharu.graphmd.core.model.NodeDocument
+import dev.usbharu.graphmd.core.model.NodeTypeDocument
+import dev.usbharu.graphmd.core.model.PropIndex
+import dev.usbharu.graphmd.core.model.PropType
+import dev.usbharu.graphmd.core.model.ResolvedPropSchema
+import dev.usbharu.graphmd.core.model.SourceDocument
+import dev.usbharu.graphmd.core.model.TimelineSelector
 import org.eclipse.lsp4j.CompletionParams
 import org.eclipse.lsp4j.DidOpenTextDocumentParams
 import org.eclipse.lsp4j.InitializeParams
@@ -558,7 +558,7 @@ class GraphMdLanguageServerTest {
         val propKeyItems = FrontMatterCompletionResolver(
             text = propKeyText,
             offset = propKeyText.indexOf("req") + 3,
-            parsedDocument = dev.usbharu.graphmd.core.NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md"),
+            parsedDocument = dev.usbharu.graphmd.core.model.NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md"),
             nodeTypeIds = emptyList(),
             relTypeIds = emptyList(),
             timelineIds = listOf("CommonEra"),
@@ -577,7 +577,7 @@ class GraphMdLanguageServerTest {
         val propTypeItems = FrontMatterCompletionResolver(
             text = propTypeText,
             offset = propTypeText.indexOf("st") + 2,
-            parsedDocument = dev.usbharu.graphmd.core.NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md"),
+            parsedDocument = dev.usbharu.graphmd.core.model.NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md"),
             nodeTypeIds = emptyList(),
             relTypeIds = emptyList(),
             timelineIds = listOf("CommonEra"),
@@ -597,7 +597,7 @@ class GraphMdLanguageServerTest {
         val nextKeyItems = FrontMatterCompletionResolver(
             text = nextKeyText,
             offset = nextKeyText.lastIndexOf("ind") + 3,
-            parsedDocument = dev.usbharu.graphmd.core.NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md"),
+            parsedDocument = dev.usbharu.graphmd.core.model.NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md"),
             nodeTypeIds = emptyList(),
             relTypeIds = emptyList(),
             timelineIds = listOf("CommonEra"),
@@ -619,7 +619,7 @@ class GraphMdLanguageServerTest {
         val blankNextKeyItems = FrontMatterCompletionResolver(
             text = blankNextKeyText,
             offset = blankNextKeyOffset,
-            parsedDocument = dev.usbharu.graphmd.core.NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md"),
+            parsedDocument = dev.usbharu.graphmd.core.model.NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md"),
             nodeTypeIds = emptyList(),
             relTypeIds = emptyList(),
             timelineIds = listOf("CommonEra"),
@@ -638,7 +638,7 @@ class GraphMdLanguageServerTest {
         val listItems = FrontMatterCompletionResolver(
             text = listText,
             offset = listText.indexOf("En") + 2,
-            parsedDocument = dev.usbharu.graphmd.core.NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md"),
+            parsedDocument = dev.usbharu.graphmd.core.model.NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md"),
             nodeTypeIds = listOf("Entity"),
             relTypeIds = emptyList(),
             timelineIds = emptyList(),

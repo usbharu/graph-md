@@ -1,5 +1,7 @@
 package dev.usbharu.graphmd.core
 
+import dev.usbharu.graphmd.core.model.*
+
 class GraphCompiler(
     private val options: CompileOptions = CompileOptions(),
 ) {

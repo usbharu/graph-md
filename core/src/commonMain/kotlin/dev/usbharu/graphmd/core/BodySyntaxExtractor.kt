@@ -1,5 +1,7 @@
 package dev.usbharu.graphmd.core
 
+import dev.usbharu.graphmd.core.model.*
+
 data class BodySyntaxExtraction(
     val propsBlocks: List<ExtractedPropsBlock>,
     val relations: List<ExtractedRelation>,

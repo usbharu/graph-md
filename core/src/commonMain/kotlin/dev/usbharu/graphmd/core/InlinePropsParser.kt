@@ -1,5 +1,7 @@
 package dev.usbharu.graphmd.core
 
+import dev.usbharu.graphmd.core.model.*
+
 class InlinePropsParseException(message: String) : IllegalArgumentException(message)
 
 class InlinePropsParser(private val input: String) {
