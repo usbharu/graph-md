@@ -1,7 +1,7 @@
 package dev.usbharu.graphmd.core
-
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class GraphCompilerTest {
@@ -40,8 +40,8 @@ class GraphCompilerTest {
         assertTrue(result.diagnostics.none { it.severity == Severity.Error }, result.diagnostics.joinToString("\n") { it.message })
         val alice = result.nodes.single { it.id == "alice" }
         assertEquals("Alice", (alice.props.getValue("name") as TextValue).values.getValue("default"))
-        assertEquals("day", (alice.props.getValue("birthDate") as InstantValue).precision)
-        assertEquals("AD 2001-04-12", (alice.props.getValue("birthDate") as InstantValue).value)
+        assertEquals(null, (alice.props.getValue("birthDate") as InstantValue).precision)
+        assertEquals("2001-04-12", (alice.props.getValue("birthDate") as InstantValue).value)
         assertEquals(1, result.relations.size)
         assertEquals("Bob", result.relations.single().sourceLabel)
     }
@@ -72,8 +72,83 @@ class GraphCompilerTest {
         assertTrue(result.diagnostics.none { it.severity == Severity.Error }, result.diagnostics.joinToString("\n") { it.message })
         val since = result.relations.single().props.getValue("since") as InstantValue
         assertEquals("CommonEra", since.timeline)
-        assertEquals("AD 2005-01-02", since.value)
-        assertEquals("day", since.precision)
+        assertEquals("2005-01-02", since.value)
+        assertEquals(null, since.precision)
+    }
+
+    @Test
+    fun `stores numeric and tuple timecodes on temporal values`() {
+        val result = compiler().compile(
+            listOf(
+                TimelineDocument(
+                    id = "ThirdAge",
+                    timecode = TimecodeSchema(TimecodeType.tuple),
+                    sourcePath = "/tmp/third-age.md",
+                ),
+                timeline(),
+                NodeTypeDocument(
+                    id = "Event",
+                    props = mapOf(
+                        "happenedAt" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("ThirdAge")),
+                        "activeDuring" to PropSchema(PropType.interval, timeline = TimelineSelector.Id("CommonEra")),
+                    ),
+                    sourcePath = "/tmp/event-type.md",
+                ),
+                NodeDocument(
+                    id = "event",
+                    type = "Event",
+                    props = mapOf(
+                        "happenedAt" to RawObject(
+                            mapOf(
+                                "value" to RawString("TA 3018-09-23"),
+                                "timecode" to RawArray(listOf(RawInteger(3018), RawInteger(9), RawInteger(23))),
+                            ),
+                        ),
+                        "activeDuring" to RawObject(
+                            mapOf(
+                                "from" to RawObject(
+                                    mapOf(
+                                        "value" to RawString("AD 2020-01-01"),
+                                        "timecode" to RawNumber(2020.0),
+                                        "precision" to RawString("day"),
+                                    ),
+                                ),
+                                "to" to RawObject(
+                                    mapOf(
+                                        "value" to RawString("AD 2020-12-31"),
+                                        "timecode" to RawNumber(2020.999),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                    sourcePath = "/tmp/event.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.diagnostics.none { it.severity == Severity.Error }, result.diagnostics.joinToString("\n") { it.message })
+        val instant = result.nodes.single().props.getValue("happenedAt") as InstantValue
+        assertEquals(listOf(3018.0, 9.0, 23.0), (instant.timecode as TupleTimecode).values)
+        val interval = result.nodes.single().props.getValue("activeDuring") as IntervalValue
+        assertEquals(2020.0, (interval.fromTimecode as NumberTimecode).value)
+        assertEquals("day", interval.fromPrecision)
+        assertEquals(2020.999, (interval.toTimecode as NumberTimecode).value)
+    }
+
+    @Test
+    fun `rejects tuple timecode direction on timeline`() {
+        val result = compiler().compile(
+            listOf(
+                TimelineDocument(
+                    id = "ThirdAge",
+                    timecode = TimecodeSchema(TimecodeType.tuple, TimecodeDirection.ascending),
+                    sourcePath = "/tmp/third-age.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.diagnostics.any { "timecode.direction" in it.message })
     }
 
     @Test
@@ -99,6 +174,56 @@ class GraphCompilerTest {
     }
 
     @Test
+    fun `relation accepts node whose type transitively extends the declared from-to nodetype`() {
+        val result = compiler().compile(
+            listOf(
+                timeline(),
+                NodeTypeDocument(
+                    id = "Entity",
+                    props = mapOf("name" to PropSchema(PropType.text, required = true)),
+                    sourcePath = "/tmp/entity.md",
+                ),
+                NodeTypeDocument(
+                    id = "Character",
+                    extends = listOf("Entity"),
+                    props = emptyMap(),
+                    sourcePath = "/tmp/character.md",
+                ),
+                NodeTypeDocument(
+                    id = "Person",
+                    extends = listOf("Character"),
+                    props = mapOf("birthDate" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("CommonEra"))),
+                    sourcePath = "/tmp/person.md",
+                ),
+                RelTypeDocument(
+                    id = "knows",
+                    from = listOf("Entity"),
+                    to = listOf("Entity"),
+                    sourcePath = "/tmp/knows.md",
+                ),
+                NodeDocument(
+                    "alice",
+                    "Person",
+                    mapOf("name" to RawString("Alice")),
+                    body = "@[Bob](bob knows)",
+                    sourcePath = "/tmp/alice.md",
+                ),
+                NodeDocument(
+                    "bob",
+                    "Person",
+                    mapOf("name" to RawString("Bob")),
+                    sourcePath = "/tmp/bob.md",
+                ),
+            )
+        )
+
+        assertFalse(
+            result.diagnostics.any { it.category == DiagnosticCategory.ConstraintError },
+            "Expected no constraint errors for subtype nodes, got: ${result.diagnostics}",
+        )
+    }
+
+    @Test
     fun `applies inherited schemas and narrower rel constraints`() {
         val result = compiler().compile(
             listOf(
@@ -111,7 +236,7 @@ class GraphCompilerTest {
                 NodeTypeDocument(
                     id = "Person",
                     extends = listOf("Entity"),
-                    props = mapOf("birthDate" to PropSchema(PropType.instant, timeline = "CommonEra")),
+                    props = mapOf("birthDate" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("CommonEra"))),
                     sourcePath = "/tmp/person.md",
                 ),
                 RelTypeDocument(
@@ -183,8 +308,7 @@ class GraphCompilerTest {
             )
         )
 
-        assertTrue(result.diagnostics.any { "year 0" in it.message })
-        assertTrue(result.diagnostics.any { "precision" in it.message })
+        assertTrue(result.diagnostics.none { "precision" in it.message })
     }
 
     @Test
@@ -236,8 +360,8 @@ class GraphCompilerTest {
                 NodeTypeDocument(
                     id = "Event",
                     props = mapOf(
-                        "activeDuring" to PropSchema(PropType.interval, timeline = "CommonEra"),
-                        "duration" to PropSchema(PropType.duration, timeline = "CommonEra"),
+                        "activeDuring" to PropSchema(PropType.interval, timeline = TimelineSelector.Id("CommonEra")),
+                        "duration" to PropSchema(PropType.duration, timeline = TimelineSelector.Id("CommonEra")),
                     ),
                     sourcePath = "/tmp/event-type.md",
                 ),
@@ -254,7 +378,7 @@ class GraphCompilerTest {
         )
 
         assertTrue(result.diagnostics.any { "at least one bound" in it.message })
-        assertTrue(result.diagnostics.any { "unit century" in it.message })
+        assertTrue(result.diagnostics.none { "unit century" in it.message })
     }
 
     @Test
@@ -379,7 +503,7 @@ class GraphCompilerTest {
                     from = listOf("Entity"),
                     to = listOf("Person"),
                     props = mapOf(
-                        "when" to PropSchema(PropType.instant, timeline = "CommonEra", timelines = listOf("Other")),
+                        "when" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("CommonEra"), timelines = listOf(TimelineSelector.Id("Other"))),
                     ),
                     sourcePath = "/tmp/friend.md",
                 ),
@@ -397,12 +521,11 @@ class GraphCompilerTest {
             listOf(
                 TimelineDocument(
                     id = "ThirdAge",
-                    calendarType = "opaque",
                     sourcePath = "/tmp/third-age.md",
                 ),
                 NodeTypeDocument(
                     id = "Event",
-                    props = mapOf("happenedAt" to PropSchema(PropType.instant, timeline = "ThirdAge")),
+                    props = mapOf("happenedAt" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("ThirdAge"))),
                     sourcePath = "/tmp/event-type.md",
                 ),
                 NodeDocument(
@@ -463,8 +586,8 @@ class GraphCompilerTest {
                 NodeTypeDocument("B", extends = listOf("A"), sourcePath = "/tmp/b.md"),
                 RelTypeDocument("R1", extends = listOf("R2"), sourcePath = "/tmp/r1.md"),
                 RelTypeDocument("R2", extends = listOf("R1"), sourcePath = "/tmp/r2.md"),
-                TimelineDocument("T1", extends = listOf("T2"), calendarType = "gregorian", sourcePath = "/tmp/t1.md"),
-                TimelineDocument("T2", extends = listOf("T1"), calendarType = "gregorian", sourcePath = "/tmp/t2.md"),
+                TimelineDocument("T1", extends = listOf("T2"), sourcePath = "/tmp/t1.md"),
+                TimelineDocument("T2", extends = listOf("T1"), sourcePath = "/tmp/t2.md"),
             )
         )
 
@@ -482,7 +605,7 @@ class GraphCompilerTest {
                 personType(),
                 NodeTypeDocument(
                     id = "Event",
-                    props = mapOf("happenedAt" to PropSchema(PropType.instant, timelines = listOf("CommonEra"))),
+                    props = mapOf("happenedAt" to PropSchema(PropType.instant, timelines = listOf(TimelineSelector.Id("CommonEra")))),
                     sourcePath = "/tmp/event-type.md",
                 ),
                 RelTypeDocument(
@@ -554,27 +677,20 @@ class GraphCompilerTest {
         val eventType = NodeTypeDocument(
             id = "Event",
             props = mapOf(
-                "missingObject" to PropSchema(PropType.instant, timeline = "CommonEra"),
+                "missingObject" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("CommonEra")),
                 "missingTimeline" to PropSchema(PropType.instant),
                 "unknownTimeline" to PropSchema(PropType.instant),
-                "disallowedTimeline" to PropSchema(PropType.instant, timeline = "CommonEra"),
-                "missingValue" to PropSchema(PropType.instant, timeline = "CommonEra"),
-                "invalidLiteral" to PropSchema(PropType.instant, timeline = "CommonEra"),
-                "eraRequired" to PropSchema(PropType.instant, timeline = "NoDefaultEra"),
-                "timePrecision" to PropSchema(PropType.instant, timeline = "CommonEra"),
+                "disallowedTimeline" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("CommonEra")),
+                "missingValue" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("CommonEra")),
+                "opaqueLiteral" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("CommonEra")),
+                "timePrecision" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("CommonEra")),
             ),
             sourcePath = "/tmp/event-type.md",
         )
         val result = compiler().compile(
             listOf(
                 timeline(),
-                TimelineDocument(
-                    id = "NoDefaultEra",
-                    calendarType = "gregorian",
-                    yearZero = false,
-                    eras = mapOf("AD" to EraSchema("forward")),
-                    sourcePath = "/tmp/no-default-era.md",
-                ),
+                TimelineDocument(id = "AltTimeline", sourcePath = "/tmp/alt-timeline.md"),
                 eventType,
                 NodeDocument(
                     id = "event",
@@ -583,10 +699,9 @@ class GraphCompilerTest {
                         "missingObject" to RawString("bad"),
                         "missingTimeline" to RawObject(mapOf("value" to RawString("AD 2024-01-01"))),
                         "unknownTimeline" to RawObject(mapOf("timeline" to RawString("Missing"), "value" to RawString("AD 2024-01-01"))),
-                        "disallowedTimeline" to RawObject(mapOf("timeline" to RawString("NoDefaultEra"), "value" to RawString("AD 2024-01-01"))),
+                        "disallowedTimeline" to RawObject(mapOf("timeline" to RawString("AltTimeline"), "value" to RawString("AD 2024-01-01"))),
                         "missingValue" to RawObject(mapOf("timeline" to RawString("CommonEra"))),
-                        "invalidLiteral" to RawObject(mapOf("timeline" to RawString("CommonEra"), "value" to RawString("not-a-date"))),
-                        "eraRequired" to RawObject(mapOf("timeline" to RawString("NoDefaultEra"), "value" to RawString("2024-01-01"))),
+                        "opaqueLiteral" to RawObject(mapOf("timeline" to RawString("CommonEra"), "value" to RawString("not-a-date"))),
                         "timePrecision" to RawObject(mapOf("timeline" to RawString("CommonEra"), "value" to RawString("AD 2024-01-01T10:20:30"))),
                     ),
                     sourcePath = "/tmp/event.md",
@@ -595,7 +710,7 @@ class GraphCompilerTest {
         )
 
         assertTrue(result.diagnostics.isNotEmpty())
-        assertEquals("time", (result.nodes.single().props.getValue("timePrecision") as InstantValue).precision)
+        assertEquals(null, (result.nodes.single().props.getValue("timePrecision") as InstantValue).precision)
     }
 
     @Test
@@ -603,23 +718,19 @@ class GraphCompilerTest {
         val eventType = NodeTypeDocument(
             id = "Event",
             props = mapOf(
-                "nonObject" to PropSchema(PropType.interval, timeline = "CommonEra"),
+                "nonObject" to PropSchema(PropType.interval, timeline = TimelineSelector.Id("CommonEra")),
                 "missingTimeline" to PropSchema(PropType.interval),
                 "unknownTimeline" to PropSchema(PropType.interval),
-                "disallowedTimeline" to PropSchema(PropType.interval, timeline = "CommonEra"),
-                "fromOnly" to PropSchema(PropType.interval, timeline = "CommonEra"),
-                "withFlags" to PropSchema(PropType.interval, timeline = "CommonEra"),
+                "disallowedTimeline" to PropSchema(PropType.interval, timeline = TimelineSelector.Id("CommonEra")),
+                "fromOnly" to PropSchema(PropType.interval, timeline = TimelineSelector.Id("CommonEra")),
+                "withFlags" to PropSchema(PropType.interval, timeline = TimelineSelector.Id("CommonEra")),
             ),
             sourcePath = "/tmp/event-type.md",
         )
         val result = compiler().compile(
             listOf(
                 timeline(),
-                TimelineDocument(
-                    id = "ThirdAge",
-                    calendarType = "gregorian",
-                    sourcePath = "/tmp/third-age.md",
-                ),
+                TimelineDocument(id = "ThirdAge", sourcePath = "/tmp/third-age.md"),
                 eventType,
                 NodeDocument(
                     id = "event",
@@ -662,8 +773,8 @@ class GraphCompilerTest {
                 "missingUnit" to PropSchema(PropType.duration),
                 "missingValue" to PropSchema(PropType.duration),
                 "unknownTimeline" to PropSchema(PropType.duration),
-                "timelineAny" to PropSchema(PropType.duration, timeline = "any"),
-                "valid" to PropSchema(PropType.duration, timeline = "CommonEra"),
+                "timelineAny" to PropSchema(PropType.duration, timeline = TimelineSelector.Any),
+                "valid" to PropSchema(PropType.duration, timeline = TimelineSelector.Id("CommonEra")),
             ),
             sourcePath = "/tmp/event-type.md",
         )
@@ -730,26 +841,19 @@ class GraphCompilerTest {
             listOf(
                 TimelineDocument(
                     id = "Parent",
-                    calendarType = "gregorian",
-                    continuous = true,
-                    yearZero = false,
-                    defaultEra = "AD",
-                    eras = mapOf("AD" to EraSchema("forward")),
-                    units = listOf("year"),
-                    mapping = OffsetTimelineMapping("CommonEra", "year", 1),
+                    mappings = listOf(OffsetTimelineMapping("CommonEra", offset = 1)),
                     sourcePath = "/tmp/parent.md",
                 ),
                 TimelineDocument(
                     id = "Child",
                     extends = listOf("Parent"),
-                    calendarType = "",
                     sourcePath = "/tmp/child.md",
                 ),
                 NodeTypeDocument(
                     id = "Event",
                     props = mapOf(
-                        "customInstant" to PropSchema(PropType.instant, timeline = "Child"),
-                        "customInterval" to PropSchema(PropType.interval, timeline = "Child"),
+                        "customInstant" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("Child")),
+                        "customInterval" to PropSchema(PropType.interval, timeline = TimelineSelector.Id("Child")),
                     ),
                     sourcePath = "/tmp/event-type.md",
                 ),
@@ -767,10 +871,10 @@ class GraphCompilerTest {
 
         assertTrue(result.diagnostics.none { it.severity == Severity.Error })
         val child = result.timelines.single { it.id == "Child" }
-        assertEquals("gregorian", child.calendarType)
-        assertEquals(listOf("year"), child.units)
-        assertTrue(child.mapping is OffsetTimelineMapping)
-        assertEquals("time", (result.nodes.single().props.getValue("customInstant") as InstantValue).precision)
+        assertEquals(null, child.timecode)
+        assertEquals(1, child.mappings.size)
+        assertTrue(child.mappings.single() is OffsetTimelineMapping)
+        assertEquals(null, (result.nodes.single().props.getValue("customInstant") as InstantValue).precision)
     }
 
     @Test
@@ -827,9 +931,9 @@ class GraphCompilerTest {
                 NodeTypeDocument(
                     id = "Event",
                     props = mapOf(
-                        "yearOnly" to PropSchema(PropType.instant, timeline = "CommonEra"),
-                        "monthOnly" to PropSchema(PropType.instant, timeline = "CommonEra"),
-                        "dayOnly" to PropSchema(PropType.instant, timeline = "CommonEra"),
+                        "yearOnly" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("CommonEra")),
+                        "monthOnly" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("CommonEra")),
+                        "dayOnly" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("CommonEra")),
                     ),
                     sourcePath = "/tmp/event-type.md",
                 ),
@@ -848,9 +952,9 @@ class GraphCompilerTest {
         )
 
         val props = result.nodes.single().props
-        assertEquals("year", (props.getValue("yearOnly") as InstantValue).precision)
-        assertEquals("month", (props.getValue("monthOnly") as InstantValue).precision)
-        assertEquals("day", (props.getValue("dayOnly") as InstantValue).precision)
+        assertEquals(null, (props.getValue("yearOnly") as InstantValue).precision)
+        assertEquals(null, (props.getValue("monthOnly") as InstantValue).precision)
+        assertEquals(null, (props.getValue("dayOnly") as InstantValue).precision)
         assertTrue(result.diagnostics.none { "Unknown property extra" in it.message })
     }
 
@@ -930,18 +1034,13 @@ class GraphCompilerTest {
         val result = compiler().compile(
             listOf(
                 timeline(),
-                TimelineDocument(
-                    id = "Custom",
-                    calendarType = "custom",
-                    units = emptyList(),
-                    sourcePath = "/tmp/custom.md",
-                ),
+                TimelineDocument(id = "Custom", sourcePath = "/tmp/custom.md"),
                 NodeTypeDocument(
                     id = "Event",
                     props = mapOf(
                         "freeInstant" to PropSchema(PropType.instant),
                         "toOnly" to PropSchema(PropType.interval),
-                        "customInstant" to PropSchema(PropType.instant, timeline = "Custom"),
+                        "customInstant" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("Custom")),
                         "durationKnown" to PropSchema(PropType.duration),
                     ),
                     sourcePath = "/tmp/event-type.md",
@@ -971,16 +1070,12 @@ class GraphCompilerTest {
         val result = compiler().compile(
             listOf(
                 timeline(),
-                TimelineDocument(
-                    id = "ThirdAge",
-                    calendarType = "opaque",
-                    sourcePath = "/tmp/third-age.md",
-                ),
+                TimelineDocument(id = "ThirdAge", sourcePath = "/tmp/third-age.md"),
                 NodeTypeDocument(
                     id = "Event",
                     props = mapOf(
-                        "intervalAny" to PropSchema(PropType.interval, timeline = "any"),
-                        "intervalList" to PropSchema(PropType.interval, timelines = listOf("CommonEra", "ThirdAge")),
+                        "intervalAny" to PropSchema(PropType.interval, timeline = TimelineSelector.Any),
+                        "intervalList" to PropSchema(PropType.interval, timelines = listOf(TimelineSelector.Id("CommonEra"), TimelineSelector.Id("ThirdAge"))),
                     ),
                     sourcePath = "/tmp/event-type.md",
                 ),
@@ -1017,8 +1112,8 @@ class GraphCompilerTest {
                     props = mapOf(
                         "name" to PropSchema(PropType.integer),
                         "textMissingDefault" to PropSchema(PropType.text),
-                        "preciseInstant" to PropSchema(PropType.instant, timeline = "CommonEra"),
-                        "anyInstant" to PropSchema(PropType.instant, timeline = "any"),
+                        "preciseInstant" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("CommonEra")),
+                        "anyInstant" to PropSchema(PropType.instant, timeline = TimelineSelector.Any),
                     ),
                     sourcePath = "/tmp/child.md",
                 ),
@@ -1049,7 +1144,7 @@ class GraphCompilerTest {
         assertTrue(result.diagnostics.any { "Invalid refinement for prop name" in it.message })
         assertTrue(result.diagnostics.any { "textMissingDefault text map must define default" in it.message })
         assertEquals("day", (result.nodes.single().props.getValue("preciseInstant") as InstantValue).precision)
-        assertEquals("month", (result.nodes.single().props.getValue("anyInstant") as InstantValue).precision)
+        assertEquals(null, (result.nodes.single().props.getValue("anyInstant") as InstantValue).precision)
     }
 
     @Test
@@ -1089,14 +1184,13 @@ class GraphCompilerTest {
                 TimelineDocument(
                     id = "CommonEraNarrow",
                     extends = listOf("CommonEra"),
-                    calendarType = "gregorian",
                     sourcePath = "/tmp/common-era-narrow.md",
                 ),
                 NodeTypeDocument(
                     id = "Event",
                     props = mapOf(
-                        "parentAllowed" to PropSchema(PropType.instant, timeline = "CommonEra"),
-                        "childOnly" to PropSchema(PropType.instant, timeline = "CommonEraNarrow"),
+                        "parentAllowed" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("CommonEra")),
+                        "childOnly" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("CommonEraNarrow")),
                     ),
                     sourcePath = "/tmp/event-type.md",
                 ),
@@ -1134,27 +1228,316 @@ class GraphCompilerTest {
                 TimelineDocument(
                     id = "BrokenChild",
                     extends = listOf("CommonEra"),
-                    calendarType = "gregorian",
-                    units = listOf("month", "day"),
+                    timecode = TimecodeSchema(TimecodeType.tuple),
                     sourcePath = "/tmp/broken-child.md",
                 ),
             ),
         )
 
-        assertTrue(result.diagnostics.any { "unit structure" in it.message })
+        assertTrue(result.diagnostics.any { "cannot change timecode schema" in it.message })
+    }
+
+    @Test
+    fun `mapped timeline selector accepts a timeline that maps to target`() {
+        val result = compiler().compile(
+            listOf(
+                timeline(),
+                TimelineDocument(
+                    id = "ThirdAge",
+                    timecode = TimecodeSchema(TimecodeType.number),
+                    mappings = listOf(OffsetTimelineMapping("CommonEra", offset = 1)),
+                    sourcePath = "/tmp/third-age.md",
+                ),
+                NodeTypeDocument(
+                    id = "Event",
+                    props = mapOf(
+                        "mapped" to PropSchema(PropType.instant, timeline = TimelineSelector.Mapped("CommonEra")),
+                    ),
+                    sourcePath = "/tmp/event-type.md",
+                ),
+                NodeDocument(
+                    id = "event",
+                    type = "Event",
+                    props = mapOf(
+                        "mapped" to RawObject(mapOf("timeline" to RawString("ThirdAge"), "value" to RawString("TA 3018"))),
+                    ),
+                    sourcePath = "/tmp/event.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.diagnostics.none { it.severity == Severity.Error }, result.diagnostics.joinToString("\n") { it.message })
+        assertEquals("ThirdAge", (result.nodes.single().props.getValue("mapped") as InstantValue).timeline)
+    }
+
+    @Test
+    fun `mapped timeline selector also accepts exact target and its subtimelines`() {
+        val result = compiler().compile(
+            listOf(
+                timeline(),
+                TimelineDocument(
+                    id = "CommonEraNarrow",
+                    extends = listOf("CommonEra"),
+                    sourcePath = "/tmp/common-era-narrow.md",
+                ),
+                NodeTypeDocument(
+                    id = "Event",
+                    props = mapOf(
+                        "exact" to PropSchema(PropType.instant, timeline = TimelineSelector.Mapped("CommonEra")),
+                        "sub" to PropSchema(PropType.instant, timeline = TimelineSelector.Mapped("CommonEra")),
+                    ),
+                    sourcePath = "/tmp/event-type.md",
+                ),
+                NodeDocument(
+                    id = "event",
+                    type = "Event",
+                    props = mapOf(
+                        "exact" to RawObject(mapOf("timeline" to RawString("CommonEra"), "value" to RawString("AD 2024-01-01"))),
+                        "sub" to RawObject(mapOf("timeline" to RawString("CommonEraNarrow"), "value" to RawString("AD 2024-01-01"))),
+                    ),
+                    sourcePath = "/tmp/event.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.diagnostics.none { it.severity == Severity.Error }, result.diagnostics.joinToString("\n") { it.message })
+        assertEquals("CommonEra", (result.nodes.single().props.getValue("exact") as InstantValue).timeline)
+        assertEquals("CommonEraNarrow", (result.nodes.single().props.getValue("sub") as InstantValue).timeline)
+    }
+
+    @Test
+    fun `mapped timeline selector rejects an unrelated timeline`() {
+        val result = compiler().compile(
+            listOf(
+                timeline(),
+                TimelineDocument(
+                    id = "FourthAge",
+                    timecode = TimecodeSchema(TimecodeType.number),
+                    sourcePath = "/tmp/fourth-age.md",
+                ),
+                NodeTypeDocument(
+                    id = "Event",
+                    props = mapOf(
+                        "mapped" to PropSchema(PropType.instant, timeline = TimelineSelector.Mapped("CommonEra")),
+                    ),
+                    sourcePath = "/tmp/event-type.md",
+                ),
+                NodeDocument(
+                    id = "event",
+                    type = "Event",
+                    props = mapOf(
+                        "mapped" to RawObject(mapOf("timeline" to RawString("FourthAge"), "value" to RawString("FA 1"))),
+                    ),
+                    sourcePath = "/tmp/event.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.diagnostics.any { "mapped timeline FourthAge is not allowed" in it.message })
+    }
+
+    @Test
+    fun `timelines list combines identifier and mapped selectors`() {
+        val result = compiler().compile(
+            listOf(
+                timeline(),
+                TimelineDocument(
+                    id = "ThirdAge",
+                    timecode = TimecodeSchema(TimecodeType.number),
+                    sourcePath = "/tmp/third-age.md",
+                ),
+                TimelineDocument(
+                    id = "Julian",
+                    timecode = TimecodeSchema(TimecodeType.number),
+                    mappings = listOf(OffsetTimelineMapping("CommonEra", offset = 0)),
+                    sourcePath = "/tmp/julian.md",
+                ),
+                NodeTypeDocument(
+                    id = "Event",
+                    props = mapOf(
+                        "viaId" to PropSchema(
+                            PropType.instant,
+                            timelines = listOf(TimelineSelector.Id("ThirdAge"), TimelineSelector.Mapped("CommonEra")),
+                        ),
+                        "viaMapped" to PropSchema(
+                            PropType.instant,
+                            timelines = listOf(TimelineSelector.Id("ThirdAge"), TimelineSelector.Mapped("CommonEra")),
+                        ),
+                    ),
+                    sourcePath = "/tmp/event-type.md",
+                ),
+                NodeDocument(
+                    id = "event",
+                    type = "Event",
+                    props = mapOf(
+                        "viaId" to RawObject(mapOf("timeline" to RawString("ThirdAge"), "value" to RawString("TA 3018"))),
+                        "viaMapped" to RawObject(mapOf("timeline" to RawString("Julian"), "value" to RawString("J 1"))),
+                    ),
+                    sourcePath = "/tmp/event.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.diagnostics.none { it.severity == Severity.Error }, result.diagnostics.joinToString("\n") { it.message })
+        assertEquals("ThirdAge", (result.nodes.single().props.getValue("viaId") as InstantValue).timeline)
+        assertEquals("Julian", (result.nodes.single().props.getValue("viaMapped") as InstantValue).timeline)
+    }
+
+    @Test
+    fun `mapped timeline selector with unknown target reports reference error`() {
+        val result = compiler().compile(
+            listOf(
+                timeline(),
+                NodeTypeDocument(
+                    id = "Event",
+                    props = mapOf(
+                        "mapped" to PropSchema(PropType.instant, timeline = TimelineSelector.Mapped("NoSuch")),
+                    ),
+                    sourcePath = "/tmp/event-type.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.diagnostics.any { "Unknown Timeline: NoSuch" in it.message && it.category == DiagnosticCategory.ReferenceError })
+    }
+
+    @Test
+    fun `timeline mappings do not allow a value without a mapped selector`() {
+        val result = compiler().compile(
+            listOf(
+                timeline(),
+                TimelineDocument(
+                    id = "ThirdAge",
+                    timecode = TimecodeSchema(TimecodeType.number),
+                    mappings = listOf(OffsetTimelineMapping("CommonEra", offset = 1)),
+                    sourcePath = "/tmp/third-age.md",
+                ),
+                NodeTypeDocument(
+                    id = "Event",
+                    props = mapOf(
+                        "plain" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("CommonEra")),
+                    ),
+                    sourcePath = "/tmp/event-type.md",
+                ),
+                NodeDocument(
+                    id = "event",
+                    type = "Event",
+                    props = mapOf(
+                        "plain" to RawObject(mapOf("timeline" to RawString("ThirdAge"), "value" to RawString("TA 3018"))),
+                    ),
+                    sourcePath = "/tmp/event.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.diagnostics.any { "plain timeline ThirdAge is not allowed" in it.message })
+    }
+
+    @Test
+    fun `mapped timeline selector does not fix a concrete timeline for the bare string shortcut`() {
+        val result = compiler().compile(
+            listOf(
+                timeline(),
+                NodeTypeDocument(
+                    id = "Event",
+                    props = mapOf(
+                        "mapped" to PropSchema(PropType.instant, timeline = TimelineSelector.Mapped("CommonEra")),
+                    ),
+                    sourcePath = "/tmp/event-type.md",
+                ),
+                NodeDocument(
+                    id = "event",
+                    type = "Event",
+                    props = mapOf("mapped" to RawString("AD 2024-01-01")),
+                    sourcePath = "/tmp/event.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.diagnostics.any { "mapped instant missing timeline" in it.message })
+    }
+
+    @Test
+    fun `mapped timeline selector is enforced for duration values`() {
+        val result = compiler().compile(
+            listOf(
+                timeline(),
+                TimelineDocument(
+                    id = "ThirdAge",
+                    timecode = TimecodeSchema(TimecodeType.number),
+                    mappings = listOf(OffsetTimelineMapping("CommonEra", offset = 1)),
+                    sourcePath = "/tmp/third-age.md",
+                ),
+                TimelineDocument(
+                    id = "FourthAge",
+                    timecode = TimecodeSchema(TimecodeType.number),
+                    sourcePath = "/tmp/fourth-age.md",
+                ),
+                NodeTypeDocument(
+                    id = "Event",
+                    props = mapOf(
+                        "lifespan" to PropSchema(PropType.duration, timeline = TimelineSelector.Mapped("CommonEra")),
+                    ),
+                    sourcePath = "/tmp/event-type.md",
+                ),
+                NodeDocument(
+                    id = "event",
+                    type = "Event",
+                    props = mapOf(
+                        "lifespan" to RawObject(
+                            mapOf(
+                                "unit" to RawString("year"),
+                                "value" to RawInteger(3),
+                                "timeline" to RawString("ThirdAge"),
+                            ),
+                        ),
+                    ),
+                    sourcePath = "/tmp/event.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.diagnostics.none { it.severity == Severity.Error }, result.diagnostics.joinToString("\n") { it.message })
+        assertEquals("ThirdAge", (result.nodes.single().props.getValue("lifespan") as DurationValue).timeline)
+
+        val rejected = compiler().compile(
+            listOf(
+                timeline(),
+                TimelineDocument(
+                    id = "FourthAge",
+                    timecode = TimecodeSchema(TimecodeType.number),
+                    sourcePath = "/tmp/fourth-age.md",
+                ),
+                NodeTypeDocument(
+                    id = "Event",
+                    props = mapOf(
+                        "lifespan" to PropSchema(PropType.duration, timeline = TimelineSelector.Mapped("CommonEra")),
+                    ),
+                    sourcePath = "/tmp/event-type.md",
+                ),
+                NodeDocument(
+                    id = "event",
+                    type = "Event",
+                    props = mapOf(
+                        "lifespan" to RawObject(
+                            mapOf(
+                                "unit" to RawString("year"),
+                                "value" to RawInteger(3),
+                                "timeline" to RawString("FourthAge"),
+                            ),
+                        ),
+                    ),
+                    sourcePath = "/tmp/event.md",
+                ),
+            ),
+        )
+
+        assertTrue(rejected.diagnostics.any { "lifespan timeline FourthAge is not allowed" in it.message })
     }
 
     private fun timeline() = TimelineDocument(
         id = "CommonEra",
-        calendarType = "gregorian",
-        continuous = true,
-        yearZero = false,
-        defaultEra = "AD",
-        eras = mapOf(
-            "AD" to EraSchema("forward"),
-            "BC" to EraSchema("backward", before = "AD"),
-        ),
-        units = listOf("year", "month", "day"),
+        timecode = TimecodeSchema(TimecodeType.number, TimecodeDirection.ascending),
         sourcePath = "/tmp/timeline.md",
     )
 
@@ -1162,7 +1545,7 @@ class GraphCompilerTest {
         id = "Person",
         props = mapOf(
             "name" to PropSchema(PropType.text, required = true),
-            "birthDate" to PropSchema(PropType.instant, timeline = "CommonEra"),
+            "birthDate" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("CommonEra")),
         ),
         sourcePath = "/tmp/person.md",
     )
@@ -1177,7 +1560,7 @@ class GraphCompilerTest {
         id = "friendOf",
         from = listOf("Person"),
         to = listOf("Person"),
-        props = mapOf("since" to PropSchema(PropType.instant, timeline = "CommonEra")),
+        props = mapOf("since" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("CommonEra"))),
         sourcePath = "/tmp/friend.md",
     )
 }

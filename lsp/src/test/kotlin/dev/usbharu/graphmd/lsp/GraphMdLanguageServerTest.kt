@@ -3,12 +3,14 @@ package dev.usbharu.graphmd.lsp
 import dev.usbharu.graphmd.core.GraphDocumentAnalyzer
 import dev.usbharu.graphmd.core.GraphCompiler
 import dev.usbharu.graphmd.core.NodeDocument
+import dev.usbharu.graphmd.core.NodeTypeDocument
 import dev.usbharu.graphmd.core.PropIndex
 import dev.usbharu.graphmd.core.PropType
 import dev.usbharu.graphmd.core.ReferenceTargetKind
 import dev.usbharu.graphmd.core.ResolvedPropSchema
 import dev.usbharu.graphmd.core.DocumentKind
 import dev.usbharu.graphmd.core.SourceDocument
+import dev.usbharu.graphmd.core.TimelineSelector
 import org.eclipse.lsp4j.CompletionParams
 import org.eclipse.lsp4j.DidOpenTextDocumentParams
 import org.eclipse.lsp4j.InitializeParams
@@ -76,7 +78,7 @@ class GraphMdLanguageServerTest {
     fun `strict props completion suggests schema keys and timeline ids`() {
         val schema = mapOf(
             "name" to ResolvedPropSchema(type = PropType.string, index = PropIndex.exact),
-            "birthDate" to ResolvedPropSchema(type = PropType.instant, index = PropIndex.range, timeline = "CommonEra"),
+            "birthDate" to ResolvedPropSchema(type = PropType.instant, index = PropIndex.range, timeline = TimelineSelector.Id("CommonEra")),
         )
         val keyResolver = PropsCompletionContextResolver(
             text = """
@@ -311,7 +313,7 @@ class GraphMdLanguageServerTest {
     fun `front matter completion suggests node props keys and timeline values`() {
         val schema = mapOf(
             "name" to ResolvedPropSchema(type = PropType.string, index = PropIndex.exact),
-            "birthDate" to ResolvedPropSchema(type = PropType.instant, index = PropIndex.range, timeline = "CommonEra"),
+            "birthDate" to ResolvedPropSchema(type = PropType.instant, index = PropIndex.range, timeline = TimelineSelector.Id("CommonEra")),
         )
         val propKeyText = """
             ---
@@ -354,6 +356,67 @@ class GraphMdLanguageServerTest {
             nodePropsSchema = schema,
         ).resolve()?.map { it.label }.orEmpty()
         assertEquals(listOf("CommonEra"), timelineItems)
+
+        val intervalSchema = mapOf(
+            "activeDuring" to ResolvedPropSchema(type = PropType.interval, index = PropIndex.range, timeline = TimelineSelector.Id("CommonEra")),
+        )
+        val intervalKeyText = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            props:
+              activeDuring:
+                
+            ---
+        """.trimIndent()
+        val intervalKeyItems = FrontMatterCompletionResolver(
+            text = intervalKeyText,
+            offset = intervalKeyText.indexOf("\n    \n") + 5,
+            parsedDocument = NodeDocument(id = "alice", type = "Person", sourcePath = "/tmp/alice.md"),
+            nodeTypeIds = listOf("Person"),
+            relTypeIds = emptyList(),
+            timelineIds = listOf("CommonEra"),
+            nodePropsSchema = intervalSchema,
+        ).resolve()?.map { it.label }.orEmpty()
+        assertTrue("fromTimecode" !in intervalKeyItems)
+        assertTrue("fromPrecision" !in intervalKeyItems)
+    }
+
+    @Test
+    fun `front matter completion offers mapped selector for schema-level timeline`() {
+        val timelineText = """
+            ---
+            id: Event
+            kind: NodeType
+            props:
+              happenedAt:
+                type: instant
+                timeline: 
+            ---
+        """.trimIndent()
+        val labels = FrontMatterCompletionResolver(
+            text = timelineText,
+            offset = timelineText.indexOf("timeline: ") + "timeline: ".length,
+            parsedDocument = NodeTypeDocument(id = "Event", sourcePath = "/tmp/event.md"),
+            nodeTypeIds = emptyList(),
+            relTypeIds = emptyList(),
+            timelineIds = listOf("CommonEra", "ThirdAge"),
+        ).resolve()?.map { it.label }.orEmpty()
+        assertTrue("CommonEra" in labels)
+        assertTrue("ThirdAge" in labels)
+        assertTrue("any" in labels)
+        assertTrue("mapped: CommonEra" in labels)
+        assertTrue("mapped: ThirdAge" in labels)
+        val mapped = FrontMatterCompletionResolver(
+            text = timelineText,
+            offset = timelineText.indexOf("timeline: ") + "timeline: ".length,
+            parsedDocument = NodeTypeDocument(id = "Event", sourcePath = "/tmp/event.md"),
+            nodeTypeIds = emptyList(),
+            relTypeIds = emptyList(),
+            timelineIds = listOf("CommonEra", "ThirdAge"),
+        ).resolve()?.firstOrNull { it.label == "mapped: CommonEra" }
+        assertEquals("{ mapped: CommonEra }", mapped?.insertText)
     }
 
     @Test
@@ -378,36 +441,110 @@ class GraphMdLanguageServerTest {
             ---
             id: t
             kind: Timeline
-            cal
+            tim
             ---
         """.trimIndent()
         val topLevelItems = FrontMatterCompletionResolver(
             text = topLevelText,
-            offset = topLevelText.indexOf("cal") + 3,
+            offset = topLevelText.indexOf("tim") + 3,
             parsedDocument = null,
             nodeTypeIds = emptyList(),
             relTypeIds = emptyList(),
             timelineIds = listOf("CommonEra"),
         ).resolve()?.map { it.label }.orEmpty()
-        assertTrue("calendar" in topLevelItems)
+        assertTrue("timecode" in topLevelItems)
 
-        val nestedText = """
+        val timecodeTopLevelText = """
             ---
             id: t
             kind: Timeline
-            calendar:
-              type: gr
+            tim
             ---
         """.trimIndent()
-        val nestedItems = FrontMatterCompletionResolver(
-            text = nestedText,
-            offset = nestedText.indexOf("gr") + 2,
+        val timecodeTopLevelItems = FrontMatterCompletionResolver(
+            text = timecodeTopLevelText,
+            offset = timecodeTopLevelText.indexOf("tim") + 3,
             parsedDocument = null,
             nodeTypeIds = emptyList(),
             relTypeIds = emptyList(),
             timelineIds = listOf("CommonEra"),
         ).resolve()?.map { it.label }.orEmpty()
-        assertTrue("gregorian" in nestedItems)
+        assertTrue("timecode" in timecodeTopLevelItems)
+
+        val timelineBlankTopLevelText = """
+            ---
+            id: t
+            kind: Timeline
+            
+            ---
+        """.trimIndent()
+        val timelineBlankTopLevelItems = FrontMatterCompletionResolver(
+            text = timelineBlankTopLevelText,
+            offset = timelineBlankTopLevelText.indexOf("\n\n") + 1,
+            parsedDocument = null,
+            nodeTypeIds = emptyList(),
+            relTypeIds = emptyList(),
+            timelineIds = listOf("CommonEra"),
+        ).resolve()?.map { it.label }.orEmpty()
+        assertTrue("mapping" !in timelineBlankTopLevelItems)
+
+        val timecodeNestedText = """
+            ---
+            id: t
+            kind: Timeline
+            timecode:
+              type: tu
+            ---
+        """.trimIndent()
+        val timecodeNestedItems = FrontMatterCompletionResolver(
+            text = timecodeNestedText,
+            offset = timecodeNestedText.indexOf("tu") + 2,
+            parsedDocument = null,
+            nodeTypeIds = emptyList(),
+            relTypeIds = emptyList(),
+            timelineIds = listOf("CommonEra"),
+        ).resolve()?.map { it.label }.orEmpty()
+        assertTrue("tuple" in timecodeNestedItems)
+
+        val timecodeKeyText = """
+            ---
+            id: t
+            kind: Timeline
+            timecode:
+              type: tuple
+              
+            ---
+        """.trimIndent()
+        val timecodeKeyItems = FrontMatterCompletionResolver(
+            text = timecodeKeyText,
+            offset = timecodeKeyText.indexOf("\n    \n") + 5,
+            parsedDocument = null,
+            nodeTypeIds = emptyList(),
+            relTypeIds = emptyList(),
+            timelineIds = listOf("CommonEra"),
+        ).resolve()?.map { it.label }.orEmpty()
+        assertTrue("direction" !in timecodeKeyItems)
+
+        val mappingKeyText = """
+            ---
+            id: t
+            kind: Timeline
+            mappings:
+              - kind: table
+                ent
+            ---
+        """.trimIndent()
+        val mappingKeyItems = FrontMatterCompletionResolver(
+            text = mappingKeyText,
+            offset = mappingKeyText.indexOf("ent") + 3,
+            parsedDocument = null,
+            nodeTypeIds = emptyList(),
+            relTypeIds = emptyList(),
+            timelineIds = listOf("CommonEra"),
+        ).resolve()?.map { it.label }.orEmpty()
+        assertTrue("entries" in mappingKeyItems)
+        assertTrue("unit" !in mappingKeyItems)
+        assertTrue("offset" !in mappingKeyItems)
 
         val propKeyText = """
             ---

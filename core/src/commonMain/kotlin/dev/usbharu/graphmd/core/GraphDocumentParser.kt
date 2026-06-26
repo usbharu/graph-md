@@ -115,21 +115,24 @@ class GraphDocumentParser {
         sourcePath: String,
         diagnostics: MutableList<Diagnostic>,
     ): GraphDocument? {
-        val calendar = root.map["calendar"] as? YamlMap ?: run {
-            diagnostics += schemaError("Timeline calendar MUST be a mapping", sourcePath, id)
-            return null
+        val allowedFields = setOf("id", "kind", "extends", "timecode", "mappings", "props")
+        root.map.keys.filterNot { it in allowedFields }.forEach { field ->
+            diagnostics += schemaError("Unknown top-level field: $field", sourcePath, id)
         }
-        val calendarType = calendar.requireString("type", sourcePath, diagnostics, id) ?: return null
+        val mappings = when (val rawMappings = root.map["mappings"]?.takeUnless { it == YamlNull }) {
+            null -> emptyList()
+            is YamlList -> rawMappings.values.mapNotNull { parseTimelineMapping(it, sourcePath, diagnostics, id) }
+            else -> {
+                diagnostics += schemaError("mappings MUST be a list", sourcePath, id)
+                emptyList()
+            }
+        }
         return TimelineDocument(
             id = id,
             extends = root.stringList("extends", sourcePath, diagnostics, id) ?: emptyList(),
-            calendarType = calendarType,
-            continuous = root.boolean("continuous", sourcePath, diagnostics, id),
-            yearZero = root.boolean("yearZero", sourcePath, diagnostics, id),
-            defaultEra = root.string("defaultEra", sourcePath, diagnostics, id),
-            eras = root.map["eras"]?.let { parseEraSchemaMap(it, sourcePath, diagnostics, id) } ?: emptyMap(),
-            units = root.stringList("units", sourcePath, diagnostics, id) ?: emptyList(),
-            mapping = root.map["mapping"]?.let { parseTimelineMapping(it, sourcePath, diagnostics, id) },
+            timecode = root.map["timecode"]?.takeUnless { it == YamlNull }?.let { parseTimecodeSchema(it, sourcePath, diagnostics, id) },
+            mappings = mappings,
+            props = root.map["props"]?.let { parseRawObjectEntries(it, sourcePath, diagnostics, id, "props") } ?: emptyMap(),
             body = body,
             sourcePath = sourcePath,
         )
@@ -179,37 +182,16 @@ class GraphDocumentParser {
             required = map.boolean("required", sourcePath, diagnostics, documentId) ?: false,
             default = map.map["default"]?.let { parseRawValue(it) },
             index = index,
-            timeline = map.string("timeline", sourcePath, diagnostics, documentId),
-            timelines = map.stringList("timelines", sourcePath, diagnostics, documentId),
+            timeline = map.map["timeline"]?.let {
+                parseTimelineSelector(it, sourcePath, diagnostics, documentId, "$fieldName.timeline")
+            },
+            timelines = map.map["timelines"]?.let {
+                parseTimelineSelectors(it, sourcePath, diagnostics, documentId, "$fieldName.timelines")
+            },
             items = map.map["items"]?.let { parsePropSchema(it, sourcePath, diagnostics, documentId, "$fieldName.items") },
             properties = map.map["properties"]?.let { parsePropSchemaMap(it, sourcePath, diagnostics, documentId, "$fieldName.properties") }
                 ?: emptyMap(),
         )
-    }
-
-    private fun parseEraSchemaMap(
-        value: YamlValue,
-        sourcePath: String,
-        diagnostics: MutableList<Diagnostic>,
-        documentId: String,
-    ): Map<String, EraSchema> {
-        val map = value as? YamlMap ?: run {
-            diagnostics += schemaError("eras MUST be a mapping", sourcePath, documentId)
-            return emptyMap()
-        }
-        return map.map.mapValues { (name, eraValue) ->
-            val era = eraValue as? YamlMap ?: run {
-                diagnostics += schemaError("eras.$name MUST be a mapping", sourcePath, documentId)
-                return@mapValues EraSchema(direction = "forward")
-            }
-            EraSchema(
-                direction = era.requireString("direction", sourcePath, diagnostics, documentId) ?: "forward",
-                before = era.string("before", sourcePath, diagnostics, documentId),
-                after = era.string("after", sourcePath, diagnostics, documentId),
-                start = era.string("start", sourcePath, diagnostics, documentId),
-                end = era.string("end", sourcePath, diagnostics, documentId),
-            )
-        }
     }
 
     private fun parseTimelineMapping(
@@ -226,7 +208,7 @@ class GraphDocumentParser {
             "none" -> NoTimelineMapping()
             "offset" -> {
                 val to = map.requireString("to", sourcePath, diagnostics, documentId) ?: return null
-                val unit = map.requireString("unit", sourcePath, diagnostics, documentId) ?: return null
+                val unit = map.string("unit", sourcePath, diagnostics, documentId)
                 val offset = map.long("offset", sourcePath, diagnostics, documentId)?.toInt() ?: return null
                 OffsetTimelineMapping(to, unit, offset)
             }
@@ -243,9 +225,16 @@ class GraphDocumentParser {
                             diagnostics += schemaError("mapping.entries items MUST be mappings", sourcePath, documentId)
                             return@mapNotNull null
                         }
-                        val from = entryMap.requireString("from", sourcePath, diagnostics, documentId) ?: return@mapNotNull null
-                        val toValue = entryMap.requireString("to", sourcePath, diagnostics, documentId) ?: return@mapNotNull null
-                        TableTimelineMappingEntry(from = from, to = toValue)
+                        val from = parseMappingEndpoint(entryMap.map["from"], "mapping.entries.from", sourcePath, diagnostics, documentId)
+                            ?: return@mapNotNull null
+                        val toValue = parseMappingEndpoint(entryMap.map["to"], "mapping.entries.to", sourcePath, diagnostics, documentId)
+                            ?: return@mapNotNull null
+                        TableTimelineMappingEntry(
+                            from = from.first,
+                            to = toValue.first,
+                            fromTimecode = from.second,
+                            toTimecode = toValue.second,
+                        )
                     },
                 )
             }
@@ -253,6 +242,96 @@ class GraphDocumentParser {
             else -> {
                 diagnostics += schemaError("Unknown mapping kind: $kind", sourcePath, documentId)
                 null
+            }
+        }
+    }
+
+    private fun parseTimecodeSchema(
+        value: YamlValue,
+        sourcePath: String,
+        diagnostics: MutableList<Diagnostic>,
+        documentId: String,
+    ): TimecodeSchema? {
+        val map = value as? YamlMap ?: run {
+            diagnostics += schemaError("timecode MUST be a mapping", sourcePath, documentId)
+            return null
+        }
+        val type = map.requireString("type", sourcePath, diagnostics, documentId)?.let {
+            runCatching { TimecodeType.valueOf(it) }.getOrElse {
+                diagnostics += schemaError("Unknown timecode type: $it", sourcePath, documentId)
+                null
+            }
+        } ?: return null
+        val direction = map.string("direction", sourcePath, diagnostics, documentId)?.let {
+            runCatching { TimecodeDirection.valueOf(it) }.getOrElse {
+                diagnostics += schemaError("Unknown timecode direction: $it", sourcePath, documentId)
+                null
+            }
+        }
+        if (type == TimecodeType.tuple && direction != null) {
+            diagnostics += schemaError("timecode.direction is only valid for timecode.type: number", sourcePath, documentId)
+        }
+        return TimecodeSchema(type = type, direction = direction)
+    }
+
+    private fun parseMappingEndpoint(
+        value: YamlValue?,
+        fieldName: String,
+        sourcePath: String,
+        diagnostics: MutableList<Diagnostic>,
+        documentId: String,
+    ): Pair<String, TimecodeValue?>? {
+        return when (value) {
+            is YamlString -> value.value to null
+            is YamlMap -> {
+                val mappedValue = value.requireString("value", sourcePath, diagnostics, documentId) ?: return null
+                mappedValue to parseTimecodeValue(value.map["timecode"], fieldName, sourcePath, diagnostics, documentId)
+            }
+            null -> {
+                diagnostics += schemaError("$fieldName is required", sourcePath, documentId)
+                null
+            }
+            else -> {
+                diagnostics += schemaError("$fieldName MUST be a string or mapping", sourcePath, documentId)
+                null
+            }
+        }
+    }
+
+    private fun parseTimecodeValue(
+        value: YamlValue?,
+        fieldName: String,
+        sourcePath: String,
+        diagnostics: MutableList<Diagnostic>,
+        documentId: String,
+    ): TimecodeValue? {
+        return when (value) {
+            null -> null
+            is YamlInteger -> NumberTimecode(value.value.toDouble())
+            is YamlNumber -> NumberTimecode(value.value)
+            is YamlList -> {
+                val items = value.values.mapNotNull { item ->
+                    when (item) {
+                        is YamlInteger -> item.value.toDouble()
+                        is YamlNumber -> item.value
+                        else -> {
+                            diagnostics += schemaError("$fieldName MUST contain only numbers", sourcePath, documentId)
+                            null
+                        }
+                    }
+                }
+                if (items.size != value.values.size) null else TupleTimecode(items)
+            }
+            else -> {
+                diagnostics += schemaError("$fieldName MUST be a number or number tuple", sourcePath, documentId)
+                null
+            }
+        }?.takeIf { timecode ->
+            when (timecode) {
+                is NumberTimecode -> timecode.value.isFinite()
+                is TupleTimecode -> timecode.values.all(Double::isFinite)
+            }.also { valid ->
+                if (!valid) diagnostics += schemaError("$fieldName MUST be finite", sourcePath, documentId)
             }
         }
     }
@@ -602,5 +681,55 @@ private fun YamlMap.stringList(
             diagnostics += Diagnostic(DiagnosticCategory.SchemaError, Severity.Error, "$key MUST be a list of strings", SourceInfo(sourcePath, documentId))
             null
         }
+    }
+}
+
+private fun parseTimelineSelector(
+    value: YamlValue,
+    sourcePath: String,
+    diagnostics: MutableList<Diagnostic>,
+    documentId: String?,
+    fieldName: String,
+): TimelineSelector? {
+    return when (value) {
+        is YamlString -> if (value.value == "any") TimelineSelector.Any else TimelineSelector.Id(value.value)
+        is YamlMap -> {
+            val mapped = (value.map["mapped"] as? YamlString)?.value
+            if (mapped == null) {
+                diagnostics += Diagnostic(
+                    DiagnosticCategory.SchemaError,
+                    Severity.Error,
+                    "$fieldName selector mapping MUST have a string 'mapped' field",
+                    SourceInfo(sourcePath, documentId),
+                )
+                null
+            } else {
+                TimelineSelector.Mapped(mapped)
+            }
+        }
+        else -> {
+            diagnostics += Diagnostic(
+                DiagnosticCategory.SchemaError,
+                Severity.Error,
+                "$fieldName MUST be a Timeline identifier, 'any', or a { mapped: Identifier } mapping",
+                SourceInfo(sourcePath, documentId),
+            )
+            null
+        }
+    }
+}
+
+private fun parseTimelineSelectors(
+    value: YamlValue,
+    sourcePath: String,
+    diagnostics: MutableList<Diagnostic>,
+    documentId: String?,
+    fieldName: String,
+): List<TimelineSelector>? {
+    return when (value) {
+        is YamlList -> value.values.mapNotNull {
+            parseTimelineSelector(it, sourcePath, diagnostics, documentId, fieldName)
+        }
+        else -> parseTimelineSelector(value, sourcePath, diagnostics, documentId, fieldName)?.let(::listOf)
     }
 }

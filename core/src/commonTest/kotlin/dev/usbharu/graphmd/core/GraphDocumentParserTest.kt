@@ -81,17 +81,11 @@ class GraphDocumentParserTest {
                 ---
                 id: CommonEra
                 kind: Timeline
-                calendar:
-                  type: gregorian
-                continuous: true
-                yearZero: false
-                defaultEra: AD
-                eras:
-                  AD:
-                    direction: forward
-                units: [year, month, day]
-                mapping:
-                  kind: none
+                timecode:
+                  type: number
+                  direction: ascending
+                mappings:
+                  - kind: none
                 ---
             """.trimIndent(),
             "/tmp/timeline.md",
@@ -102,11 +96,138 @@ class GraphDocumentParserTest {
         assertEquals(PropType.text, nodeType.props.getValue("name").type)
         assertNotNull(relType)
         assertEquals(listOf("Person"), relType.from)
-        assertEquals("CommonEra", relType.props.getValue("since").timeline)
+        assertEquals(TimelineSelector.Id("CommonEra"), relType.props.getValue("since").timeline)
         assertNotNull(timeline)
-        assertEquals("gregorian", timeline.calendarType)
-        assertEquals(listOf("year", "month", "day"), timeline.units)
-        assertTrue(timeline.mapping is NoTimelineMapping)
+        assertEquals(TimecodeType.number, timeline.timecode?.type)
+        assertEquals(TimecodeDirection.ascending, timeline.timecode?.direction)
+        assertEquals(1, timeline.mappings.size)
+        assertTrue(timeline.mappings.single() is NoTimelineMapping)
+    }
+
+    @Test
+    fun `parses timeline selector forms including mapped`() {
+        val nodeType = compiler.parseDocument(
+            """
+                ---
+                id: Event
+                kind: NodeType
+                props:
+                  byId:
+                    type: instant
+                    timeline: CommonEra
+                  any:
+                    type: instant
+                    timeline: any
+                  mapped:
+                    type: instant
+                    timeline:
+                      mapped: CommonEra
+                  mixed:
+                    type: instant
+                    timelines:
+                      - ThirdAge
+                      - any
+                      - mapped: CommonEra
+                ---
+            """.trimIndent(),
+            "/tmp/event.md",
+        ).document as? NodeTypeDocument
+
+        assertNotNull(nodeType)
+        assertEquals(TimelineSelector.Id("CommonEra"), nodeType.props.getValue("byId").timeline)
+        assertEquals(TimelineSelector.Any, nodeType.props.getValue("any").timeline)
+        assertEquals(TimelineSelector.Mapped("CommonEra"), nodeType.props.getValue("mapped").timeline)
+        assertEquals(
+            listOf(TimelineSelector.Id("ThirdAge"), TimelineSelector.Any, TimelineSelector.Mapped("CommonEra")),
+            nodeType.props.getValue("mixed").timelines,
+        )
+    }
+
+    @Test
+    fun `parses tuple timecode structures`() {
+        val timeline = compiler.parseDocument(
+            """
+                ---
+                id: ThirdAge
+                kind: Timeline
+                timecode:
+                  type: tuple
+                mappings:
+                  - kind: table
+                    to: CommonEra
+                    entries:
+                      - from:
+                          value: "TA 3018-09-23"
+                          timecode: [3018, 9, 23]
+                        to:
+                          value: "AD 2000-09-23"
+                          timecode: 2000.73
+                ---
+            """.trimIndent(),
+            "/tmp/third-age.md",
+        ).document as? TimelineDocument
+
+        assertNotNull(timeline)
+        assertEquals(TimecodeType.tuple, timeline.timecode?.type)
+        val mapping = timeline.mappings.singleOrNull() as? TableTimelineMapping
+        assertNotNull(mapping)
+        val entry = mapping.entries.single()
+        assertEquals("TA 3018-09-23", entry.from)
+        assertEquals(listOf(3018.0, 9.0, 23.0), (entry.fromTimecode as TupleTimecode).values)
+        assertEquals(2000.73, (entry.toTimecode as NumberTimecode).value)
+    }
+
+    @Test
+    fun `treats empty optional mappings as omitted`() {
+        val timeline = compiler.parseDocument(
+            """
+                ---
+                id: ThirdAge
+                kind: Timeline
+                mappings:
+                ---
+            """.trimIndent(),
+            "/tmp/third-age.md",
+        )
+
+        assertTrue(timeline.diagnostics.isEmpty(), timeline.diagnostics.joinToString("\n") { it.message })
+        assertTrue((timeline.document as? TimelineDocument)?.mappings?.isEmpty() == true)
+    }
+
+    @Test
+    fun `legacy timeline fields are reported as unknown`() {
+        val timeline = compiler.parseDocument(
+            """
+                ---
+                id: ThirdAge
+                kind: Timeline
+                calendar:
+                mapping:
+                  kind: none
+                ---
+            """.trimIndent(),
+            "/tmp/third-age.md",
+        )
+
+        assertTrue(timeline.diagnostics.any { it.message == "Unknown top-level field: calendar" })
+        assertTrue(timeline.diagnostics.any { it.message == "Unknown top-level field: mapping" })
+    }
+
+    @Test
+    fun `missing timecode metadata fields are allowed`() {
+        val timeline = compiler.parseDocument(
+            """
+                ---
+                id: CommonEra
+                kind: Timeline
+                timecode:
+                  type: number
+                ---
+            """.trimIndent(),
+            "/tmp/common-era.md",
+        )
+
+        assertTrue(timeline.diagnostics.isEmpty(), timeline.diagnostics.joinToString("\n") { it.message })
     }
 
     @Test
@@ -140,18 +261,8 @@ class GraphDocumentParserTest {
                         ---
                         id: CommonEra
                         kind: Timeline
-                        calendar:
-                          type: gregorian
-                        continuous: true
-                        yearZero: false
-                        defaultEra: AD
-                        eras:
-                          AD:
-                            direction: forward
-                        units:
-                          - year
-                          - month
-                          - day
+                        timecode:
+                          type: number
                         ---
                     """.trimIndent(),
                     sourcePath = "/tmp/timeline.md",

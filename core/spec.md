@@ -401,43 +401,25 @@ id: Identifier
 kind: Timeline
 extends?: Identifier[]
 
-calendar:
-  type: gregorian | julian | ordinal | custom | opaque
+timecode?:
+  type: number | tuple
+  direction?: ascending | descending
 
-continuous?: boolean
-yearZero?: boolean
-defaultEra?: Identifier
-eras?: Map<Identifier, EraSchema>
-units?: string[]
-mapping?: TimelineMapping
+props?: Map<Identifier, PropValue>
+mappings?: TimelineMapping[]
 ```
+
+If `timecode.type: tuple`, `direction` MUST NOT be specified.
+`direction` is valid only for `timecode.type: number`.
 
 Example:
 
 ```yaml
 id: CommonEra
 kind: Timeline
-
-calendar:
-  type: gregorian
-
-continuous: true
-yearZero: false
-defaultEra: AD
-
-eras:
-  BC:
-    direction: backward
-    before: AD
-
-  AD:
-    direction: forward
-    after: BC
-
-units:
-  - year
-  - month
-  - day
+timecode:
+  type: number
+  direction: ascending
 ```
 
 Example for fictional timeline:
@@ -445,23 +427,8 @@ Example for fictional timeline:
 ```yaml
 id: ThirdAge
 kind: Timeline
-
-calendar:
-  type: custom
-
-continuous: true
-
-eras:
-  TA:
-    direction: forward
-
-units:
-  - year
-  - month
-  - day
-
-mapping:
-  kind: none
+timecode:
+  type: tuple
 ```
 
 ---
@@ -479,16 +446,36 @@ required?: boolean
 default?: PropValue
 index?: none | exact | fulltext | range
 
-timeline?: Identifier | any
-timelines?: Identifier[]
+timeline?: TimelineSelectorValue
+timelines?: TimelineSelectorValue[]
 
 items?: PropSchema
 properties?: Map<Identifier, PropSchema>
 ```
 
+`TimelineSelectorValue` selects which timelines are accepted by a temporal property:
+
+```txt
+TimelineSelectorValue :=
+  Identifier
+  | any
+  | TimelineSelector
+
+TimelineSelector :=
+  mapped: Identifier
+```
+
+An `Identifier` selector matches the named timeline itself and any timeline that directly or indirectly `extends` it.
+
+`any` matches every timeline.
+
+`mapped: Identifier` matches the named timeline, any timeline that `extends` it, and additionally any timeline whose own `mappings` contain an entry with `to` equal to that identifier.
+
+`mappings` do not imply `extends`. They are used for type permission only when a `mapped` selector is present.
+
 If `timeline: B` is required, a value MAY specify timeline `B` or any Timeline that directly or indirectly `extends` `B`.
 
-If `timelines: [B1, B2, ...]` is required, a value MAY specify any listed Timeline or any of their subtimelines.
+If `timelines: [B1, B2, ...]` is required, a value MAY specify any timeline accepted by at least one selector in the list.
 
 If a property requires child Timeline `A`, a value on parent Timeline `B` where `A extends B` MUST NOT be accepted implicitly.
 
@@ -606,6 +593,38 @@ eventTime:
     - CommonEra
     - ThirdAge
 ```
+
+Each entry of `timeline` / `timelines` is a `TimelineSelectorValue`, so an entry MAY also be the literal `any`, or a `TimelineSelector` mapping:
+
+```yaml
+eventTime:
+  type: instant
+  timelines:
+    - ThirdAge
+    - mapped: CommonEra
+```
+
+A single `mapped` selector can also be used directly:
+
+```yaml
+eventTime:
+  type: instant
+  timeline:
+    mapped: CommonEra
+```
+
+### Acceptance rules
+
+```txt
+timeline: X                actual == X  OR  actual extends X
+timeline: any              any timeline
+timeline: { mapped: X }    actual == X  OR  actual extends X
+                           OR  actual has mappings.to == X
+
+timelines: [ s1, s2, ... ] accepted if any selector si accepts actual
+```
+
+`mappings` are not an implicit `extends`. They contribute to acceptance only through a `mapped` selector.
 
 `timeline` and `timelines` MUST NOT be used together.
 
@@ -754,6 +773,7 @@ Shape:
 ```yaml
 timeline: Identifier
 value: string
+timecode?: number | number[]
 precision?: year | month | day | time | custom
 ```
 
@@ -763,10 +783,12 @@ Example:
 birthDate:
   timeline: CommonEra
   value: "AD 2001-04-12"
+  timecode: 2001.279
   precision: day
 ```
 
-If a `PropSchema` for an `instant` fixes `timeline` to a specific Timeline identifier other than `any`,
+If a `PropSchema` for an `instant` fixes `timeline` to a single specific Timeline identifier
+(an `Identifier` selector, not `any`, not `mapped`, and not via `timelines`),
 the value MAY be written as a bare string shortcut.
 
 Example:
@@ -784,7 +806,8 @@ birthDate:
 ```
 
 The shortcut MUST use the timeline specified by the schema.
-If the schema does not fix a concrete timeline, the object form MUST be used.
+If the schema does not fix a single concrete timeline (for example `timeline: any`,
+`timeline: { mapped: ... }`, or a `timelines` list), the object form MUST be used.
 
 ## 8.7 interval
 
@@ -794,8 +817,8 @@ Shape:
 
 ```yaml
 timeline: Identifier
-from?: string | null
-to?: string | null
+from?: string | { value: string, timecode?: number | number[], precision?: Identifier } | null
+to?: string | { value: string, timecode?: number | number[], precision?: Identifier } | null
 fromInclusive?: boolean
 toInclusive?: boolean
 ```
@@ -805,7 +828,10 @@ Example:
 ```yaml
 activeDuring:
   timeline: CommonEra
-  from: "AD 2020-01-01"
+  from:
+    value: "AD 2020-01-01"
+    timecode: 2020.0
+    precision: day
   to: null
   fromInclusive: true
   toInclusive: false
@@ -845,6 +871,11 @@ duration:
 
 `duration` values are not normalized to seconds in v0.1.
 
+When a `timeline` is present on a `duration` value, it MUST resolve to a `Timeline.id`
+and MUST satisfy the property's `timeline` / `timelines` selector, exactly like an
+`instant` or `interval`. A `duration` without a `timeline` is timeline-less and is not
+checked against any selector.
+
 If `timeline` is specified, `unit` SHOULD be included in that timeline's `units`.
 
 ## 8.9 array
@@ -877,32 +908,11 @@ Unknown object keys are allowed unless the implementation provides strict object
 
 # 9. Timeline Details
 
-## 9.1 EraSchema
+The core specification defines only `timecode`, `props`, and `mappings` semantics for timelines.
+Metadata such as calendar systems, eras, year zero rules, and date parsing conventions is out of scope.
+Implementations MAY store such metadata inside `props`, but core does not interpret it.
 
-Schema:
-
-```yaml
-direction: forward | backward
-before?: Identifier
-after?: Identifier
-start?: string
-end?: string
-```
-
-Example:
-
-```yaml
-eras:
-  BC:
-    direction: backward
-    before: AD
-
-  AD:
-    direction: forward
-    after: BC
-```
-
-## 9.2 TimelineMapping
+## 9.1 TimelineMapping
 
 Timeline mappings define comparability between timelines.
 
@@ -919,8 +929,8 @@ table
 No mapping to another timeline.
 
 ```yaml
-mapping:
-  kind: none
+mappings:
+  - kind: none
 ```
 
 Values on this timeline are only comparable within the same timeline.
@@ -930,109 +940,45 @@ Values on this timeline are only comparable within the same timeline.
 A fixed offset mapping.
 
 ```yaml
-mapping:
-  kind: offset
-  to: CommonEra
-  unit: year
-  offset: 645
+mappings:
+  - kind: offset
+    to: CommonEra
+    offset: 645
 ```
 
-`offset` mapping SHOULD be used only when source and target timelines have compatible calendar structures and compatible units.
+`offset` mapping applies only to number timecodes.
+If a value has tuple timecode, core MUST NOT apply `offset` mapping to it.
 
 ### table
 
 A mapping table.
 
 ```yaml
-mapping:
-  kind: table
-  to: CommonEra
-  entries:
-    - from: "TA 3018-09-23"
-      to: "AD 2000-09-23"
+mappings:
+  - kind: table
+    to: CommonEra
+    entries:
+      - from:
+          value: "TA 3018-09-23"
+          timecode: [3018, 9, 23]
+        to:
+          value: "AD 2000-09-23"
+          timecode: 2000.73
 ```
 
-## 9.3 Temporal Literal
+In `table` mapping, timecode MAY be number or tuple.
+Tuple timecodes are exact-match keys only.
+Core does not define tuple ordering, partial match, or tuple normalization.
 
-Temporal values are stored as strings.
+## 9.2 Temporal Literal
 
-For `calendar.type: opaque`, temporal strings are opaque and are not parsed by the core specification.
+Temporal values are opaque strings.
+Core does not define calendar parsing, era handling, year-zero semantics, or date normalization.
 
-For `calendar.type: custom`, parsing is implementation-defined.
+## 9.3 Precision
 
-For `gregorian`, `julian`, and `ordinal`, implementations SHOULD support the following forms:
-
-```txt
-AD 2001
-AD 2001-04
-AD 2001-04-12
-AD 2001-04-12T10:30:00
-AD 2001-04-12T10:30:00+09:00
-BC 100
-BC 100-03
-BC 100-03-10
-```
-
-Recommended grammar:
-
-```txt
-TemporalLiteral :=
-  Era? HSpace? DatePart TimePart?
-
-Era :=
-  Identifier
-
-DatePart :=
-  Year
-  | Year "-" Month
-  | Year "-" Month "-" Day
-
-Year :=
-  [+-]?[0-9]+
-
-Month :=
-  [0-9][0-9]
-
-Day :=
-  [0-9][0-9]
-
-TimePart :=
-  "T" HH ":" MM ":" SS Offset?
-
-Offset :=
-  "Z"
-  | ("+" | "-") HH ":" MM
-```
-
-If a timeline defines `eras`, an era SHOULD be present unless `defaultEra` is defined.
-
-If `defaultEra` is defined and the value omits era, the default era is applied during normalization.
-
-If `yearZero: false`, year `0` is invalid.
-
-## 9.4 Precision
-
-If `precision` is omitted, it is inferred from the temporal literal.
-
-Examples:
-
-```txt
-AD 2001                  -> year
-AD 2001-04               -> month
-AD 2001-04-12            -> day
-AD 2001-04-12T10:30:00   -> time
-```
-
-If `precision` is specified, it MUST match the literal granularity.
-
-Example:
-
-```yaml
-value: "AD 2001"
-precision: day
-```
-
-This is invalid.
+`precision` is optional metadata.
+Core MAY preserve it, but does not infer it and does not validate it against the temporal string.
 
 ---
 
@@ -1657,14 +1603,11 @@ source:
 ```yaml
 id: Identifier
 kind: Timeline
-calendar:
-  type: string
-continuous?: boolean
-yearZero?: boolean
-defaultEra?: Identifier
-eras?: Map<Identifier, EraSchema>
-units?: string[]
-mapping?: TimelineMapping
+timecode?:
+  type: number | tuple
+  direction?: ascending | descending
+props?: Map<Identifier, NormalizedValue>
+mappings?: TimelineMapping[]
 source:
   path: string
 ```
@@ -1804,13 +1747,11 @@ Rules:
 
 ```txt
 If Timeline A directly or indirectly extends Timeline B, A is a subtimeline of B.
-Child inherits calendar, eras, units, and mapping from parent unless explicitly defined.
+Child inherits timecode, props, and mappings from parent unless explicitly defined.
 Subtimeline values keep their original timeline identifier after normalization.
-When comparison, range indexing, or constraint validation requires an ancestor timeline,
-implementations MAY convert to the ancestor's normalized coordinate system.
 Parent timeline values MUST NOT be implicitly assigned where a child timeline is required.
 extends MUST be used only for lossless specialization on the same time axis.
-If base point, unit structure, time direction, or calendar semantics differ, use mapping instead of extends.
+If timecode schema or coordinate semantics differ, use mappings instead of extends.
 ```
 
 ---

@@ -110,13 +110,9 @@ data class RelTypeDocument(
 data class TimelineDocument(
     override val id: String,
     val extends: List<String> = emptyList(),
-    val calendarType: String,
-    val continuous: Boolean? = null,
-    val yearZero: Boolean? = null,
-    val defaultEra: String? = null,
-    val eras: Map<String, EraSchema> = emptyMap(),
-    val units: List<String> = emptyList(),
-    val mapping: TimelineMapping? = null,
+    val timecode: TimecodeSchema? = null,
+    val mappings: List<TimelineMapping> = emptyList(),
+    val props: Map<String, RawValue> = emptyMap(),
     override val body: String = "",
     override val sourcePath: String,
 ) : GraphDocument {
@@ -158,8 +154,8 @@ data class PropSchema(
     val required: Boolean = false,
     val default: RawValue? = null,
     val index: PropIndex? = null,
-    val timeline: String? = null,
-    val timelines: List<String>? = null,
+    val timeline: TimelineSelector? = null,
+    val timelines: List<TimelineSelector>? = null,
     val items: PropSchema? = null,
     val properties: Map<String, PropSchema> = emptyMap(),
 )
@@ -169,19 +165,36 @@ data class ResolvedPropSchema(
     val required: Boolean = false,
     val default: NormalizedValue? = null,
     val index: PropIndex,
-    val timeline: String? = null,
-    val timelines: List<String>? = null,
+    val timeline: TimelineSelector? = null,
+    val timelines: List<TimelineSelector>? = null,
     val items: ResolvedPropSchema? = null,
     val properties: Map<String, ResolvedPropSchema> = emptyMap(),
 )
 
-data class EraSchema(
-    val direction: String,
-    val before: String? = null,
-    val after: String? = null,
-    val start: String? = null,
-    val end: String? = null,
+sealed interface TimelineSelector {
+    data class Id(val id: String) : TimelineSelector
+    data object Any : TimelineSelector
+    data class Mapped(val to: String) : TimelineSelector
+}
+
+enum class TimecodeType {
+    number,
+    tuple,
+}
+
+enum class TimecodeDirection {
+    ascending,
+    descending,
+}
+
+data class TimecodeSchema(
+    val type: TimecodeType,
+    val direction: TimecodeDirection? = null,
 )
+
+sealed interface TimecodeValue
+data class NumberTimecode(val value: Double) : TimecodeValue
+data class TupleTimecode(val values: List<Double>) : TimecodeValue
 
 sealed interface TimelineMapping {
     val kind: String
@@ -190,7 +203,7 @@ sealed interface TimelineMapping {
 data class NoTimelineMapping(override val kind: String = "none") : TimelineMapping
 data class OffsetTimelineMapping(
     val to: String,
-    val unit: String,
+    val unit: String? = null,
     val offset: Int,
     override val kind: String = "offset",
 ) : TimelineMapping
@@ -198,6 +211,8 @@ data class OffsetTimelineMapping(
 data class TableTimelineMappingEntry(
     val from: String,
     val to: String,
+    val fromTimecode: TimecodeValue? = null,
+    val toTimecode: TimecodeValue? = null,
 )
 
 data class TableTimelineMapping(
@@ -219,7 +234,8 @@ data class ObjectValue(val values: Map<String, NormalizedValue>) : NormalizedVal
 data class InstantValue(
     val timeline: String,
     val value: String,
-    val precision: String,
+    val precision: String? = null,
+    val timecode: TimecodeValue? = null,
 ) : NormalizedValue
 data class IntervalValue(
     val timeline: String,
@@ -227,6 +243,10 @@ data class IntervalValue(
     val to: String?,
     val fromInclusive: Boolean,
     val toInclusive: Boolean,
+    val fromPrecision: String? = null,
+    val toPrecision: String? = null,
+    val fromTimecode: TimecodeValue? = null,
+    val toTimecode: TimecodeValue? = null,
 ) : NormalizedValue
 data class DurationValue(
     val unit: String,
@@ -253,6 +273,7 @@ data class NormalizedRelation(
 data class NormalizedNodeType(
     val id: String,
     val props: Map<String, ResolvedPropSchema>,
+    val ancestorIds: Set<String>,
     val source: SourceInfo,
 )
 
@@ -266,14 +287,10 @@ data class NormalizedRelType(
 
 data class NormalizedTimeline(
     val id: String,
-    val calendarType: String,
-    val continuous: Boolean?,
-    val yearZero: Boolean?,
-    val defaultEra: String?,
-    val eras: Map<String, EraSchema>,
-    val units: List<String>,
+    val timecode: TimecodeSchema?,
+    val mappings: List<TimelineMapping>,
+    val props: Map<String, NormalizedValue>,
     val ancestorIds: Set<String>,
-    val mapping: TimelineMapping?,
     val source: SourceInfo,
 )
 

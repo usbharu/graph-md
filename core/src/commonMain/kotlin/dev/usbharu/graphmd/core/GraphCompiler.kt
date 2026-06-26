@@ -104,10 +104,10 @@ class GraphCompiler(
             val relType = relTypeById[relation.type] ?: return@mapNotNull relation
             val fromNode = normalizedNodeById[relation.from]
             val toNode = normalizedNodeById[relation.to]
-            if (fromNode != null && relType.from != null && fromNode.type !in relType.from) {
+            if (fromNode != null && relType.from != null && !nodeTypeAllowed(fromNode.type, relType.from, nodeTypeById)) {
                 diagnostics += constraintError("Relation source type ${fromNode.type} is not allowed for ${relation.type}", relation.source)
             }
-            if (toNode != null && relType.to != null && toNode.type !in relType.to) {
+            if (toNode != null && relType.to != null && !nodeTypeAllowed(toNode.type, relType.to, nodeTypeById)) {
                 diagnostics += constraintError("Relation target type ${toNode.type} is not allowed for ${relation.type}", relation.source)
             }
             relation
@@ -174,18 +174,17 @@ class GraphCompiler(
                     null
                 }
             }
+            if (doc.timecode?.type == TimecodeType.tuple && doc.timecode.direction != null) {
+                diagnostics += schemaError("timecode.direction is only valid for timecode.type: number", doc.sourcePath, id)
+            }
             validateTimelineExtends(doc, parents, diagnostics)
             val parent = parents.lastOrNull()
             val timeline = NormalizedTimeline(
                 id = doc.id,
-                calendarType = doc.calendarType.ifBlank { parent?.calendarType ?: "opaque" },
-                continuous = doc.continuous ?: parent?.continuous,
-                yearZero = doc.yearZero ?: parent?.yearZero,
-                defaultEra = doc.defaultEra ?: parent?.defaultEra,
-                eras = parent?.eras.orEmpty() + doc.eras,
-                units = if (doc.units.isEmpty()) parent?.units.orEmpty() else doc.units,
+                timecode = doc.timecode ?: parent?.timecode,
+                mappings = if (doc.mappings.isNotEmpty()) doc.mappings else parent?.mappings.orEmpty(),
+                props = parent?.props.orEmpty() + doc.props.mapValues { normalizeSchemalessValue(it.value) },
                 ancestorIds = parents.flatMap { it.ancestorIds + it.id }.toSet(),
-                mapping = doc.mapping ?: parent?.mapping,
                 source = SourceInfo(doc.sourcePath),
             )
             visiting.remove(id)
@@ -204,7 +203,7 @@ class GraphCompiler(
     ) {
         if (parents.isEmpty()) return
         parents.zipWithNext().forEach { (left, right) ->
-            if (left.calendarType != right.calendarType || left.continuous != right.continuous || left.yearZero != right.yearZero || left.units != right.units) {
+            if (left.timecode != right.timecode) {
                 diagnostics += schemaError(
                     "Timeline extends must stay on the same time axis; parent timelines are incompatible for ${doc.id}",
                     doc.sourcePath,
@@ -213,26 +212,8 @@ class GraphCompiler(
             }
         }
         parents.forEach { parent ->
-            if (doc.calendarType.isNotBlank() && doc.calendarType != parent.calendarType) {
-                diagnostics += schemaError("Timeline extends cannot change calendar semantics; use mapping for ${doc.id}", doc.sourcePath, doc.id)
-            }
-            if (doc.continuous != null && parent.continuous != null && doc.continuous != parent.continuous) {
-                diagnostics += schemaError("Timeline extends cannot change time direction/continuity; use mapping for ${doc.id}", doc.sourcePath, doc.id)
-            }
-            if (doc.yearZero != null && parent.yearZero != null && doc.yearZero != parent.yearZero) {
-                diagnostics += schemaError("Timeline extends cannot change yearZero semantics; use mapping for ${doc.id}", doc.sourcePath, doc.id)
-            }
-            if (doc.units.isNotEmpty() && parent.units.isNotEmpty() && doc.units != parent.units) {
-                diagnostics += schemaError("Timeline extends cannot change unit structure; use mapping for ${doc.id}", doc.sourcePath, doc.id)
-            }
-            if (doc.defaultEra != null && parent.defaultEra != null && doc.defaultEra != parent.defaultEra) {
-                diagnostics += schemaError("Timeline extends cannot change baseline/default era; use mapping for ${doc.id}", doc.sourcePath, doc.id)
-            }
-            doc.eras.forEach { (eraId, era) ->
-                val parentEra = parent.eras[eraId] ?: return@forEach
-                if (parentEra != era) {
-                    diagnostics += schemaError("Timeline extends cannot redefine era semantics; use mapping for ${doc.id}", doc.sourcePath, doc.id)
-                }
+            if (doc.timecode != null && parent.timecode != null && doc.timecode != parent.timecode) {
+                diagnostics += schemaError("Timeline extends cannot change timecode schema; use mapping for ${doc.id}", doc.sourcePath, doc.id)
             }
         }
     }
@@ -255,11 +236,13 @@ class GraphCompiler(
                 return null
             }
             val props = linkedMapOf<String, ResolvedPropSchema>()
+            val parents = mutableListOf<NormalizedNodeType>()
             doc.extends.forEach { parentId ->
                 val parent = resolve(parentId)
                 if (parent == null) {
                     diagnostics += referenceError("Unknown parent NodeType: $parentId", doc.sourcePath, id)
                 } else {
+                    parents += parent
                     parent.props.forEach { (name, schema) ->
                         val existing = props[name]
                         if (existing != null && existing.type != schema.type) {
@@ -279,7 +262,12 @@ class GraphCompiler(
                 props[name] = resolvedSchema
             }
             visiting.remove(id)
-            return NormalizedNodeType(doc.id, props, SourceInfo(doc.sourcePath)).also { resolved[id] = it }
+            return NormalizedNodeType(
+                doc.id,
+                props,
+                parents.flatMap { it.ancestorIds + it.id }.toSet(),
+                SourceInfo(doc.sourcePath),
+            ).also { resolved[id] = it }
         }
 
         docs.forEach { resolve(it.id) }
@@ -371,12 +359,19 @@ class GraphCompiler(
         if (schema.timeline != null && schema.timelines != null) {
             diagnostics += schemaError("timeline and timelines MUST NOT be used together for $propName", sourcePath, documentId)
         }
-        if (schema.timeline != null && schema.timeline != "any" && schema.timeline !in timelineById) {
-            diagnostics += referenceError("Unknown Timeline: ${schema.timeline}", sourcePath, documentId)
+        fun checkSelector(selector: TimelineSelector) {
+            when (selector) {
+                TimelineSelector.Any -> {}
+                is TimelineSelector.Id -> if (selector.id !in timelineById) {
+                    diagnostics += referenceError("Unknown Timeline: ${selector.id}", sourcePath, documentId)
+                }
+                is TimelineSelector.Mapped -> if (selector.to !in timelineById) {
+                    diagnostics += referenceError("Unknown Timeline: ${selector.to}", sourcePath, documentId)
+                }
+            }
         }
-        schema.timelines.orEmpty().filterNot { it in timelineById }.forEach {
-            diagnostics += referenceError("Unknown Timeline: $it", sourcePath, documentId)
-        }
+        schema.timeline?.let(::checkSelector)
+        schema.timelines.orEmpty().forEach(::checkSelector)
         val resolvedWithoutDefault = ResolvedPropSchema(
             type = schema.type,
             required = schema.required,
@@ -522,8 +517,12 @@ class GraphCompiler(
     ): NormalizedValue? {
         val shortcutValue = (rawValue as? RawString)?.value
         val obj = rawValue as? RawObject
-        val timeline = ((obj?.values?.get("timeline") as? RawString)?.value ?: schema.timeline)?.takeIf { it != "any" }
-            ?: return typeError("$propName instant missing timeline", sourcePath, documentId).let { null }
+        val schemaTimeline = (schema.timeline as? TimelineSelector.Id)?.id
+        val timeline = (obj?.values?.get("timeline") as? RawString)?.value ?: schemaTimeline
+        if (timeline == null) {
+            diagnostics += typeError("$propName instant missing timeline", sourcePath, documentId)
+            return null
+        }
         if (timeline !in timelineById) {
             diagnostics += referenceError("Unknown Timeline: $timeline", sourcePath, documentId)
             return null
@@ -533,15 +532,20 @@ class GraphCompiler(
             return null
         }
         val value = shortcutValue ?: (obj?.values?.get("value") as? RawString)?.value
-            ?: return typeError("$propName instant missing value", sourcePath, documentId).let { null }
-        val normalizedLiteral = normalizeTemporalLiteral(value, timelineById.getValue(timeline), diagnostics, sourcePath, documentId, propName)
-        val explicitPrecision = (obj?.values?.get("precision") as? RawString)?.value
-        val inferredPrecision = inferPrecision(normalizedLiteral)
-        if (explicitPrecision != null && explicitPrecision != inferredPrecision) {
-            diagnostics += constraintError("invalid temporal precision for $propName", SourceInfo(sourcePath, documentId))
+        if (value == null) {
+            diagnostics += typeError("$propName instant missing value", sourcePath, documentId)
             return null
         }
-        return InstantValue(timeline, normalizedLiteral, explicitPrecision ?: inferredPrecision)
+        val normalizedLiteral = normalizeTemporalLiteral(value)
+        val explicitPrecision = (obj?.values?.get("precision") as? RawString)?.value
+        val timecode = parseTimecode(
+            obj?.values?.get("timecode"),
+            "$propName.timecode",
+            sourcePath,
+            documentId,
+            diagnostics,
+        )
+        return InstantValue(timeline, normalizedLiteral, explicitPrecision, timecode)
     }
 
     private fun normalizeInterval(
@@ -553,9 +557,17 @@ class GraphCompiler(
         documentId: String,
         propName: String,
     ): NormalizedValue? {
-        val obj = rawValue as? RawObject ?: return typeError("$propName must be interval object", sourcePath, documentId).let { null }
-        val timeline = ((obj.values["timeline"] as? RawString)?.value ?: schema.timeline)?.takeIf { it != "any" }
-            ?: return typeError("$propName interval missing timeline", sourcePath, documentId).let { null }
+        val obj = rawValue as? RawObject
+        if (obj == null) {
+            diagnostics += typeError("$propName must be interval object", sourcePath, documentId)
+            return null
+        }
+        val schemaTimeline = (schema.timeline as? TimelineSelector.Id)?.id
+        val timeline = (obj.values["timeline"] as? RawString)?.value ?: schemaTimeline
+        if (timeline == null) {
+            diagnostics += typeError("$propName interval missing timeline", sourcePath, documentId)
+            return null
+        }
         if (timeline !in timelineById) {
             diagnostics += referenceError("Unknown Timeline: $timeline", sourcePath, documentId)
             return null
@@ -564,8 +576,16 @@ class GraphCompiler(
             diagnostics += constraintError("$propName timeline $timeline is not allowed", SourceInfo(sourcePath, documentId))
             return null
         }
-        val from = (obj.values["from"] as? RawString)?.value
-        val to = (obj.values["to"] as? RawString)?.value
+        val fromEndpoint = parseIntervalEndpoint(obj.values["from"], "$propName.from", sourcePath, documentId, diagnostics)
+        val toEndpoint = parseIntervalEndpoint(obj.values["to"], "$propName.to", sourcePath, documentId, diagnostics)
+        val from = fromEndpoint?.value ?: (obj.values["from"] as? RawString)?.value
+        val to = toEndpoint?.value ?: (obj.values["to"] as? RawString)?.value
+        val fromTimecode = fromEndpoint?.timecode
+            ?: parseTimecode(obj.values["fromTimecode"], "$propName.fromTimecode", sourcePath, documentId, diagnostics)
+        val toTimecode = toEndpoint?.timecode
+            ?: parseTimecode(obj.values["toTimecode"], "$propName.toTimecode", sourcePath, documentId, diagnostics)
+        val fromPrecision = fromEndpoint?.precision ?: (obj.values["fromPrecision"] as? RawString)?.value
+        val toPrecision = toEndpoint?.precision ?: (obj.values["toPrecision"] as? RawString)?.value
         if (from == null && to == null) {
             diagnostics += Diagnostic(
                 DiagnosticCategory.ConstraintError,
@@ -574,14 +594,16 @@ class GraphCompiler(
                 SourceInfo(sourcePath, documentId),
             )
         }
-        from?.let { normalizeTemporalLiteral(it, timelineById.getValue(timeline), diagnostics, sourcePath, documentId, "$propName.from") }
-        to?.let { normalizeTemporalLiteral(it, timelineById.getValue(timeline), diagnostics, sourcePath, documentId, "$propName.to") }
         return IntervalValue(
             timeline = timeline,
             from = from,
             to = to,
             fromInclusive = (obj.values["fromInclusive"] as? RawBoolean)?.value ?: true,
             toInclusive = (obj.values["toInclusive"] as? RawBoolean)?.value ?: false,
+            fromPrecision = fromPrecision,
+            toPrecision = toPrecision,
+            fromTimecode = fromTimecode,
+            toTimecode = toTimecode,
         )
     }
 
@@ -594,27 +616,32 @@ class GraphCompiler(
         documentId: String,
         propName: String,
     ): NormalizedValue? {
-        val obj = rawValue as? RawObject ?: return typeError("$propName must be duration object", sourcePath, documentId).let { null }
+        val obj = rawValue as? RawObject
+        if (obj == null) {
+            diagnostics += typeError("$propName must be duration object", sourcePath, documentId)
+            return null
+        }
         val unit = (obj.values["unit"] as? RawString)?.value
-            ?: return typeError("$propName duration missing unit", sourcePath, documentId).let { null }
+        if (unit == null) {
+            diagnostics += typeError("$propName duration missing unit", sourcePath, documentId)
+            return null
+        }
         val value = when (val raw = obj.values["value"]) {
             is RawNumber -> raw.value
             is RawInteger -> raw.value.toDouble()
-            else -> return typeError("$propName duration missing numeric value", sourcePath, documentId).let { null }
-        }
-        val timeline = (obj.values["timeline"] as? RawString)?.value ?: schema.timeline?.takeIf { it != "any" }
-        if (timeline != null) {
-            val definition = timelineById[timeline]
-            if (definition == null) {
-                diagnostics += referenceError("Unknown Timeline: $timeline", sourcePath, documentId)
-            } else if (definition.units.isNotEmpty() && unit !in definition.units) {
-                diagnostics += Diagnostic(
-                    DiagnosticCategory.ConstraintError,
-                    Severity.Warning,
-                    "$propName duration unit $unit is not declared by timeline $timeline",
-                    SourceInfo(sourcePath, documentId),
-                )
+            else -> {
+                diagnostics += typeError("$propName duration missing numeric value", sourcePath, documentId)
+                return null
             }
+        }
+        val timeline = (obj.values["timeline"] as? RawString)?.value ?: (schema.timeline as? TimelineSelector.Id)?.id
+        if (timeline != null && timeline !in timelineById) {
+            diagnostics += referenceError("Unknown Timeline: $timeline", sourcePath, documentId)
+            return null
+        }
+        if (timeline != null && !timelineAllowed(timeline, schema, timelineById)) {
+            diagnostics += constraintError("$propName timeline $timeline is not allowed", SourceInfo(sourcePath, documentId))
+            return null
         }
         return DurationValue(unit, value, timeline)
     }
@@ -624,13 +651,32 @@ class GraphCompiler(
         schema: ResolvedPropSchema,
         timelineById: Map<String, NormalizedTimeline>,
     ): Boolean {
-        fun matches(required: String): Boolean {
-            return required == timeline || timelineById[timeline]?.ancestorIds?.contains(required) == true
+        fun TimelineSelector.matches(): Boolean = when (this) {
+            TimelineSelector.Any -> true
+            is TimelineSelector.Id -> id == timeline ||
+                timelineById[timeline]?.ancestorIds?.contains(id) == true
+            is TimelineSelector.Mapped -> to == timeline ||
+                timelineById[timeline]?.ancestorIds?.contains(to) == true ||
+                timelineById[timeline]?.mappings?.any { mappingTarget(it) == to } == true
         }
-        return schema.timeline == "any" ||
-            schema.timeline?.let(::matches) ?:
-            schema.timelines?.let { allowed -> allowed.any(::matches) } ?:
-            true
+        val selectors = schema.timelines ?: schema.timeline?.let(::listOf)
+        return selectors.isNullOrEmpty() || selectors.any { it.matches() }
+    }
+
+    private fun mappingTarget(mapping: TimelineMapping): String? = when (mapping) {
+        is OffsetTimelineMapping -> mapping.to
+        is TableTimelineMapping -> mapping.to
+        is NoTimelineMapping -> null
+    }
+
+    private fun nodeTypeAllowed(
+        type: String,
+        allowed: List<String>,
+        nodeTypeById: Map<String, NormalizedNodeType>,
+    ): Boolean {
+        if (type in allowed) return true
+        val ancestors = nodeTypeById[type]?.ancestorIds ?: return false
+        return ancestors.any { it in allowed }
     }
 
     private fun normalizeSchemalessValue(rawValue: RawValue): NormalizedValue = when (rawValue) {
@@ -643,46 +689,70 @@ class GraphCompiler(
         is RawObject -> ObjectValue(rawValue.values.mapValues { normalizeSchemalessValue(it.value) })
     }
 
-    private fun normalizeTemporalLiteral(
-        value: String,
-        timeline: NormalizedTimeline,
-        diagnostics: MutableList<Diagnostic>,
+    private fun parseTimecode(
+        rawValue: RawValue?,
+        propName: String,
         sourcePath: String,
         documentId: String,
-        propName: String,
-    ): String {
-        if (timeline.calendarType == "opaque" || timeline.calendarType == "custom") {
-            return value
-        }
-        val regex = Regex("^(?:(?<era>[A-Za-z_][A-Za-z0-9_.:-]*)\\s+)?(?<year>[+-]?[0-9]+)(?:-(?<month>[0-9]{2})(?:-(?<day>[0-9]{2})(?:T(?<time>[0-9]{2}:[0-9]{2}:[0-9]{2}(?:Z|[+-][0-9]{2}:[0-9]{2})?))?)?)?$")
-        val match = regex.matchEntire(value)
-        if (match == null) {
-            diagnostics += typeError("Invalid temporal literal for $propName", sourcePath, documentId)
-            return value
-        }
-        val era = match.groups["era"]?.value ?: timeline.defaultEra
-        if (match.groups["era"] == null && timeline.eras.isNotEmpty() && timeline.defaultEra == null) {
-            diagnostics += constraintError("$propName requires an era", SourceInfo(sourcePath, documentId))
-        }
-        val year = match.groups["year"]!!.value.toInt()
-        if (timeline.yearZero == false && year == 0) {
-            diagnostics += constraintError("$propName uses year 0 on a no-year-zero timeline", SourceInfo(sourcePath, documentId))
-        }
-        return buildString {
-            if (era != null) append("$era ")
-            append(match.groups["year"]!!.value)
-            match.groups["month"]?.value?.let { append("-$it") }
-            match.groups["day"]?.value?.let { append("-$it") }
-            match.groups["time"]?.value?.let { append("T$it") }
+        diagnostics: MutableList<Diagnostic>,
+    ): TimecodeValue? {
+        return when (rawValue) {
+            null -> null
+            is RawInteger -> NumberTimecode(rawValue.value.toDouble())
+            is RawNumber -> NumberTimecode(rawValue.value)
+            is RawArray -> {
+                val values = rawValue.values.mapNotNull { item ->
+                    when (item) {
+                        is RawInteger -> item.value.toDouble()
+                        is RawNumber -> item.value
+                        else -> {
+                            diagnostics += typeError("$propName must contain only numeric tuple elements", sourcePath, documentId)
+                            null
+                        }
+                    }
+                }
+                if (values.size == rawValue.values.size) TupleTimecode(values) else null
+            }
+            else -> {
+                diagnostics += typeError("$propName must be number or number tuple", sourcePath, documentId)
+                null
+            }
+        }?.takeIf { timecode ->
+            when (timecode) {
+                is NumberTimecode -> timecode.value.isFinite()
+                is TupleTimecode -> timecode.values.all(Double::isFinite)
+            }.also { valid ->
+                if (!valid) diagnostics += typeError("$propName must be finite", sourcePath, documentId)
+            }
         }
     }
 
-    private fun inferPrecision(value: String): String = when {
-        'T' in value -> "time"
-        value.count { it == '-' } >= 2 -> "day"
-        value.count { it == '-' } == 1 -> "month"
-        else -> "year"
+    private fun parseIntervalEndpoint(
+        rawValue: RawValue?,
+        propName: String,
+        sourcePath: String,
+        documentId: String,
+        diagnostics: MutableList<Diagnostic>,
+    ): IntervalEndpoint? {
+        val obj = rawValue as? RawObject ?: return null
+        val value = (obj.values["value"] as? RawString)?.value ?: run {
+            diagnostics += typeError("$propName.value must be string", sourcePath, documentId)
+            return null
+        }
+        return IntervalEndpoint(
+            value = value,
+            precision = (obj.values["precision"] as? RawString)?.value,
+            timecode = parseTimecode(obj.values["timecode"], "$propName.timecode", sourcePath, documentId, diagnostics),
+        )
     }
+
+    private data class IntervalEndpoint(
+        val value: String,
+        val precision: String?,
+        val timecode: TimecodeValue?,
+    )
+
+    private fun normalizeTemporalLiteral(value: String): String = value
 
     private fun defaultIndexFor(type: PropType): PropIndex = when (type) {
         PropType.string -> PropIndex.exact
