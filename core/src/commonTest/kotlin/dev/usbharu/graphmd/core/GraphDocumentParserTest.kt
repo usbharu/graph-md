@@ -403,4 +403,438 @@ class GraphDocumentParserTest {
         assertEquals(PropType.`object`, document.props.getValue("profile").type)
         assertEquals(PropType.string, document.props.getValue("profile").properties.getValue("displayName").type)
     }
+
+    @Test
+    fun `reports when front matter root is not a mapping`() {
+        val parsed = compiler.parseDocument(
+            """
+                ---
+                - not-a-map
+                ---
+            """.trimIndent(),
+            "/tmp/list.md",
+        )
+
+        assertNull(parsed.document)
+        assertTrue(parsed.diagnostics.any { "Front matter root MUST be a mapping" in it.message })
+    }
+
+    @Test
+    fun `parses offset timeline mapping with unit`() {
+        val timeline = compiler.parseDocument(
+            """
+                ---
+                id: ThirdAge
+                kind: Timeline
+                mappings:
+                  - kind: offset
+                    to: CommonEra
+                    unit: year
+                    offset: 645
+                ---
+            """.trimIndent(),
+            "/tmp/third-age.md",
+        ).document as? TimelineDocument
+
+        assertNotNull(timeline)
+        val mapping = timeline.mappings.single() as? OffsetTimelineMapping
+        assertNotNull(mapping)
+        assertEquals("CommonEra", mapping.to)
+        assertEquals("year", mapping.unit)
+        assertEquals(645, mapping.offset)
+    }
+
+    @Test
+    fun `parses single quoted strings and inline bracket lists`() {
+        val node = compiler.parseDocument(
+            """
+                ---
+                id: x
+                kind: Node
+                type: T
+                props:
+                  name: 'Alice'
+                  aliases: [Al, "B\b"]
+                ---
+            """.trimIndent(),
+            "/tmp/node.md",
+        ).document as? NodeDocument
+
+        assertNotNull(node)
+        assertEquals("Alice", (node.props.getValue("name") as RawString).value)
+        val aliases = (node.props.getValue("aliases") as RawArray).values
+        assertEquals(2, aliases.size)
+        assertEquals("Bb", (aliases[1] as RawString).value)
+    }
+
+    @Test
+    fun `reports invalid yaml mapping entries and unexpected indentation`() {
+        val parsed = compiler.parseDocument(
+            """
+                ---
+                id: x
+                kind: Node
+                type: T
+                garbageline
+                props:
+                    name: a
+                     bad: indent
+                ---
+            """.trimIndent(),
+            "/tmp/bad.md",
+        )
+
+        assertTrue(parsed.diagnostics.any { "Invalid YAML mapping entry: garbageline" in it.message })
+        assertTrue(parsed.diagnostics.any { "Unexpected indentation" in it.message })
+    }
+
+    @Test
+    fun `reports unknown prop type and index`() {
+        val parsed = compiler.parseDocument(
+            """
+                ---
+                id: P
+                kind: NodeType
+                props:
+                  name:
+                    type: unknownType
+                    index: unknownIndex
+                ---
+            """.trimIndent(),
+            "/tmp/p.md",
+        )
+
+        assertTrue(parsed.diagnostics.any { "Unknown prop type" in it.message && "PropType.unknownType" in it.message })
+        assertTrue(parsed.diagnostics.any { "Unknown prop index" in it.message && "PropIndex.unknownIndex" in it.message })
+        val document = parsed.document as? NodeTypeDocument
+        assertNotNull(document)
+        assertEquals(PropType.string, document.props.getValue("name").type)
+    }
+
+    @Test
+    fun `reports invalid timecode schema shapes`() {
+        val notMapping = compiler.parseDocument(
+            """
+                ---
+                id: T
+                kind: Timeline
+                timecode: foo
+                ---
+            """.trimIndent(),
+            "/tmp/t.md",
+        )
+        assertTrue(notMapping.diagnostics.any { "timecode MUST be a mapping" in it.message })
+
+        val unknownType = compiler.parseDocument(
+            """
+                ---
+                id: T
+                kind: Timeline
+                timecode:
+                  type: unknown
+                ---
+            """.trimIndent(),
+            "/tmp/t.md",
+        )
+        assertTrue(unknownType.diagnostics.any { "Unknown timecode type" in it.message && "TimecodeType.unknown" in it.message })
+
+        val unknownDirection = compiler.parseDocument(
+            """
+                ---
+                id: T
+                kind: Timeline
+                timecode:
+                  type: number
+                  direction: sideways
+                ---
+            """.trimIndent(),
+            "/tmp/t.md",
+        )
+        assertTrue(unknownDirection.diagnostics.any { "Unknown timecode direction" in it.message && "TimecodeDirection.sideways" in it.message })
+    }
+
+    @Test
+    fun `reports invalid timeline mapping shapes`() {
+        val notList = compiler.parseDocument(
+            """
+                ---
+                id: T
+                kind: Timeline
+                mappings: foo
+                ---
+            """.trimIndent(),
+            "/tmp/t.md",
+        )
+        assertTrue(notList.diagnostics.any { "mappings MUST be a list" in it.message })
+
+        val unknownKind = compiler.parseDocument(
+            """
+                ---
+                id: T
+                kind: Timeline
+                mappings:
+                  - kind: weird
+                ---
+            """.trimIndent(),
+            "/tmp/t.md",
+        )
+        assertTrue(unknownKind.diagnostics.any { "Unknown mapping kind: weird" in it.message })
+
+        val offsetMissingTo = compiler.parseDocument(
+            """
+                ---
+                id: T
+                kind: Timeline
+                mappings:
+                  - kind: offset
+                    offset: 1
+                ---
+            """.trimIndent(),
+            "/tmp/t.md",
+        )
+        assertTrue(offsetMissingTo.diagnostics.any { "to is required" in it.message })
+
+        val tableEntriesNotList = compiler.parseDocument(
+            """
+                ---
+                id: T
+                kind: Timeline
+                mappings:
+                  - kind: table
+                    to: CommonEra
+                    entries: foo
+                ---
+            """.trimIndent(),
+            "/tmp/t.md",
+        )
+        assertTrue(tableEntriesNotList.diagnostics.any { "mapping.entries MUST be a list" in it.message })
+
+        val tableEntryFromScalar = compiler.parseDocument(
+            """
+                ---
+                id: T
+                kind: Timeline
+                mappings:
+                  - kind: table
+                    to: CommonEra
+                    entries:
+                      - from: 5
+                        to: 6
+                ---
+            """.trimIndent(),
+            "/tmp/t.md",
+        )
+        assertTrue(tableEntryFromScalar.diagnostics.any { "mapping.entries.from MUST be a string or mapping" in it.message })
+
+        val entryNotMapping = compiler.parseDocument(
+            """
+                ---
+                id: T
+                kind: Timeline
+                mappings:
+                  - kind: table
+                    to: CommonEra
+                    entries:
+                      - 5
+                ---
+            """.trimIndent(),
+            "/tmp/t.md",
+        )
+        assertTrue(entryNotMapping.diagnostics.any { "mapping.entries items MUST be mappings" in it.message })
+
+        val mappingNotMap = compiler.parseDocument(
+            """
+                ---
+                id: T
+                kind: Timeline
+                mappings:
+                  - 5
+                ---
+            """.trimIndent(),
+            "/tmp/t.md",
+        )
+        assertTrue(mappingNotMap.diagnostics.any { "mapping MUST be a mapping" in it.message })
+
+        val entryBadTimecode = compiler.parseDocument(
+            """
+                ---
+                id: T
+                kind: Timeline
+                mappings:
+                  - kind: table
+                    to: CommonEra
+                    entries:
+                      - from:
+                          value: x
+                          timecode: notnumeric
+                        to:
+                          value: y
+                ---
+            """.trimIndent(),
+            "/tmp/t.md",
+        )
+        assertTrue(entryBadTimecode.diagnostics.any { "mapping.entries.from MUST be a number or number tuple" in it.message })
+        val entryTupleBadItem = compiler.parseDocument(
+            """
+                ---
+                id: T
+                kind: Timeline
+                mappings:
+                  - kind: table
+                    to: CommonEra
+                    entries:
+                      - from:
+                          value: x
+                          timecode:
+                            - 1
+                            - bad
+                        to:
+                          value: y
+                ---
+            """.trimIndent(),
+            "/tmp/t.md",
+        )
+        assertTrue(entryTupleBadItem.diagnostics.any { "mapping.entries.from MUST contain only numbers" in it.message })
+        val entryValueMissing = compiler.parseDocument(
+            """
+                ---
+                id: T
+                kind: Timeline
+                mappings:
+                  - kind: table
+                    to: CommonEra
+                    entries:
+                      - from:
+                          note: no-value-here
+                        to:
+                          value: y
+                ---
+            """.trimIndent(),
+            "/tmp/t.md",
+        )
+        assertTrue(entryValueMissing.diagnostics.any { "value is required" in it.message })
+    }
+
+    @Test
+    fun `reports invalid timeline selector shapes`() {
+        val scalarSelector = compiler.parseDocument(
+            """
+                ---
+                id: E
+                kind: NodeType
+                props:
+                  x:
+                    type: instant
+                    timeline: 5
+                ---
+            """.trimIndent(),
+            "/tmp/e.md",
+        )
+        assertTrue(scalarSelector.diagnostics.any { "MUST be a Timeline identifier" in it.message })
+
+        val mappedMissingField = compiler.parseDocument(
+            """
+                ---
+                id: E
+                kind: NodeType
+                props:
+                  x:
+                    type: instant
+                    timeline:
+                      mapped: 5
+                ---
+            """.trimIndent(),
+            "/tmp/e.md",
+        )
+        assertTrue(mappedMissingField.diagnostics.any { "selector mapping MUST have a string 'mapped' field" in it.message })
+
+        val singleTimelines = compiler.parseDocument(
+            """
+                ---
+                id: E
+                kind: NodeType
+                props:
+                  x:
+                    type: instant
+                    timelines: CommonEra
+                ---
+            """.trimIndent(),
+            "/tmp/e.md",
+        )
+        val document = singleTimelines.document as? NodeTypeDocument
+        assertNotNull(document)
+        assertEquals(listOf(TimelineSelector.Id("CommonEra")), document.props.getValue("x").timelines)
+    }
+
+    @Test
+    fun `reports invalid string list and props map shapes`() {
+        val stringListScalar = compiler.parseDocument(
+            """
+                ---
+                id: P
+                kind: NodeType
+                extends: 5
+                ---
+            """.trimIndent(),
+            "/tmp/p.md",
+        )
+        assertTrue(stringListScalar.diagnostics.any { "extends MUST be a list of strings" in it.message })
+
+        val stringListBadItem = compiler.parseDocument(
+            """
+                ---
+                id: P
+                kind: NodeType
+                extends:
+                  - 5
+                ---
+            """.trimIndent(),
+            "/tmp/p.md",
+        )
+        assertTrue(stringListBadItem.diagnostics.any { "extends items MUST be strings" in it.message })
+
+        val propsNotMapping = compiler.parseDocument(
+            """
+                ---
+                id: P
+                kind: NodeType
+                props: foo
+                ---
+            """.trimIndent(),
+            "/tmp/p.md",
+        )
+        assertTrue(propsNotMapping.diagnostics.any { "props MUST be a mapping" in it.message })
+    }
+
+    @Test
+    fun `parses offset mapping and raw value variants`() {
+        val node = compiler.parseDocument(
+            """
+                ---
+                id: x
+                kind: Node
+                type: T
+                props:
+                  a: 1
+                  b: 1.5
+                  c: true
+                  d: null
+                  e:
+                    - 1
+                    - 2.5
+                  f:
+                    nested: value
+                ---
+            """.trimIndent(),
+            "/tmp/node.md",
+        ).document as? NodeDocument
+
+        assertNotNull(node)
+        assertTrue(node.props.getValue("a") is RawInteger)
+        assertTrue(node.props.getValue("b") is RawNumber)
+        assertTrue(node.props.getValue("c") is RawBoolean)
+        assertEquals(RawNull, node.props.getValue("d"))
+        assertTrue(node.props.getValue("e") is RawArray)
+        assertTrue(node.props.getValue("f") is RawObject)
+    }
 }

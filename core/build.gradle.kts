@@ -22,14 +22,8 @@ kotlin {
 kover {
     reports {
         filters {
-            includes {
-                classes(
-                    "dev.usbharu.graphmd.core.GraphCompiler",
-                    "dev.usbharu.graphmd.core.BodySyntaxExtractor",
-                    "dev.usbharu.graphmd.core.BodySyntaxExtraction",
-                    "dev.usbharu.graphmd.core.InlinePropsParser",
-                    "dev.usbharu.graphmd.core.InlinePropsParseException",
-                )
+            excludes {
+                classes("dev.usbharu.graphmd.core.model.*")
             }
         }
         total {
