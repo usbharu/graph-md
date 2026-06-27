@@ -1,6 +1,7 @@
 package dev.usbharu.graphmd.lsp
 
 import dev.usbharu.graphmd.core.*
+import dev.usbharu.graphmd.core.model.Diagnostic
 import dev.usbharu.graphmd.core.model.*
 import org.eclipse.lsp4j.*
 import org.eclipse.lsp4j.jsonrpc.messages.Either
