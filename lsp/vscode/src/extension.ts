@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { Executable, LanguageClient, LanguageClientOptions, ServerOptions, TransportKind } from "vscode-languageclient/node";
+import { graphMdPlugin } from "markdown-it-graphmd";
 
 let client: LanguageClient | undefined;
 const semanticLegend = new vscode.SemanticTokensLegend([
@@ -11,7 +12,11 @@ const semanticLegend = new vscode.SemanticTokensLegend([
   "graphmdProperty",
 ]);
 
-export async function activate(context: vscode.ExtensionContext): Promise<void> {
+export interface GraphMdMarkdownApi {
+  extendMarkdownIt(md: any): any;
+}
+
+export async function activate(context: vscode.ExtensionContext): Promise<GraphMdMarkdownApi> {
   const scriptName = process.platform === "win32" ? "lsp.bat" : "lsp";
   const command = context.asAbsolutePath(path.join("..", "build", "install", "lsp", "bin", scriptName));
   const serverOptions: ServerOptions = {
@@ -43,6 +48,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       void client?.stop();
     },
   });
+
+  return {
+    extendMarkdownIt(md: any): any {
+      md.use(graphMdPlugin);
+      return md;
+    },
+  };
 }
 
 export async function deactivate(): Promise<void> {

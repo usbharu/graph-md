@@ -54,7 +54,7 @@ class GraphDocumentAnalyzer {
             val trimmed = line.trim()
             if (trimmed.isBlank() || trimmed.startsWith("#")) continue
 
-            val inlineList = Regex("""^([A-Za-z][A-Za-z0-9_-]*)\s*:\s*\[(.*)]\s*$""").matchEntire(line)
+            val inlineList = Regex("""^([A-Za-z][A-Za-z0-9_-]*)\s*:\s*\[(.*)\]\s*$""").matchEntire(line)
             if (inlineList != null) {
                 val field = inlineList.groupValues[1]
                 currentListField = null
@@ -214,7 +214,7 @@ class GraphDocumentAnalyzer {
                     val closeParen = findUnescaped(masked, ')', closeLabel + 2)
                     if (closeParen != null) {
                         val raw = body.substring(closeLabel + 2, closeParen)
-                        val parsed = parseRelationTargetAndType(raw)
+                        val parsed = RelationTargetParser.parse(raw)
                         if (parsed != null) {
                             val target = parsed.first
                             val relType = parsed.second
@@ -256,7 +256,7 @@ class GraphDocumentAnalyzer {
             lineStart = chars[index] == '\n'
             index += 1
         }
-        return String(chars)
+        return chars.concatToString()
     }
 
     private fun findUnescaped(text: String, target: Char, start: Int): Int? {
@@ -343,42 +343,5 @@ class GraphDocumentAnalyzer {
             trimmed.length >= 2 && trimmed.first() == '\'' && trimmed.last() == '\'' -> trimmed.substring(1, trimmed.length - 1)
             else -> trimmed
         }
-    }
-
-    private fun parseRelationTargetAndType(value: String): Pair<String, String>? {
-        val trimmed = value.trim()
-        val separator = trimmed.indexOfFirst { it == ' ' || it == '\t' }
-        if (separator <= 0) return null
-        val target = trimmed.substring(0, separator)
-        val typePart = trimmed.substring(separator).trim()
-        if (typePart.isEmpty()) return null
-        if (typePart.first() == '"') {
-            val relType = parseQuotedRelationType(typePart) ?: return null
-            if (relType.isEmpty()) return null
-            return target to relType
-        }
-        if (typePart.any { it == ' ' || it == '\t' || it == ')' }) return null
-        return target to typePart
-    }
-
-    private fun parseQuotedRelationType(value: String): String? {
-        val builder = StringBuilder()
-        var index = 1
-        var escaped = false
-        while (index < value.length) {
-            val char = value[index]
-            if (escaped) {
-                builder.append(char)
-                escaped = false
-            } else if (char == '\\') {
-                escaped = true
-            } else if (char == '"') {
-                return if (value.substring(index + 1).trim().isEmpty()) builder.toString() else null
-            } else {
-                builder.append(char)
-            }
-            index += 1
-        }
-        return null
     }
 }

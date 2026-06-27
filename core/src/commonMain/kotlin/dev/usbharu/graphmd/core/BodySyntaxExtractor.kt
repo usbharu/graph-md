@@ -73,7 +73,7 @@ class BodySyntaxExtractor {
         }
         val label = unescapeLabel(original.substring(start + 2, closeLabel))
         val targetAndType = original.substring(closeLabel + 2, closeParen).trim()
-        val parts = parseRelationTargetAndType(targetAndType)
+        val parts = RelationTargetParser.parse(targetAndType)
         if (parts == null) {
             diagnostics += syntaxDiagnostic("Relation target and type must be separated by horizontal spaces", sourcePath, documentId, start, closeParen)
             return null
@@ -131,7 +131,7 @@ class BodySyntaxExtractor {
             lineStart = chars[i] == '\n'
             i++
         }
-        return String(chars)
+        return chars.concatToString()
     }
 
     private fun readBalanced(text: String, start: Int, open: Char, close: Char): SourceRange? {
@@ -197,42 +197,6 @@ class BodySyntaxExtractor {
 
     private fun unescapeLabel(label: String): String {
         return label.replace("\\]", "]").replace("\\\\", "\\")
-    }
-
-    private fun parseRelationTargetAndType(value: String): Pair<String, String>? {
-        val trimmed = value.trim()
-        val separator = trimmed.indexOfFirst { it == ' ' || it == '\t' }
-        if (separator <= 0) return null
-        val target = trimmed.substring(0, separator)
-        val typePart = trimmed.substring(separator).trim()
-        if (typePart.isEmpty()) return null
-        if (typePart.first() == '"') {
-            val relType = parseQuotedRelationType(typePart) ?: return null
-            return target to relType
-        }
-        if (typePart.any { it == ' ' || it == '\t' || it == ')' }) return null
-        return target to typePart
-    }
-
-    private fun parseQuotedRelationType(value: String): String? {
-        val builder = StringBuilder()
-        var index = 1
-        var escaped = false
-        while (index < value.length) {
-            val char = value[index]
-            if (escaped) {
-                builder.append(char)
-                escaped = false
-            } else if (char == '\\') {
-                escaped = true
-            } else if (char == '"') {
-                return if (value.substring(index + 1).trim().isEmpty()) builder.toString() else null
-            } else {
-                builder.append(char)
-            }
-            index += 1
-        }
-        return null
     }
 
     private fun syntaxDiagnostic(message: String, sourcePath: String, documentId: String, start: Int, end: Int): Diagnostic {

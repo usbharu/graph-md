@@ -1,0 +1,37 @@
+{
+  "name": "markdown-it-graphmd",
+  "version": "0.1.0",
+  "private": true,
+  "description": "markdown-it plugin that renders Graph Markdown relation links and @props blocks.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "sync-vendor": "bash sync-vendor.sh",
+    "prebuild": "npm run sync-vendor",
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "markdown-it": ">=12 <15"
+  },
+  "devDependencies": {
+    "@types/markdown-it": "^14.1.2",
+    "markdown-it": "^14.1.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.8.3",
+    "vitest": "^2.1.8"
+  }
+}

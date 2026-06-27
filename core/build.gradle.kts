@@ -9,6 +9,11 @@ kotlin {
             jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
         }
     }
+    js(IR) {
+        nodejs()
+        generateTypeScriptDefinitions()
+        binaries.library()
+    }
 
     sourceSets {
         commonTest {

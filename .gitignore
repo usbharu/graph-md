@@ -50,3 +50,6 @@ lsp/dist/
 lsp/*.vsix
 lsp/vscode/node_modules/
 lsp/vscode/dist/
+
+### opencode (local tooling) ###
+.opencode/

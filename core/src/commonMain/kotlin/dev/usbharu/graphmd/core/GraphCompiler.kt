@@ -250,7 +250,9 @@ class GraphCompiler(
                         if (existing != null && existing.type != schema.type) {
                             diagnostics += schemaError("Incompatible inherited prop schemas for $name", doc.sourcePath, id)
                         } else {
-                            props.putIfAbsent(name, schema)
+                            if (!props.containsKey(name)) {
+                                props[name] = schema
+                            }
                         }
                     }
                 }
@@ -301,7 +303,7 @@ class GraphCompiler(
                 if (parent == null) {
                     diagnostics += referenceError("Unknown parent RelType: $parentId", doc.sourcePath, id)
                 } else {
-                    parent.props.forEach { (name, schema) -> inheritedProps.putIfAbsent(name, schema) }
+                    parent.props.forEach { (name, schema) -> if (!inheritedProps.containsKey(name)) inheritedProps[name] = schema }
                     inheritedFrom = narrowConstraint(inheritedFrom, parent.from)
                     inheritedTo = narrowConstraint(inheritedTo, parent.to)
                 }
