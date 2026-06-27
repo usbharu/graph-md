@@ -1,0 +1,15 @@
+/* Graph Markdown preview styling */
+
+/* Surface the relation type after relation links so they are visually
+   distinct from ordinary links in the built-in Markdown preview. */
+a[data-rel-type]::after {
+  content: " (" attr(data-rel-type) ")";
+  font-size: 0.85em;
+  font-style: italic;
+  opacity: 0.7;
+}
+
+/* Keep @props binding blocks hidden (they carry only data attributes). */
+.graphmd-props {
+  display: none;
+}

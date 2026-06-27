@@ -11,6 +11,10 @@
   ],
   "main": "./dist/extension.js",
   "contributes": {
+    "markdown.markdownItPlugins": true,
+    "markdown.previewStyles": [
+      "./preview/graphmd.css"
+    ],
     "grammars": [
       {
         "scopeName": "graphmd.injection.markdown",
