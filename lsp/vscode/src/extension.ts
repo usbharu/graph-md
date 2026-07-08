@@ -18,7 +18,7 @@ export interface GraphMdMarkdownApi {
 
 export async function activate(context: vscode.ExtensionContext): Promise<GraphMdMarkdownApi> {
   const scriptName = process.platform === "win32" ? "lsp.bat" : "lsp";
-  const command = context.asAbsolutePath(path.join("..", "build", "install", "lsp", "bin", scriptName));
+  const command = context.asAbsolutePath(path.join("server", "bin", scriptName));
   const serverOptions: ServerOptions = {
     run: executable(command),
     debug: executable(command),

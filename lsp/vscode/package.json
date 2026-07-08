@@ -73,15 +73,20 @@
     ]
   },
   "scripts": {
+    "typecheck": "tsc -p ./tsconfig.json --noEmit",
+    "sync-server": "bash sync-server.sh",
+    "vscode:prepublish": "npm run sync-server && node esbuild.mjs --production",
+    "package": "vsce package",
+    "build": "npm run sync-server && node esbuild.mjs",
     "compile": "tsc -p ./tsconfig.json"
   },
-  "dependencies": {
-    "markdown-it-graphmd": "file:../../markdown-it-graphmd",
-    "vscode-languageclient": "^9.0.1"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@types/node": "^24.0.12",
     "@types/vscode": "^1.90.0",
-    "typescript": "^5.8.3"
+    "esbuild": "^0.28.1",
+    "markdown-it-graphmd": "file:../../markdown-it-graphmd",
+    "typescript": "^5.8.3",
+    "vscode-languageclient": "^9.0.1"
   }
 }

@@ -1,3 +1,9 @@
+# All dependencies are bundled into dist/extension.js by esbuild.
 node_modules/**
 src/**
+test.md
+.vscode/**
+esbuild.mjs
+sync-server.sh
 tsconfig.json
+package-lock.json

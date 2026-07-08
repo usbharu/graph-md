@@ -25,4 +25,4 @@ BobはAliceの友人です。
 Bobも@[Alice](alice friendOf){
   since = { timeline = CommonEra, value = "AD 2024-04-01", timecode = 2024.25, precision = day }
   weight = 0.82
-}です。
+}の友人です。

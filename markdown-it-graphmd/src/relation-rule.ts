@@ -82,7 +82,7 @@ export function renderRelation(tokens: any[], idx: number, md: MarkdownIt, optio
   const esc = md.utils.escapeHtml;
   const attrs = [`href="${esc(href)}"`, `data-rel-type="${esc(meta.relType)}"`];
   if (meta.props) {
-    attrs.push(`data-props="${escapeAttr(meta.props)}"`);
+    attrs.push(`data-rel-props="${escapeAttr(meta.props)}"`);
   }
   return `<a ${attrs.join(" ")}>${esc(meta.label)}</a>`;
 }
