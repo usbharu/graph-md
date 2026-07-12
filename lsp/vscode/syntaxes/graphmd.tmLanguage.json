@@ -14,12 +14,12 @@
   "repository": {
     "graphmd-props": {
       "name": "meta.graphmd.props.inline.markdown",
-      "begin": "(@props)(\\s*)(\\{)",
+      "begin": "(@props)(?:\\(validTime=[^)]*\\))?(\\{)",
       "beginCaptures": {
         "1": {
           "name": "keyword.control.graphmd"
         },
-        "3": {
+        "2": {
           "name": "punctuation.section.block.begin.graphmd"
         }
       },
@@ -37,17 +37,17 @@
     },
     "graphmd-link": {
       "name": "meta.graphmd.relation.inline.markdown",
-      "begin": "(@\\[)",
+      "begin": "(@link)(?:\\(validTime=(?:[^()]|\\([^)]*\\))*\\))?(?=\\{)",
       "beginCaptures": {
         "1": {
           "name": "keyword.control.graphmd"
         }
       },
-      "end": "(?<=\\))(?!\\{)|(?<=\\})",
+      "end": "(?<=\\))",
       "patterns": [
         {
           "name": "meta.graphmd.relation.label.markdown",
-          "begin": "(?<=@\\[)",
+          "begin": "\\[",
           "end": "\\](?=\\()",
           "endCaptures": {
             "0": {

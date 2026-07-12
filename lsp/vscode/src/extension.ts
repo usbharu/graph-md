@@ -4,6 +4,7 @@ import { Executable, LanguageClient, LanguageClientOptions, ServerOptions, Trans
 import { graphMdPlugin } from "markdown-it-graphmd";
 
 let client: LanguageClient | undefined;
+const mediaTargets = new Map<string, string>();
 const semanticLegend = new vscode.SemanticTokensLegend([
   "graphmdRelationOperator",
   "graphmdRelationLabel",
@@ -17,6 +18,7 @@ export interface GraphMdMarkdownApi {
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<GraphMdMarkdownApi> {
+  await refreshMediaTargets();
   const scriptName = process.platform === "win32" ? "lsp.bat" : "lsp";
   const command = context.asAbsolutePath(path.join("server", "bin", scriptName));
   const serverOptions: ServerOptions = {
@@ -26,6 +28,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<GraphM
 
   const watcher = vscode.workspace.createFileSystemWatcher("**/*.md");
   context.subscriptions.push(watcher);
+  context.subscriptions.push(watcher.onDidCreate(() => void refreshMediaTargets()));
+  context.subscriptions.push(watcher.onDidChange(() => void refreshMediaTargets()));
+  context.subscriptions.push(watcher.onDidDelete(() => void refreshMediaTargets()));
   context.subscriptions.push(
     vscode.languages.registerDocumentSemanticTokensProvider(
       { language: "markdown", scheme: "file" },
@@ -51,10 +56,74 @@ export async function activate(context: vscode.ExtensionContext): Promise<GraphM
 
   return {
     extendMarkdownIt(md: any): any {
-      md.use(graphMdPlugin);
+      md.use(graphMdPlugin, {
+        hrefTransform: (target: string) => mediaTargets.get(target) ?? target,
+      });
+      const defaultLinkOpen = md.renderer.rules.link_open ?? ((tokens: any[], idx: number, options: any, _env: any, self: any) => self.renderToken(tokens, idx, options));
+      md.renderer.rules.link_open = (tokens: any[], idx: number, options: any, env: any, self: any): string => {
+        const hrefIndex = tokens[idx].attrIndex("href");
+        if (hrefIndex >= 0) {
+          const href = tokens[idx].attrs[hrefIndex][1];
+          const resolved = resolveMediaHref(href);
+          if (resolved) tokens[idx].attrs[hrefIndex][1] = resolved;
+        }
+        return defaultLinkOpen(tokens, idx, options, env, self);
+      };
       return md;
     },
   };
+}
+
+async function refreshMediaTargets(): Promise<void> {
+  const files = await vscode.workspace.findFiles("**/*.md", "**/{node_modules,.git,build,dist}/**");
+  const next = new Map<string, string>();
+  await Promise.all(files.map(async (uri) => {
+    const bytes = await vscode.workspace.fs.readFile(uri);
+    const metadata = parseMediaFrontMatter(Buffer.from(bytes).toString("utf8"));
+    if (!metadata) return;
+    next.set(metadata.id, metadata.url);
+    next.set(uri.toString(), metadata.url);
+    next.set(uri.fsPath, metadata.url);
+    next.set(path.basename(uri.fsPath), metadata.url);
+    next.set(path.basename(uri.fsPath, path.extname(uri.fsPath)), metadata.url);
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      const relative = path.relative(folder.uri.fsPath, uri.fsPath).replaceAll(path.sep, "/");
+      if (!relative.startsWith("..")) {
+        next.set(relative, metadata.url);
+        next.set(`./${relative}`, metadata.url);
+      }
+    }
+  }));
+  mediaTargets.clear();
+  next.forEach((url, key) => mediaTargets.set(key, url));
+}
+
+function parseMediaFrontMatter(text: string): { id: string; url: string } | null {
+  const normalized = text.replaceAll("\r\n", "\n");
+  if (!normalized.startsWith("---\n")) return null;
+  const end = normalized.indexOf("\n---", 4);
+  if (end < 0) return null;
+  const frontMatter = normalized.slice(4, end);
+  const scalar = (name: string): string | null => {
+    const match = new RegExp(`^${name}:\\s*(.+?)\\s*$`, "m").exec(frontMatter);
+    if (!match) return null;
+    return match[1].replace(/^(?:"(.*)"|'(.*)')$/, (_all, doubleQuoted, singleQuoted) => doubleQuoted ?? singleQuoted);
+  };
+  if (scalar("kind") !== "Media") return null;
+  const id = scalar("id");
+  const url = scalar("url");
+  return id && url ? { id, url } : null;
+}
+
+function resolveMediaHref(href: string): string | null {
+  const direct = mediaTargets.get(href);
+  if (direct) return direct;
+  try {
+    const decoded = decodeURIComponent(href);
+    return mediaTargets.get(decoded) ?? mediaTargets.get(path.basename(decoded)) ?? null;
+  } catch {
+    return mediaTargets.get(path.basename(href)) ?? null;
+  }
 }
 
 export async function deactivate(): Promise<void> {
@@ -136,10 +205,27 @@ function scanRelations(text: string): Array<{
   }> = [];
 
   for (let index = 0; index < text.length; index += 1) {
-    if (text[index] !== "@" || text[index + 1] !== "[" || isEscaped(text, index)) {
+    if (text[index] !== "@" || isEscaped(text, index)) {
       continue;
     }
-    const closeLabel = findUnescaped(text, "]", index + 2);
+    let labelOpen: number;
+    let props: Array<{ start: number; end: number }> = [];
+    if (text.startsWith("@link", index)) {
+      let cursor = index + "@link".length;
+      if (text[cursor] === "(") {
+        const argsEnd = findBalancedEnd(text, cursor, "(", ")");
+        if (argsEnd == null) continue;
+        cursor = argsEnd;
+      }
+      if (text[cursor] !== "{") continue;
+      props = scanInlineObjectProperties(text, cursor);
+      const propsEnd = findBalancedEnd(text, cursor, "{", "}");
+      if (propsEnd == null || text[propsEnd] !== "[") continue;
+      labelOpen = propsEnd;
+    } else {
+      continue;
+    }
+    const closeLabel = findUnescaped(text, "]", labelOpen + 1);
     if (closeLabel == null || text[closeLabel + 1] !== "(") {
       continue;
     }
@@ -155,10 +241,9 @@ function scanRelations(text: string): Array<{
     const targetStart = closeLabel + 2 + inside.indexOf(parsed.target);
     const relTypeToken = parsed.relTypeToken;
     const typeStart = closeLabel + 2 + inside.lastIndexOf(relTypeToken);
-    const props = scanInlineObjectProperties(text, skipWhitespace(text, closeParen + 1));
     relations.push({
       operatorStart: index,
-      labelStart: index + 2,
+      labelStart: labelOpen + 1,
       labelEnd: closeLabel,
       targetStart,
       targetEnd: targetStart + parsed.target.length,
@@ -170,6 +255,25 @@ function scanRelations(text: string): Array<{
   }
 
   return relations;
+}
+
+function findBalancedEnd(text: string, start: number, open: string, close: string): number | null {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === open) depth += 1;
+    else if (char === close && --depth === 0) return index + 1;
+  }
+  return null;
 }
 
 function scanPropsBlocks(text: string): Array<{
@@ -185,7 +289,12 @@ function scanPropsBlocks(text: string): Array<{
     if (!text.startsWith("@props", index)) {
       continue;
     }
-    const braceStart = skipWhitespace(text, index + 6);
+    let braceStart = index + 6;
+    if (text[braceStart] === "(") {
+      const argsEnd = findBalancedEnd(text, braceStart, "(", ")");
+      if (argsEnd == null) continue;
+      braceStart = argsEnd;
+    }
     if (text[braceStart] !== "{") {
       continue;
     }
