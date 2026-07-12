@@ -939,6 +939,18 @@ Aliceの名前は@props{name = "Alice"}です。
         data-props-name="name">Alice</span></span></p>
 ```
 
+`@props`はメタデータの宣言だけではなく、文中へbindしたPropertyの値を出力する記法である。プレビューでは、`@props`に記述された各Propertyについて`data-props-name`を持つ要素を生成し、その要素のテキストとしてPropertyの値を出力しなければならない。複数のPropertyを指定した場合は記述順にすべて出力する。文字列と数値はその文字列表現を出力し、textは表示対象として選択されたキーの値、その他の構造化された値はJSON表現を出力する。値を安全なテキストとしてエスケープし、値をHTMLとして解釈してはならない。外側の`data-props-bind`には、bindしたすべてのPropertyをJSONとして保持する。
+
+例えば次の記述では、プレビュー上に`Alice`と`20`の両方をこの順序で出力する。
+
+```markdown
+@props{name="Alice",age=20}
+```
+
+```html
+<span data-props-bind="{&quot;name&quot;:&quot;Alice&quot;,&quot;age&quot;:20}"><span data-props-name="name">Alice</span><span data-props-name="age">20</span></span>
+```
+
 ##### @propsのvalidTimeの主張
 
 各Propertyが主張するtimelineと期間の表現に以下の記法を使う
@@ -1042,9 +1054,16 @@ Aliceは@link(validTime=CommonEra){weight = 0.2}[Bob](bob friendOf)です
 </p>
 ```
 
-`@`と`[`の間にスペースを開けることは許されないまた、`)`と`{`の間にスペースを開けることは許されない
+`@link`の`{Property}`部は任意であり、LinkにPropertyがない場合は省略できる。省略形は次のように記述する。
 
-@link(validTime){Property}[文字列](id RelType)になっている
+```markdown
+Aliceは@link[Bob](bob friendOf)です
+Aliceは@link(validTime=CommonEra)[Bob](bob friendOf)です
+```
+
+省略形も空のPropertyを持つ通常形`@link{}[Bob](bob friendOf)`と同じLinkとして解釈する。ただし、Link自身のvalidTimeは引き続き`@link(...)`に保持される。`@link`またはその引数の直後と`[`の間、および`{Property}`を記述する場合は`}`と`[`の間に空白を入れてはならない。
+
+完全形は`@link(validTime){Property}[文字列](id RelType)`、Propertyを省略した形は`@link(validTime)[文字列](id RelType)`である。`validTime`引数も省略可能である。
 
 RelTypeはダブルコーテーションで囲むことが可能それ以外はMarkdownのリンクと同様
 
@@ -1053,6 +1072,8 @@ Link自身のvalidTimeは`@link(validTime){...}`のように指定する。Link�
 ```markdown
 @link(validTime=CommonEra){weight=0.3}[Bob](bob "friendOf")
 ```
+
+リンク先の`id`は、ワークスペース内のMarkdown文書のfrontmatterに記述された`id`を参照する。レンダラは`id`を定義するMarkdownファイルを解決し、そのファイルに対応する出力文書への相対URLを`href`へ設定しなければならない。ファイル名と`id`が一致することを前提としてはならない。相対URLはリンク元文書の位置を基準にし、出力時の拡張子やディレクトリ構造を反映する。対象の`id`を解決できない場合も表示文字列は出力するが、診断を報告し、存在しないパスを推測して`href`へ設定してはならない。対象の`id`が複数ファイルで定義されている場合は曖昧な参照として診断を報告する。
 
 ### マルチメディア対応
 
@@ -1073,15 +1094,34 @@ Kotlin Multiplatformで実装する
 
 Kotlin Multiplatformで実装する
 
+`@link`について、`{Property}`を持つ完全形と省略形の両方を同一のLinkモデルへ変換する。省略形のPropertyは空として扱い、後続する`[文字列](id RelType)`を欠落なく解析する。
+
 ### markdown-itプラグイン
 
 TypeScriptで実装する
 Markdown拡張記法パーサに依存する(Kotlin/JS)
 
+`@props`でbindしたPropertyの値を本文へ出力し、`data-props-bind`および`data-props-name`を付与する。`@link`の`id`はワークスペースのID索引を使って解決し、定義元Markdownファイルに対応する出力文書へのリンクとしてレンダリングする。Property部を省略した`@link`も完全形と同様にレンダリングする。
+
 ### VSCode拡張(lsp)
 
 LSP4Jで構築する
 markdown-itプラグインなどでプレビューをGraphMD対応させる
+
+LSPはワークスペース内のMarkdownファイルを走査し、frontmatterに現れるすべての`id`定義と、Markdown本文およびfrontmatterに現れるすべてのID参照を索引化する。ここでいうIDには、少なくともNode、Media、NodeType、RelType、Timelineの`id`、`type`、`extends`、timeline selector、validTimeの`timeline`、instantおよびdurationの`timeline`、`@link`のリンク先`id`とRelType、および拡張記法の値としてIDを取る箇所を含む。引用符の有無、配列内、ネストしたProperty内、`@link`のProperty部の省略有無によって索引対象から除外してはならない。
+
+索引化したすべてのID定義およびID参照に対して、LSPは次の機能を提供しなければならない。
+
+- 定義へ移動: 参照位置から、そのIDをfrontmatterで定義しているファイルと範囲へ移動する。定義位置自身から実行した場合も、その定義位置を返す。
+- 参照を検索: 定義と、Markdown本文およびfrontmatter内のすべての参照を返す。
+- ホバー: IDのkind、定義ファイル、および利用可能な型情報を表示する。
+- 補完: 文脈に適合するkindのIDを候補として提示する。例えば`@link`のリンク先にはNodeまたはMedia、RelType位置にはRelType、timeline位置にはTimelineを提示する。
+- 名前変更: 定義と索引化されたすべての参照をワークスペース編集として更新する。表示文字列など、IDではない同名テキストは変更しない。
+- 診断: 未解決ID、重複定義、期待するkindと異なるID、および複数候補により曖昧な参照を報告する。
+
+ファイルの追加、削除、名前変更、保存および編集中の変更に応じて索引を更新する。未保存文書についてはエディタ上の内容を優先する。ID解決はファイル名ではなくfrontmatterの`id`を基準とし、同じIDが複数定義されている場合、定義へ移動は候補をすべて返す。
+
+VSCode拡張はLSPの定義へ移動、参照を検索、ホバー、補完、名前変更および診断を標準のVSCode機能として公開する。またGraphMDプレビューへ同じワークスペースID索引を提供し、`@props`のbind値を本文に表示し、Property部を省略した`@link`を認識し、解決した`id`の定義元ファイルに対応するプレビュー文書へのリンクを生成する。プレビュー内でそのリンクを選択した場合は対象文書を開けなければならない。
 
 ## サンプル
 
