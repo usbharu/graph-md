@@ -2,6 +2,7 @@ package dev.usbharu.graphmd.core.model
 
 enum class DocumentKind {
     Node,
+    Media,
     NodeType,
     RelType,
     Timeline,
@@ -18,11 +19,14 @@ data class NodeDocument(
     override val id: String,
     val type: String,
     val props: Map<String, RawValue> = emptyMap(),
+    val url: String? = null,
+    val validTime: List<ValidTime> = emptyList(),
     override val body: String = "",
     override val sourcePath: String,
     val topLevelFields: Set<String> = setOf("id", "kind", "type", "props"),
+    val documentKind: DocumentKind = DocumentKind.Node,
 ) : GraphDocument {
-    override val kind: DocumentKind = DocumentKind.Node
+    override val kind: DocumentKind = documentKind
 }
 
 data class NodeTypeDocument(

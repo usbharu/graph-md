@@ -40,7 +40,7 @@ class GraphDocumentAnalyzerTest {
             kind: Node
             type: Person
             ---
-            @[Bob](bob friendOf)
+            @link{}[Bob](bob friendOf)
         """.trimIndent()
 
         val analysis = analyzer.analyze(text, "/tmp/alice.md")
@@ -82,7 +82,7 @@ class GraphDocumentAnalyzerTest {
             kind: Node
             type: "Person"
             ---
-            @[Bob](bob "friendOf")
+            @link{}[Bob](bob "friendOf")
         """.trimIndent()
 
         val analysis = analyzer.analyze(text, "/tmp/alice.md")
@@ -156,10 +156,10 @@ class GraphDocumentAnalyzerTest {
             # a comment
             ---
             ```lang
-            @[Ignored](ignored friendOf)
+            @link{}[Ignored](ignored friendOf)
             ```
             `[Also](ignored friendOf)`
-            @[Bob](bob friendOf)
+            @link{}[Bob](bob friendOf)
         """.trimIndent()
 
         val analysis = analyzer.analyze(text, "/tmp/alice.md")
@@ -176,10 +176,10 @@ class GraphDocumentAnalyzerTest {
             kind: Node
             type: Person
             ---
-            @[Bob
-            @[Bob]notparen
-            @[Bob](bob
-            @[Bob](bob friend of)
+            @link{[Bob
+            @link{}[Bob]notparen
+            @link{}[Bob](bob
+            @link{}[Bob](bob friend of)
         """.trimIndent()
 
         val analysis = analyzer.analyze(text, "/tmp/alice.md")
@@ -187,7 +187,7 @@ class GraphDocumentAnalyzerTest {
     }
 
     @Test
-    fun `node extends field yields no reference and timeline id yields no definition`() {
+    fun `timeline id and extends are Timeline symbols`() {
         val text = """
             ---
             id: CommonEra
@@ -197,8 +197,52 @@ class GraphDocumentAnalyzerTest {
         """.trimIndent()
 
         val analysis = analyzer.analyze(text, "/tmp/timeline.md")
-        assertTrue(analysis.definitions.isEmpty())
-        assertTrue(analysis.references.none { it.field == "extends" })
+        assertEquals(ReferenceTargetKind.Timeline, analysis.definitions.single().kind)
+        assertEquals(ReferenceTargetKind.Timeline, analysis.references.single { it.field == "extends" }.kind)
+        assertEquals("Other", analysis.references.single { it.field == "extends" }.targetId)
+    }
+
+    @Test
+    fun `extracts references from canonical link syntax`() {
+        val text = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            ---
+            @link(validTime=CommonEra){weight=0.2}[Bob](bob "friendOf")
+        """.trimIndent()
+
+        val analysis = analyzer.analyze(text, "/tmp/alice.md")
+        assertEquals("bob", analysis.references.single { it.field == "relation.target" }.targetId)
+        assertEquals("friendOf", analysis.references.single { it.field == "relation.type" }.targetId)
+        val targetOffset = text.lastIndexOf("bob") + 1
+        assertEquals(ReferenceTargetKind.Node, analyzer.findReferenceAt(analysis, targetOffset)?.kind)
+    }
+
+    @Test
+    fun `extracts Timeline references from yaml and inline validTime`() {
+        val text = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            validTime:
+              - timeline: CommonEra
+            props:
+              born:
+                timeline: Branch
+                timecode: 1
+            ---
+            @props(validTime=[CommonEra,Branch(from=1)]){age=1}
+        """.trimIndent()
+
+        val analysis = analyzer.analyze(text, "/tmp/alice.md")
+        val timelines = analysis.references.filter { it.kind == ReferenceTargetKind.Timeline }
+        assertTrue(timelines.count { it.targetId == "CommonEra" } >= 2)
+        assertTrue(timelines.count { it.targetId == "Branch" } >= 2)
+        val inlineOffset = text.lastIndexOf("Branch") + 1
+        assertEquals(ReferenceTargetKind.Timeline, analyzer.findReferenceAt(analysis, inlineOffset)?.kind)
     }
 
     @Test
@@ -297,13 +341,13 @@ class GraphDocumentAnalyzerTest {
             kind: Node
             type: Person
             ---
-            @[Bob](bob friendOf) tail
+            @link{}[Bob](bob friendOf) tail
         """.trimIndent()
         val analysis = analyzer.analyze(text, "/tmp/n.md")
 
         assertEquals(ReferenceTargetKind.Node, analyzer.inferCompletionKind(analysis, text.indexOf("bob")))
         assertEquals(ReferenceTargetKind.RelType, analyzer.inferCompletionKind(analysis, text.indexOf("friendOf")))
-        assertNull(analyzer.inferCompletionKind(analysis, text.indexOf("@[")))
+        assertNull(analyzer.inferCompletionKind(analysis, text.indexOf("@link")))
         assertNull(analyzer.inferCompletionKind(analysis, text.indexOf("tail")))
     }
 
@@ -315,7 +359,7 @@ class GraphDocumentAnalyzerTest {
             kind: Node
             type: Person
             ---
-            @[Bob](bob friendOf
+            @link{}[Bob](bob friendOf
         """.trimIndent()
         val unclosedAnalysis = analyzer.analyze(unclosed, "/tmp/n.md")
         assertNull(analyzer.inferCompletionKind(unclosedAnalysis, unclosed.indexOf("bob")))

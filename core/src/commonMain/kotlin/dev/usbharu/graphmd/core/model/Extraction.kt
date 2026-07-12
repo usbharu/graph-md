@@ -11,4 +11,5 @@ data class ExtractedRelation(
     val label: String,
     val props: Map<String, RawValue>,
     val range: SourceRange,
+    val validTime: List<ValidTime> = emptyList(),
 )

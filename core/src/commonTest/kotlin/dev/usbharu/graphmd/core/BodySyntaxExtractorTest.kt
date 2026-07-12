@@ -14,15 +14,15 @@ class BodySyntaxExtractorTest {
             # Alice
 
             @props{name = "Alice"}
-            Alice is friends with @[Bob](bob friendOf){weight = 0.82}
+            Alice is friends with @link{weight = 0.82}[Bob](bob friendOf)
 
             ```md
             @props{name = "Ignored"}
-            @[Ignored](ignored friendOf)
+            @link{}[Ignored](ignored friendOf)
             ```
 
-            `@[Inline](inline friendOf)`
-            \@[Escaped](escaped friendOf)
+            `@link{}[Inline](inline friendOf)`
+            \@link{}[Escaped](escaped friendOf)
         """.trimIndent()
 
         val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
@@ -35,7 +35,7 @@ class BodySyntaxExtractorTest {
 
     @Test
     fun `supports escaped label characters`() {
-        val body = """@[Bob \] Jr.](bob-jr friendOf)"""
+        val body = """@link{}[Bob \] Jr.](bob-jr friendOf)"""
 
         val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
 
@@ -44,7 +44,7 @@ class BodySyntaxExtractorTest {
 
     @Test
     fun `supports quoted rel type`() {
-        val body = """@[Bob](bob "friendOf"){weight = 0.82}"""
+        val body = """@link{weight = 0.82}[Bob](bob "friendOf")"""
 
         val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
 
@@ -54,7 +54,7 @@ class BodySyntaxExtractorTest {
 
     @Test
     fun `reports malformed relation`() {
-        val body = """@[Bob](bob)"""
+        val body = """@link{}[Bob](bob)"""
 
         val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
 
@@ -65,7 +65,7 @@ class BodySyntaxExtractorTest {
     fun `reports malformed props and invalid relation props`() {
         val body = """
             @props{name = "Alice"
-            @[Bob](bob friendOf){weight = }
+            @link{weight = }[Bob](bob friendOf)
         """.trimIndent()
 
         val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
@@ -78,9 +78,9 @@ class BodySyntaxExtractorTest {
     fun `ignores indented code blocks`() {
         val body = """
                 @props{name = "Ignored"}
-                @[Ignored](ignored friendOf)
+                @link{}[Ignored](ignored friendOf)
 
-            @[Bob](bob friendOf)
+            @link{}[Bob](bob friendOf)
         """.trimIndent()
 
         val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
@@ -92,8 +92,8 @@ class BodySyntaxExtractorTest {
     @Test
     fun `reports unclosed relation label and target`() {
         val body = """
-            @[Bob(bob friendOf)
-            @[Carol](carol friendOf
+            @link{}[Bob(bob friendOf)
+            @link{}[Carol](carol friendOf
         """.trimIndent()
 
         val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
@@ -105,24 +105,24 @@ class BodySyntaxExtractorTest {
     @Test
     fun `reports missing relation paren and unclosed relation props`() {
         val body = """
-            @[Bob]x
-            @[Carol](carol friendOf){weight = 1
+            @link{}[Bob]x
+            @link{weight = 1[Carol](carol friendOf)
         """.trimIndent()
 
         val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
 
         assertTrue(extracted.diagnostics.any { "Relation must be followed by (...)" in it.message })
-        assertTrue(extracted.diagnostics.any { "Unclosed relation props" in it.message })
+        assertTrue(extracted.diagnostics.any { "Unclosed @link property block" in it.message })
     }
 
     @Test
     fun `handles unterminated fenced and inline code spans`() {
         val body = """
             ```md
-            @[Ignored](ignored friendOf)
+            @link{}[Ignored](ignored friendOf)
             @props{name = "Ignored"}
-            @[Bob](bob friendOf)
-            `@[StillIgnored](ignored friendOf)
+            @link{}[Bob](bob friendOf)
+            `@link{}[StillIgnored](ignored friendOf)
         """.trimIndent()
 
         val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
@@ -133,7 +133,7 @@ class BodySyntaxExtractorTest {
 
     @Test
     fun `treats double backslash marker as unescaped`() {
-        val body = """\\@[Bob](bob friendOf)"""
+        val body = """\\@link{}[Bob](bob friendOf)"""
 
         val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
 
@@ -143,7 +143,7 @@ class BodySyntaxExtractorTest {
     @Test
     fun `supports relation without props and ignores props without brace`() {
         val body = """
-            @[Bob](bob friendOf)
+            @link{}[Bob](bob friendOf)
             @props name = "ignored"
         """.trimIndent()
 
@@ -157,7 +157,7 @@ class BodySyntaxExtractorTest {
     fun `treats nested braces and escaped strings as balanced`() {
         val body = """
             @props{meta = { text = "a\"b", nested = { value = "x" } }}
-            @[Bob](bob friendOf){meta = { value = "{x}" }}
+            @link{meta = { value = "{x}" }}[Bob](bob friendOf)
         """.trimIndent()
 
         val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
@@ -172,7 +172,7 @@ class BodySyntaxExtractorTest {
             email@example.com
             @props
             @unknown
-            @[Bob](bob friendOf)
+            @link{}[Bob](bob friendOf)
         """.trimIndent()
 
         val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
@@ -188,5 +188,41 @@ class BodySyntaxExtractorTest {
         assertEquals(0, extracted.relations.size)
         assertEquals(0, extracted.propsBlocks.size)
         assertEquals(0, extracted.diagnostics.size)
+    }
+
+    @Test
+    fun `extracts canonical link syntax and link validTime`() {
+        val extracted = extractor.extract(
+            """Aliceは@link(validTime=[CommonEra,Branch(from=1,to=2)]){weight=0.2}[Bob](bob "friendOf")です""",
+            "/tmp/alice.md",
+            "alice",
+        )
+
+        assertTrue(extracted.diagnostics.isEmpty(), extracted.diagnostics.joinToString("\n") { it.message })
+        val relation = extracted.relations.single()
+        assertEquals("bob", relation.target)
+        assertEquals("friendOf", relation.relType)
+        assertEquals(0.2, (relation.props.getValue("weight") as RawNumber).value)
+        assertEquals(listOf("CommonEra", "Branch"), relation.validTime.map { it.timeline })
+        assertEquals(1.0, relation.validTime[1].from?.timecode)
+        assertEquals(2.0, relation.validTime[1].to?.timecode)
+    }
+
+    @Test
+    fun `extracts props-wide and per-property validTime assertions`() {
+        val extracted = extractor.extract(
+            """@props(validTime=[CommonEra]){age=25,name(validTime=Branch(from=1,to=2))="Alice"}""",
+            "/tmp/alice.md",
+            "alice",
+        )
+
+        assertTrue(extracted.diagnostics.isEmpty(), extracted.diagnostics.joinToString("\n") { it.message })
+        val props = extracted.propsBlocks.single().props
+        val ageEntry = ((props.getValue("age") as RawArray).values.single() as RawObject)
+        val ageTime = (ageEntry.values.getValue("validTime") as RawArray).values.single() as RawObject
+        assertEquals("CommonEra", (ageTime.values.getValue("timeline") as RawString).value)
+        val nameEntry = ((props.getValue("name") as RawArray).values.single() as RawObject)
+        val nameTime = (nameEntry.values.getValue("validTime") as RawArray).values.single() as RawObject
+        assertEquals("Branch", (nameTime.values.getValue("timeline") as RawString).value)
     }
 }

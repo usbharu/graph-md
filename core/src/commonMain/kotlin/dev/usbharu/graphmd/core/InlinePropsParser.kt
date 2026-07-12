@@ -24,12 +24,29 @@ class InlinePropsParser(private val input: String) {
         while (!tryConsume('}')) {
             val key = parseIdentifier()
             skipHorizontalAndNewlines()
+            val annotation = if (peek() == '(') parseKeyAnnotation() else KeyAnnotation()
+            skipHorizontalAndNewlines()
             expect('=')
             skipHorizontalAndNewlines()
-            if (key in result) {
-                fail("Duplicate key: $key")
+            var value = parseValue()
+            annotation.textKey?.let { textKey ->
+                value = RawObject(mapOf(textKey to value))
             }
-            result[key] = parseValue()
+            annotation.validTime?.let { validTime ->
+                value = RawObject(mapOf("value" to value, "validTime" to validTime))
+            }
+            val previous = result[key]
+            result[key] = when {
+                previous == null && annotation.validTime != null -> RawArray(listOf(value))
+                previous == null -> value
+                annotation.textKey != null && previous is RawObject && value is RawObject ->
+                    RawObject(previous.values + value.values)
+                annotation.validTime != null -> when (previous) {
+                    is RawArray -> RawArray(previous.values + value)
+                    else -> RawArray(listOf(previous, value))
+                }
+                else -> fail("Duplicate key: $key")
+            }
             val hadWhitespace = skipHorizontalAndNewlines()
             if (tryConsume(',')) {
                 skipHorizontalAndNewlines()
@@ -39,6 +56,74 @@ class InlinePropsParser(private val input: String) {
         }
         return RawObject(result)
     }
+
+    private fun parseKeyAnnotation(): KeyAnnotation {
+        expect('(')
+        skipHorizontalAndNewlines()
+        var textKey: String? = null
+        var validTime: RawArray? = null
+        while (!tryConsume(')')) {
+            val name = parseIdentifier()
+            skipHorizontalAndNewlines()
+            expect('=')
+            skipHorizontalAndNewlines()
+            when (name) {
+                "key" -> textKey = if (peek() == '"') parseQuotedString() else parseIdentifier()
+                "validTime" -> validTime = parseValidTimeExpression()
+                else -> fail("Unknown key annotation: $name")
+            }
+            skipHorizontalAndNewlines()
+            if (tryConsume(',')) skipHorizontalAndNewlines() else if (peek() != ')') fail("Expected annotation separator")
+        }
+        if (textKey != null && validTime != null) fail("key and validTime cannot be combined")
+        return KeyAnnotation(textKey, validTime)
+    }
+
+    private fun parseValidTimeExpression(): RawArray {
+        val entries = mutableListOf<RawValue>()
+        if (tryConsume('[')) {
+            skipHorizontalAndNewlines()
+            while (!tryConsume(']')) {
+                entries += parseValidTimeEntry()
+                skipHorizontalAndNewlines()
+                if (tryConsume(',')) skipHorizontalAndNewlines() else if (peek() != ']') fail("validTime entries must be comma-separated")
+            }
+        } else {
+            entries += parseValidTimeEntry()
+        }
+        return RawArray(entries)
+    }
+
+    private fun parseValidTimeEntry(): RawObject {
+        val timeline = parseIdentifier()
+        val values = linkedMapOf<String, RawValue>("timeline" to RawString(timeline))
+        if (tryConsume('(')) {
+            skipHorizontalAndNewlines()
+            while (!tryConsume(')')) {
+                val bound = parseIdentifier()
+                if (bound !in setOf("from", "to")) fail("validTime only accepts from and to")
+                skipHorizontalAndNewlines()
+                expect('=')
+                skipHorizontalAndNewlines()
+                val rawPoint = parseValue()
+                val point = when (rawPoint) {
+                    is RawInteger -> RawObject(mapOf("timecode" to rawPoint))
+                    is RawNumber -> RawObject(mapOf("timecode" to rawPoint))
+                    is RawObject -> rawPoint
+                    else -> fail("validTime bound must be numeric or a timePoint object")
+                }
+                values[bound] = point
+                skipHorizontalAndNewlines()
+                if (tryConsume(',')) skipHorizontalAndNewlines() else if (peek() != ')') fail("validTime bounds must be comma-separated")
+            }
+        }
+        return RawObject(values)
+    }
+
+    private data class KeyAnnotation(
+        val textKey: String? = null,
+        val validTime: RawArray? = null,
+    )
 
     private fun parseValue(): RawValue {
         skipHorizontalAndNewlines()

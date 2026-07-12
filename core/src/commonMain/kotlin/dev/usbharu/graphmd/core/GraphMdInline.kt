@@ -15,4 +15,12 @@ object GraphMdInline {
 
     public fun parseInlineObjectJson(content: String): String =
         rawObjectToJsonString(InlinePropsParser(content).parseObject())
+
+    public fun parsePropsDirectiveJson(content: String): String {
+        val extracted = BodySyntaxExtractor().extract(content, "<inline>", "<inline>")
+        if (extracted.diagnostics.isNotEmpty() || extracted.propsBlocks.size != 1) {
+            throw InlinePropsParseException(extracted.diagnostics.firstOrNull()?.message ?: "Invalid @props directive")
+        }
+        return rawObjectToJsonString(dev.usbharu.graphmd.core.model.RawObject(extracted.propsBlocks.single().props))
+    }
 }

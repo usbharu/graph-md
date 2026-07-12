@@ -6,6 +6,7 @@ enum class ReferenceTargetKind {
     Node,
     NodeType,
     RelType,
+    Timeline,
 }
 
 data class SymbolDefinition(
@@ -87,9 +88,7 @@ class GraphDocumentAnalyzer {
                     )
                     when (field) {
                         "id" -> document?.id?.let { id ->
-                            definitionKind(document)?.let { kind ->
-                                definitions += SymbolDefinition(id, kind, range)
-                            }
+                            definitions += SymbolDefinition(id, definitionKind(document), range)
                         }
                         "type" -> if (document is NodeDocument) {
                             references += SymbolReference(stripYamlScalar(value), ReferenceTargetKind.NodeType, field, range)
@@ -106,7 +105,7 @@ class GraphDocumentAnalyzer {
 
             if (currentListField != null && Regex("""^\s*-\s+""").containsMatchIn(line)) {
                 val match = Regex("""^(\s*-\s+)(.*?)\s*$""").matchEntire(line) ?: continue
-                val field = currentListField ?: continue
+                val field = currentListField
                 val kind = listFieldKind(field, document) ?: continue
                 val rawValue = match.groupValues[2]
                 val itemStart = lineStarts[lineIndex] + match.groupValues[1].length
@@ -124,9 +123,12 @@ class GraphDocumentAnalyzer {
             }
         }
 
+        collectTimelineReferences(lines, lineStarts, endLine, document, references)
+
         if (document is NodeDocument) {
             val bodyOffset = lineStarts[endLine] + lines[endLine].length + 1
             references += extractBodyReferences(document.body, bodyOffset)
+            references += extractInlineTimelineReferences(document.body, bodyOffset)
         }
 
         val frontMatterEndOffset = lineStarts[endLine] + lines[endLine].length + 1
@@ -163,8 +165,12 @@ class GraphDocumentAnalyzer {
             if (offset >= valueStart) {
                 return when (field) {
                     "type" -> ReferenceTargetKind.NodeType
-                    "extends" -> if (kind == DocumentKind.RelType) ReferenceTargetKind.RelType else ReferenceTargetKind.NodeType
-                    "from", "to" -> ReferenceTargetKind.NodeType
+                    "extends" -> when (kind) {
+                        DocumentKind.RelType -> ReferenceTargetKind.RelType
+                        DocumentKind.Timeline -> ReferenceTargetKind.Timeline
+                        else -> ReferenceTargetKind.NodeType
+                    }
+                    "from", "to" -> if (kind == DocumentKind.Timeline) ReferenceTargetKind.Timeline else ReferenceTargetKind.NodeType
                     else -> null
                 }
             }
@@ -176,8 +182,12 @@ class GraphDocumentAnalyzer {
                 val match = Regex("""^([A-Za-z][A-Za-z0-9_-]*)\s*:\s*$""").matchEntire(previousLine)
                 if (match != null) {
                     return when (match.groupValues[1]) {
-                        "extends" -> if (kind == DocumentKind.RelType) ReferenceTargetKind.RelType else ReferenceTargetKind.NodeType
-                        "from", "to" -> ReferenceTargetKind.NodeType
+                        "extends" -> when (kind) {
+                            DocumentKind.RelType -> ReferenceTargetKind.RelType
+                            DocumentKind.Timeline -> ReferenceTargetKind.Timeline
+                            else -> ReferenceTargetKind.NodeType
+                        }
+                        "from", "to" -> if (kind == DocumentKind.Timeline) ReferenceTargetKind.Timeline else ReferenceTargetKind.NodeType
                         else -> null
                     }
                 }
@@ -188,11 +198,21 @@ class GraphDocumentAnalyzer {
     }
 
     private fun inferBodyCompletionKind(text: String, offset: Int): ReferenceTargetKind? {
+        val validTimeMarker = text.lastIndexOf("validTime=", startIndex = offset.coerceAtMost(text.lastIndex))
+        if (validTimeMarker >= 0) {
+            val between = text.substring(validTimeMarker + "validTime=".length, offset.coerceAtMost(text.length))
+            if ('\n' !in between && '}' !in between && between.count { it == '(' } >= between.count { it == ')' }) {
+                return ReferenceTargetKind.Timeline
+            }
+        }
         val openParen = text.lastIndexOf('(', startIndex = offset)
         val closeParen = if (openParen >= 0) text.indexOf(')', startIndex = openParen) else -1
         if (openParen < 0 || closeParen < 0 || offset > closeParen) return null
-        val relationStart = text.lastIndexOf("@[", startIndex = openParen)
-        if (relationStart < 0) return null
+        val labelOpen = text.lastIndexOf('[', startIndex = openParen)
+        if (labelOpen < 0) return null
+        val oldRelation = labelOpen > 0 && text[labelOpen - 1] == '@'
+        val canonicalStart = text.lastIndexOf("@link", startIndex = labelOpen)
+        if (!oldRelation && (canonicalStart < 0 || text.substring(canonicalStart, labelOpen).any { it == '\n' })) return null
         val inner = text.substring(openParen + 1, closeParen)
         val relativeOffset = offset - openParen - 1
         val firstWhitespace = inner.indexOfFirst { it.isWhitespace() }
@@ -208,8 +228,17 @@ class GraphDocumentAnalyzer {
         val masked = maskCodeRegions(body)
         var index = 0
         while (index < masked.length) {
-            if (masked[index] == '@' && masked.getOrNull(index + 1) == '[' && !isEscaped(masked, index)) {
-                val closeLabel = findUnescaped(masked, ']', index + 2)
+            if (masked[index] == '@' && !isEscaped(masked, index)) {
+                val labelOpen = when {
+                    masked.getOrNull(index + 1) == '[' -> index + 1
+                    masked.startsWith("@link", index) -> canonicalLinkLabelOpen(masked, index)
+                    else -> null
+                }
+                if (labelOpen == null) {
+                    index += 1
+                    continue
+                }
+                val closeLabel = findUnescaped(masked, ']', labelOpen + 1)
                 if (closeLabel != null && masked.getOrNull(closeLabel + 1) == '(') {
                     val closeParen = findUnescaped(masked, ')', closeLabel + 2)
                     if (closeParen != null) {
@@ -232,6 +261,39 @@ class GraphDocumentAnalyzer {
             index += 1
         }
         return refs
+    }
+
+    private fun canonicalLinkLabelOpen(text: String, start: Int): Int? {
+        var cursor = start + "@link".length
+        if (text.getOrNull(cursor) == '(') {
+            cursor = readBalancedEnd(text, cursor, '(', ')') ?: return null
+        }
+        if (text.getOrNull(cursor) != '{') return null
+        cursor = readBalancedEnd(text, cursor, '{', '}') ?: return null
+        return cursor.takeIf { text.getOrNull(it) == '[' }
+    }
+
+    private fun readBalancedEnd(text: String, start: Int, open: Char, close: Char): Int? {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (index in start until text.length) {
+            val char = text[index]
+            if (inString) {
+                when {
+                    escaped -> escaped = false
+                    char == '\\' -> escaped = true
+                    char == '"' -> inString = false
+                }
+            } else {
+                when (char) {
+                    '"' -> inString = true
+                    open -> depth += 1
+                    close -> if (--depth == 0) return index + 1
+                }
+            }
+        }
+        return null
     }
 
     private fun maskCodeRegions(body: String): String {
@@ -315,24 +377,79 @@ class GraphDocumentAnalyzer {
         }
     }
 
+    private fun collectTimelineReferences(
+        lines: List<String>,
+        lineStarts: List<Int>,
+        endLine: Int,
+        document: GraphDocument?,
+        references: MutableList<SymbolReference>,
+    ) {
+        for (lineIndex in 1 until endLine) {
+            val line = lines[lineIndex]
+            val match = Regex("""^(\s*)(?:-\s*)?(timeline|from|to):\s*([A-Za-z_][A-Za-z0-9_.:-]*)\s*$""").matchEntire(line) ?: continue
+            val field = match.groupValues[2]
+            if (field in setOf("from", "to") && document !is TimelineDocument) continue
+            val id = match.groupValues[3]
+            val start = lineStarts[lineIndex] + line.lastIndexOf(id)
+            if (references.any { it.kind == ReferenceTargetKind.Timeline && it.range.start == start }) continue
+            references += SymbolReference(id, ReferenceTargetKind.Timeline, field, SourceRange(start, start + id.length))
+        }
+    }
+
+    private fun extractInlineTimelineReferences(body: String, baseOffset: Int): List<SymbolReference> {
+        val references = mutableListOf<SymbolReference>()
+        val masked = maskCodeRegions(body)
+        Regex("""validTime\s*=\s*""").findAll(masked).forEach { marker ->
+            var cursor = marker.range.last + 1
+            val end = when (masked.getOrNull(cursor)) {
+                '[' -> readBalancedEnd(masked, cursor, '[', ']') ?: cursor
+                else -> {
+                    var depth = 0
+                    var index = cursor
+                    while (index < masked.length) {
+                        val char = masked[index]
+                        if (char == '(') depth++
+                        if (char == ')' && depth-- == 0) break
+                        if (depth == 0 && char in setOf(',', '}', '\n')) break
+                        index++
+                    }
+                    index
+                }
+            }
+            val expression = body.substring(cursor, end.coerceAtMost(body.length))
+            Regex("""[A-Za-z_][A-Za-z0-9_.:-]*""").findAll(expression).forEach { token ->
+                if (token.value in setOf("from", "to", "timecode", "value")) return@forEach
+                val absoluteStart = baseOffset + cursor + token.range.first
+                references += SymbolReference(
+                    token.value,
+                    ReferenceTargetKind.Timeline,
+                    "validTime.timeline",
+                    SourceRange(absoluteStart, absoluteStart + token.value.length),
+                )
+            }
+        }
+        return references
+    }
+
     private fun listFieldKind(field: String, document: GraphDocument?): ReferenceTargetKind? {
         return when (field) {
-            "from", "to" -> ReferenceTargetKind.NodeType
+            "from", "to" -> if (document is TimelineDocument) ReferenceTargetKind.Timeline else ReferenceTargetKind.NodeType
             "extends" -> when (document) {
-                is RelTypeDocument -> ReferenceTargetKind.RelType
-                is NodeTypeDocument -> ReferenceTargetKind.NodeType
+            is RelTypeDocument -> ReferenceTargetKind.RelType
+            is NodeTypeDocument -> ReferenceTargetKind.NodeType
+            is TimelineDocument -> ReferenceTargetKind.Timeline
                 else -> null
             }
             else -> null
         }
     }
 
-    private fun definitionKind(document: GraphDocument): ReferenceTargetKind? {
+    private fun definitionKind(document: GraphDocument): ReferenceTargetKind {
         return when (document) {
             is NodeDocument -> ReferenceTargetKind.Node
             is NodeTypeDocument -> ReferenceTargetKind.NodeType
             is RelTypeDocument -> ReferenceTargetKind.RelType
-            else -> null
+            is TimelineDocument -> ReferenceTargetKind.Timeline
         }
     }
 

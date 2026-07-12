@@ -140,4 +140,22 @@ class InlinePropsParserTest {
         assertEquals(RawNull, flags.values[2])
         assertEquals("backend", (parsed.values.getValue("role") as RawString).value)
     }
+
+    @Test
+    fun `parses text keys and repeated validTime property assertions`() {
+        val parsed = InlinePropsParser(
+            """{name(key="lang:ja")="アリス",name(key="lang:us")="Alice",age(validTime=CommonEra)=25,age(validTime=Branch(from=1,to=2))=24}""",
+        ).parseObject()
+
+        val name = parsed.values.getValue("name") as RawObject
+        assertEquals("アリス", (name.values.getValue("lang:ja") as RawString).value)
+        assertEquals("Alice", (name.values.getValue("lang:us") as RawString).value)
+        val ages = parsed.values.getValue("age") as RawArray
+        assertEquals(2, ages.values.size)
+        val branchEntry = ages.values[1] as RawObject
+        val validTime = branchEntry.values.getValue("validTime") as RawArray
+        val branch = validTime.values.single() as RawObject
+        assertEquals("Branch", (branch.values.getValue("timeline") as RawString).value)
+        assertEquals(1L, ((branch.values.getValue("from") as RawObject).values.getValue("timecode") as RawInteger).value)
+    }
 }

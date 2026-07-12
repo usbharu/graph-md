@@ -19,14 +19,39 @@ class BodySyntaxExtractor {
             if (masked[index] == '@' && !isEscaped(masked, index)) {
                 when {
                     masked.startsWith("@props", index) -> {
-                        val objectStart = index + "@props".length
+                        var objectStart = index + "@props".length
+                        var defaultValidTime: RawArray? = null
+                        if (masked.getOrNull(objectStart) == '(') {
+                            val args = readBalanced(masked, objectStart, '(', ')')
+                            if (args == null) {
+                                diagnostics += syntaxDiagnostic("Unclosed @props arguments", sourcePath, documentId, index, body.length)
+                                index += 1
+                                continue
+                            }
+                            val argumentText = body.substring(objectStart + 1, args.end - 1).trim()
+                            if (!argumentText.startsWith("validTime=")) {
+                                diagnostics += syntaxDiagnostic("@props only accepts validTime=...", sourcePath, documentId, index, args.end)
+                                index = args.end
+                                continue
+                            }
+                            defaultValidTime = try {
+                                val dummy = InlinePropsParser("{x(${argumentText})=0}").parseObject().values.getValue("x") as RawArray
+                                ((dummy.values.single() as RawObject).values.getValue("validTime") as RawArray)
+                            } catch (e: Exception) {
+                                diagnostics += syntaxDiagnostic(e.message ?: "Invalid @props validTime", sourcePath, documentId, index, args.end)
+                                index = args.end
+                                continue
+                            }
+                            objectStart = args.end
+                        }
                         if (masked.getOrNull(objectStart) == '{') {
                             val range = readBalanced(masked, objectStart, '{', '}')
                             if (range != null) {
                                 val text = body.substring(objectStart, range.end)
                                 try {
                                     val parsed = InlinePropsParser(text).parseObject()
-                                    propsBlocks += ExtractedPropsBlock(parsed.values, SourceRange(index, range.end))
+                                    val props = defaultValidTime?.let { applyDefaultValidTime(parsed.values, it) } ?: parsed.values
+                                    propsBlocks += ExtractedPropsBlock(props, SourceRange(index, range.end))
                                 } catch (e: InlinePropsParseException) {
                                     diagnostics += syntaxDiagnostic(e.message ?: "Invalid @props", sourcePath, documentId, index, range.end)
                                 }
@@ -36,8 +61,8 @@ class BodySyntaxExtractor {
                             diagnostics += syntaxDiagnostic("Unclosed @props block", sourcePath, documentId, index, body.length)
                         }
                     }
-                    masked.startsWith("@[", index) -> {
-                        val relation = parseRelation(masked, body, index, sourcePath, documentId, diagnostics)
+                    masked.startsWith("@link", index) -> {
+                        val relation = parseCanonicalRelation(masked, body, index, sourcePath, documentId, diagnostics)
                         if (relation != null) {
                             relations += relation.first
                             index = relation.second
@@ -49,6 +74,123 @@ class BodySyntaxExtractor {
             index += 1
         }
         return BodySyntaxExtraction(propsBlocks, relations, diagnostics)
+    }
+
+    private fun applyDefaultValidTime(props: Map<String, RawValue>, validTime: RawArray): Map<String, RawValue> =
+        props.mapValues { (_, value) ->
+            val explicitEntries = (value as? RawArray)?.values?.takeIf { entries ->
+                entries.all { it is RawObject && "value" in it.values }
+            }
+            if (explicitEntries != null) {
+                RawArray(explicitEntries.map { entry ->
+                    val obj = entry as RawObject
+                    if ("validTime" in obj.values) obj else RawObject(obj.values + ("validTime" to validTime))
+                })
+            } else {
+                RawArray(listOf(RawObject(mapOf("value" to value, "validTime" to validTime))))
+            }
+        }
+
+    private fun parseCanonicalRelation(
+        masked: String,
+        original: String,
+        start: Int,
+        sourcePath: String,
+        documentId: String,
+        diagnostics: MutableList<Diagnostic>,
+    ): Pair<ExtractedRelation, Int>? {
+        var cursor = start + "@link".length
+        var validTime = emptyList<ValidTime>()
+        if (masked.getOrNull(cursor) == '(') {
+            val args = readBalanced(masked, cursor, '(', ')') ?: run {
+                diagnostics += syntaxDiagnostic("Unclosed @link arguments", sourcePath, documentId, start, original.length)
+                return null
+            }
+            val argumentText = original.substring(cursor + 1, args.end - 1).trim()
+            validTime = parseValidTimeArgument(argumentText, sourcePath, documentId, start, args.end, diagnostics) ?: return null
+            cursor = args.end
+        }
+        if (masked.getOrNull(cursor) != '{') {
+            diagnostics += syntaxDiagnostic("@link must be followed by a property block", sourcePath, documentId, start, cursor)
+            return null
+        }
+        val propsRange = readBalanced(masked, cursor, '{', '}') ?: run {
+            diagnostics += syntaxDiagnostic("Unclosed @link property block", sourcePath, documentId, start, original.length)
+            return null
+        }
+        val props = try {
+            InlinePropsParser(original.substring(cursor, propsRange.end)).parseObject().values
+        } catch (e: InlinePropsParseException) {
+            diagnostics += syntaxDiagnostic(e.message ?: "Invalid @link properties", sourcePath, documentId, start, propsRange.end)
+            return null
+        }
+        cursor = propsRange.end
+        if (masked.getOrNull(cursor) != '[') {
+            diagnostics += syntaxDiagnostic("@link property block must be followed immediately by a link", sourcePath, documentId, start, cursor)
+            return null
+        }
+        val parsed = parseRelation(masked, original, cursor - 1, sourcePath, documentId, diagnostics) ?: return null
+        val relation = parsed.first.copy(props = props, range = SourceRange(start, parsed.second), validTime = validTime)
+        return relation to parsed.second
+    }
+
+    private fun parseValidTimeArgument(
+        text: String,
+        sourcePath: String,
+        documentId: String,
+        start: Int,
+        end: Int,
+        diagnostics: MutableList<Diagnostic>,
+    ): List<ValidTime>? {
+        if (!text.startsWith("validTime=")) {
+            diagnostics += syntaxDiagnostic("@link only accepts validTime=...", sourcePath, documentId, start, end)
+            return null
+        }
+        val expression = text.substringAfter('=').trim()
+        return try {
+            val entries = InlinePropsParser("{x(validTime=$expression)=0}").parseObject().values.getValue("x") as RawArray
+            val validTime = ((entries.values.single() as RawObject).values.getValue("validTime") as RawArray)
+            validTime.values.map { raw ->
+                val obj = raw as RawObject
+                ValidTime(
+                    timeline = (obj.values.getValue("timeline") as RawString).value,
+                    from = inlineTimePoint(obj.values["from"]),
+                    to = inlineTimePoint(obj.values["to"]),
+                )
+            }
+        } catch (e: Exception) {
+            diagnostics += syntaxDiagnostic(e.message ?: "Invalid validTime expression", sourcePath, documentId, start, end)
+            null
+        }
+    }
+
+    private fun inlineTimePoint(raw: RawValue?): TimePoint? {
+        if (raw == null) return null
+        val obj = raw as RawObject
+        val timecode = when (val value = obj.values.getValue("timecode")) {
+            is RawInteger -> value.value.toDouble()
+            is RawNumber -> value.value
+            else -> throw InlinePropsParseException("timePoint.timecode must be number")
+        }
+        return TimePoint(timecode, (obj.values["value"] as? RawString)?.value)
+    }
+
+    private fun splitTopLevel(text: String): List<String> {
+        val result = mutableListOf<String>()
+        var depth = 0
+        var start = 0
+        text.forEachIndexed { index, ch ->
+            when (ch) {
+                '(', '[' -> depth++
+                ')', ']' -> depth--
+                ',' -> if (depth == 0) {
+                    result += text.substring(start, index)
+                    start = index + 1
+                }
+            }
+        }
+        result += text.substring(start)
+        return result
     }
 
     private fun parseRelation(

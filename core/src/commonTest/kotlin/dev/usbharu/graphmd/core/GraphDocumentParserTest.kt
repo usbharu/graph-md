@@ -26,7 +26,7 @@ class GraphDocumentParserTest {
                     timeline: CommonEra
                     value: "AD 2001-04-12"
                 ---
-                Alice is friends with @[Bob](bob friendOf)
+                Alice is friends with @link{}[Bob](bob friendOf)
             """.trimIndent(),
             sourcePath = "/tmp/alice.md",
         )
@@ -38,7 +38,7 @@ class GraphDocumentParserTest {
         assertEquals("Person", document.type)
         assertEquals("Alice", (document.props.getValue("name") as RawString).value)
         assertEquals("Al", ((document.props.getValue("aliases") as RawArray).values.single() as RawString).value)
-        assertTrue(document.body.contains("@[Bob](bob friendOf)"))
+        assertTrue(document.body.contains("@link{}[Bob](bob friendOf)"))
         assertTrue("type" in document.topLevelFields)
     }
 
@@ -84,9 +84,10 @@ class GraphDocumentParserTest {
                 kind: Timeline
                 timecode:
                   type: number
-                  direction: ascending
                 mappings:
-                  - kind: none
+                  - kind: offset
+                    to: Other
+                    offset: 1.5
                 ---
             """.trimIndent(),
             "/tmp/timeline.md",
@@ -100,13 +101,12 @@ class GraphDocumentParserTest {
         assertEquals(TimelineSelector.Id("CommonEra"), relType.props.getValue("since").timeline)
         assertNotNull(timeline)
         assertEquals(TimecodeType.number, timeline.timecode?.type)
-        assertEquals(TimecodeDirection.ascending, timeline.timecode?.direction)
         assertEquals(1, timeline.mappings.size)
-        assertTrue(timeline.mappings.single() is NoTimelineMapping)
+        assertEquals(1.5, (timeline.mappings.single() as OffsetTimelineMapping).offset)
     }
 
     @Test
-    fun `parses timeline selector forms including mapped`() {
+    fun `parses timeline selector string and legacy mapped forms`() {
         val nodeType = compiler.parseDocument(
             """
                 ---
@@ -116,19 +116,18 @@ class GraphDocumentParserTest {
                   byId:
                     type: instant
                     timeline: CommonEra
-                  any:
-                    type: instant
-                    timeline: any
                   mapped:
                     type: instant
                     timeline:
-                      mapped: CommonEra
+                      - id: CommonEra
+                        mapped: true
                   mixed:
                     type: instant
-                    timelines:
-                      - ThirdAge
-                      - any
-                      - mapped: CommonEra
+                    timeline:
+                      - id: ThirdAge
+                        mapped: false
+                      - CommonEra:
+                          mapped: true
                 ---
             """.trimIndent(),
             "/tmp/event.md",
@@ -136,17 +135,16 @@ class GraphDocumentParserTest {
 
         assertNotNull(nodeType)
         assertEquals(TimelineSelector.Id("CommonEra"), nodeType.props.getValue("byId").timeline)
-        assertEquals(TimelineSelector.Any, nodeType.props.getValue("any").timeline)
-        assertEquals(TimelineSelector.Mapped("CommonEra"), nodeType.props.getValue("mapped").timeline)
+        assertEquals(listOf(TimelineSelector.Mapped("CommonEra")), nodeType.props.getValue("mapped").timelines)
         assertEquals(
-            listOf(TimelineSelector.Id("ThirdAge"), TimelineSelector.Any, TimelineSelector.Mapped("CommonEra")),
+            listOf(TimelineSelector.Id("ThirdAge"), TimelineSelector.Mapped("CommonEra")),
             nodeType.props.getValue("mixed").timelines,
         )
     }
 
     @Test
-    fun `parses tuple timecode structures`() {
-        val timeline = compiler.parseDocument(
+    fun `rejects non-number timecode and non-offset mapping`() {
+        val result = compiler.parseDocument(
             """
                 ---
                 id: ThirdAge
@@ -166,16 +164,10 @@ class GraphDocumentParserTest {
                 ---
             """.trimIndent(),
             "/tmp/third-age.md",
-        ).document as? TimelineDocument
+        )
 
-        assertNotNull(timeline)
-        assertEquals(TimecodeType.tuple, timeline.timecode?.type)
-        val mapping = timeline.mappings.singleOrNull() as? TableTimelineMapping
-        assertNotNull(mapping)
-        val entry = mapping.entries.single()
-        assertEquals("TA 3018-09-23", entry.from)
-        assertEquals(listOf(3018.0, 9.0, 23.0), (entry.fromTimecode as TupleTimecode).values)
-        assertEquals(2000.73, (entry.toTimecode as NumberTimecode).value)
+        assertTrue(result.diagnostics.any { "Unknown timecode type: tuple" in it.message })
+        assertTrue(result.diagnostics.any { "Unknown mapping kind: table" in it.message })
     }
 
     @Test
@@ -320,8 +312,9 @@ class GraphDocumentParserTest {
                           birthDate:
                             timeline: CommonEra
                             value: "AD 2001-04-12"
+                            timecode: 978307200
                         ---
-                        Alice knows @[Bob](bob "friendOf")
+                        Alice knows @link{}[Bob](bob "friendOf")
                     """.trimIndent(),
                     sourcePath = "/tmp/alice.md",
                 ),
@@ -369,7 +362,7 @@ class GraphDocumentParserTest {
                         props:
                           name: Alice
                         ---
-                        Missing @[Bob](bob mentions)
+                        Missing @link{}[Bob](bob mentions)
                     """.trimIndent(),
                     sourcePath = "/tmp/alice.md",
                 ),
@@ -388,10 +381,8 @@ class GraphDocumentParserTest {
                 kind: NodeType
                 props:
                     profile:
-                        type: object
-                        properties:
-                            displayName:
-                                type: string
+                        type: array
+                        items: string
                 ---
             """.trimIndent(),
             "/tmp/person-deep-indent.md",
@@ -400,8 +391,8 @@ class GraphDocumentParserTest {
         assertTrue(parsed.diagnostics.isEmpty(), parsed.diagnostics.joinToString("\n") { it.message })
         val document = parsed.document as? NodeTypeDocument
         assertNotNull(document)
-        assertEquals(PropType.`object`, document.props.getValue("profile").type)
-        assertEquals(PropType.string, document.props.getValue("profile").properties.getValue("displayName").type)
+        assertEquals(PropType.array, document.props.getValue("profile").type)
+        assertEquals(PropType.string, document.props.getValue("profile").items?.type)
     }
 
     @Test
@@ -420,7 +411,7 @@ class GraphDocumentParserTest {
     }
 
     @Test
-    fun `parses offset timeline mapping with unit`() {
+    fun `parses decimal offset timeline mapping`() {
         val timeline = compiler.parseDocument(
             """
                 ---
@@ -429,8 +420,7 @@ class GraphDocumentParserTest {
                 mappings:
                   - kind: offset
                     to: CommonEra
-                    unit: year
-                    offset: 645
+                    offset: 645.5
                 ---
             """.trimIndent(),
             "/tmp/third-age.md",
@@ -440,8 +430,7 @@ class GraphDocumentParserTest {
         val mapping = timeline.mappings.single() as? OffsetTimelineMapping
         assertNotNull(mapping)
         assertEquals("CommonEra", mapping.to)
-        assertEquals("year", mapping.unit)
-        assertEquals(645, mapping.offset)
+        assertEquals(645.5, mapping.offset)
     }
 
     @Test
@@ -504,8 +493,8 @@ class GraphDocumentParserTest {
             "/tmp/p.md",
         )
 
-        assertTrue(parsed.diagnostics.any { "Unknown prop type" in it.message && "PropType.unknownType" in it.message })
-        assertTrue(parsed.diagnostics.any { "Unknown prop index" in it.message && "PropIndex.unknownIndex" in it.message })
+        assertTrue(parsed.diagnostics.any { "Unknown prop type: unknownType" in it.message })
+        assertTrue(parsed.diagnostics.any { "Unknown prop index: unknownIndex" in it.message })
         val document = parsed.document as? NodeTypeDocument
         assertNotNull(document)
         assertEquals(PropType.string, document.props.getValue("name").type)
@@ -536,7 +525,7 @@ class GraphDocumentParserTest {
             """.trimIndent(),
             "/tmp/t.md",
         )
-        assertTrue(unknownType.diagnostics.any { "Unknown timecode type" in it.message && "TimecodeType.unknown" in it.message })
+        assertTrue(unknownType.diagnostics.any { "Unknown timecode type: unknown" in it.message })
 
         val unknownDirection = compiler.parseDocument(
             """
@@ -550,7 +539,7 @@ class GraphDocumentParserTest {
             """.trimIndent(),
             "/tmp/t.md",
         )
-        assertTrue(unknownDirection.diagnostics.any { "Unknown timecode direction" in it.message && "TimecodeDirection.sideways" in it.message })
+        assertTrue(unknownDirection.diagnostics.any { "Unknown timecode field: direction" in it.message })
     }
 
     @Test
@@ -592,7 +581,7 @@ class GraphDocumentParserTest {
             """.trimIndent(),
             "/tmp/t.md",
         )
-        assertTrue(offsetMissingTo.diagnostics.any { "to is required" in it.message })
+        assertTrue(offsetMissingTo.diagnostics.any { "exactly one of from or to" in it.message })
 
         val tableEntriesNotList = compiler.parseDocument(
             """
@@ -607,7 +596,7 @@ class GraphDocumentParserTest {
             """.trimIndent(),
             "/tmp/t.md",
         )
-        assertTrue(tableEntriesNotList.diagnostics.any { "mapping.entries MUST be a list" in it.message })
+        assertTrue(tableEntriesNotList.diagnostics.any { "Unknown mapping kind: table" in it.message })
 
         val tableEntryFromScalar = compiler.parseDocument(
             """
@@ -624,7 +613,7 @@ class GraphDocumentParserTest {
             """.trimIndent(),
             "/tmp/t.md",
         )
-        assertTrue(tableEntryFromScalar.diagnostics.any { "mapping.entries.from MUST be a string or mapping" in it.message })
+        assertTrue(tableEntryFromScalar.diagnostics.any { "Unknown mapping kind: table" in it.message })
 
         val entryNotMapping = compiler.parseDocument(
             """
@@ -640,7 +629,7 @@ class GraphDocumentParserTest {
             """.trimIndent(),
             "/tmp/t.md",
         )
-        assertTrue(entryNotMapping.diagnostics.any { "mapping.entries items MUST be mappings" in it.message })
+        assertTrue(entryNotMapping.diagnostics.any { "Unknown mapping kind: table" in it.message })
 
         val mappingNotMap = compiler.parseDocument(
             """
@@ -673,7 +662,7 @@ class GraphDocumentParserTest {
             """.trimIndent(),
             "/tmp/t.md",
         )
-        assertTrue(entryBadTimecode.diagnostics.any { "mapping.entries.from MUST be a number or number tuple" in it.message })
+        assertTrue(entryBadTimecode.diagnostics.any { "Unknown mapping kind: table" in it.message })
         val entryTupleBadItem = compiler.parseDocument(
             """
                 ---
@@ -694,7 +683,7 @@ class GraphDocumentParserTest {
             """.trimIndent(),
             "/tmp/t.md",
         )
-        assertTrue(entryTupleBadItem.diagnostics.any { "mapping.entries.from MUST contain only numbers" in it.message })
+        assertTrue(entryTupleBadItem.diagnostics.any { "Unknown mapping kind: table" in it.message })
         val entryValueMissing = compiler.parseDocument(
             """
                 ---
@@ -712,7 +701,7 @@ class GraphDocumentParserTest {
             """.trimIndent(),
             "/tmp/t.md",
         )
-        assertTrue(entryValueMissing.diagnostics.any { "value is required" in it.message })
+        assertTrue(entryValueMissing.diagnostics.any { "Unknown mapping kind: table" in it.message })
     }
 
     @Test
@@ -746,7 +735,7 @@ class GraphDocumentParserTest {
             """.trimIndent(),
             "/tmp/e.md",
         )
-        assertTrue(mappedMissingField.diagnostics.any { "selector mapping MUST have a string 'mapped' field" in it.message })
+        assertTrue(mappedMissingField.diagnostics.any { "selector MUST be" in it.message })
 
         val singleTimelines = compiler.parseDocument(
             """
@@ -756,14 +745,14 @@ class GraphDocumentParserTest {
                 props:
                   x:
                     type: instant
-                    timelines: CommonEra
+                    timeline: CommonEra
                 ---
             """.trimIndent(),
             "/tmp/e.md",
         )
         val document = singleTimelines.document as? NodeTypeDocument
         assertNotNull(document)
-        assertEquals(listOf(TimelineSelector.Id("CommonEra")), document.props.getValue("x").timelines)
+        assertEquals(TimelineSelector.Id("CommonEra"), document.props.getValue("x").timeline)
     }
 
     @Test
@@ -836,5 +825,116 @@ class GraphDocumentParserTest {
         assertEquals(RawNull, node.props.getValue("d"))
         assertTrue(node.props.getValue("e") is RawArray)
         assertTrue(node.props.getValue("f") is RawObject)
+    }
+
+    @Test
+    fun `parses Media and node validTime from the canonical schema`() {
+        val result = compiler.parseDocument(
+            """
+                ---
+                id: portrait
+                kind: Media
+                type: Image
+                url: https://example.com/alice.png
+                validTime:
+                  - timeline: CommonEra
+                    from:
+                      value: start
+                      timecode: 1.5
+                    to:
+                      timecode: 2
+                ---
+            """.trimIndent(),
+            "/tmp/portrait.md",
+        )
+
+        val media = result.document as? NodeDocument
+        assertNotNull(media)
+        assertEquals(DocumentKind.Media, media.kind)
+        assertEquals("https://example.com/alice.png", media.url)
+        assertEquals(1.5, media.validTime.single().from?.timecode)
+        assertEquals("start", media.validTime.single().from?.value)
+        assertEquals(2.0, media.validTime.single().to?.timecode)
+    }
+
+    @Test
+    fun `requires Media url and rejects validTime on type definitions`() {
+        val media = compiler.parseDocument(
+            """
+                ---
+                id: portrait
+                kind: Media
+                type: Image
+                ---
+            """.trimIndent(),
+            "/tmp/portrait.md",
+        )
+        assertTrue(media.diagnostics.any { "requires url" in it.message })
+
+        val nodeType = compiler.parseDocument(
+            """
+                ---
+                id: Person
+                kind: NodeType
+                validTime:
+                  - timeline: CommonEra
+                ---
+            """.trimIndent(),
+            "/tmp/person.md",
+        )
+        assertTrue(nodeType.diagnostics.any { "Unknown top-level field: validTime" in it.message })
+    }
+
+    @Test
+    fun `validates Timeline mapping and localized props constraints`() {
+        val result = compiler.parseDocument(
+            """
+                ---
+                id: ProjectEra
+                kind: Timeline
+                mappings:
+                  - from: CommonEra
+                    kind: offset
+                    offset: 1
+                props:
+                  label:
+                    ja: プロジェクト紀元
+                  note: 1
+                ---
+            """.trimIndent(),
+            "/tmp/project-era.md",
+        )
+
+        assertTrue(result.diagnostics.any { "requires timecode" in it.message })
+        assertTrue(result.diagnostics.any { "label.default" in it.message })
+        assertTrue(result.diagnostics.any { "props.note MUST be a string" in it.message })
+    }
+
+    @Test
+    fun `rejects empty ids and invalid identifier lists`() {
+        val emptyId = compiler.parseDocument(
+            """
+                ---
+                id: ""
+                kind: NodeType
+                ---
+            """.trimIndent(),
+            "/tmp/empty.md",
+        )
+        assertTrue(emptyId.diagnostics.any { "id MUST be non-empty" in it.message })
+
+        val invalidExtends = compiler.parseDocument(
+            """
+                ---
+                id: Child
+                kind: NodeType
+                extends:
+                  - Parent
+                  - Parent
+                ---
+            """.trimIndent(),
+            "/tmp/child.md",
+        )
+        assertTrue(invalidExtends.diagnostics.any { "extends items MUST be unique" in it.message })
     }
 }

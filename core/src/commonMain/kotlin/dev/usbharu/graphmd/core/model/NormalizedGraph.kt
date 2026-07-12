@@ -4,6 +4,10 @@ data class NormalizedNode(
     val id: String,
     val type: String,
     val props: Map<String, NormalizedValue>,
+    val kind: DocumentKind = DocumentKind.Node,
+    val url: String? = null,
+    val validTime: List<ValidTime> = emptyList(),
+    val propEntries: Map<String, List<NormalizedPropEntry>> = props.mapValues { listOf(NormalizedPropEntry(it.value, validTime)) },
     val source: SourceInfo,
 )
 
@@ -14,6 +18,9 @@ data class NormalizedRelation(
     val props: Map<String, NormalizedValue>,
     val sourceLabel: String,
     val source: SourceInfo,
+    val validTime: List<ValidTime> = emptyList(),
+    val propEntries: Map<String, List<NormalizedPropEntry>> = props.mapValues { listOf(NormalizedPropEntry(it.value, validTime)) },
+    val targetUrl: String? = null,
 )
 
 data class NormalizedNodeType(
@@ -37,5 +44,6 @@ data class NormalizedTimeline(
     val mappings: List<TimelineMapping>,
     val props: Map<String, NormalizedValue>,
     val ancestorIds: Set<String>,
+    val mappedOffsets: Map<String, Double> = emptyMap(),
     val source: SourceInfo,
 )
