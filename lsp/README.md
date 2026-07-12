@@ -7,8 +7,8 @@
 - `types/**/*.md` の `NodeType` / `RelType` を優先した補完
 - ワークスペース内どこにあっても `kind: Node` 文書を索引
 - `type`, `extends`, `from`, `to` の補完・定義ジャンプ
-- `@[label](target relType)` の `target` / `relType` 補完・定義ジャンプ
-- `@props{...}` と `@[label](target relType){...}` のシンタックスハイライト
+- `@link(validTime=...){props}[label](target relType)` の `target` / `relType` 補完・定義ジャンプ
+- `@props(validTime=...){...}` と `@link(validTime=...){...}[label](target relType)` のシンタックスハイライト
 - `core` の `GraphCompiler` による未定義参照や制約違反の診断
 - Hover と references
 
@@ -51,7 +51,7 @@ npx @vscode/vsce package     # vscode:prepublish が server 同梱 + esbuild バ
 
 - `kind: Node` の `type:` で `NodeType` 補完が出る
 - `NodeType` / `RelType` の `extends`, `from`, `to` で補完と定義ジャンプが使える
-- `@[label](target relType)` の `target` では Node、`relType` では RelType の補完が出る
+- `@link(validTime=...){props}[label](target relType)` の `target` では Node、`relType` では RelType の補完が出る
 - `@props` と relation 記法に Markdown 上でトークンスコープが付き、テーマに応じて色分けされる
 - 未定義の `NodeType` / `RelType` / Node 参照に diagnostics が出る
 - 参照上で hover と references が使える
@@ -86,5 +86,5 @@ id: alice
 kind: Node
 type: Person
 ---
-Hello @[Bob](bob friendOf)
+Hello @link{}[Bob](bob friendOf)
 ```

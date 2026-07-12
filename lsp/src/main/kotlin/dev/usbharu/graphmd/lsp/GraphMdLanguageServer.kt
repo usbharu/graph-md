@@ -27,9 +27,7 @@ class GraphMdLanguageServer : LanguageServer, LanguageClientAware {
     private var shutdownRequested = false
 
     override fun initialize(params: InitializeParams): CompletableFuture<InitializeResult> {
-        val roots = params.workspaceFolders?.map { Paths.get(URI.create(it.uri)) }
-            ?: params.rootPath?.let { listOf(Paths.get(it)) }
-            ?: emptyList()
+        val roots = params.workspaceFolders.orEmpty().map { Paths.get(URI.create(it.uri)) }
         workspaceIndex.setWorkspaceRoots(roots)
         workspaceIndex.loadWorkspace()
         publishDiagnostics()
@@ -196,7 +194,7 @@ private class GraphMdWorkspaceIndex {
             CompletionItem(id).apply {
                 this.kind = when (referenceKind) {
                     ReferenceTargetKind.Node -> CompletionItemKind.Reference
-                    ReferenceTargetKind.NodeType, ReferenceTargetKind.RelType -> CompletionItemKind.Class
+                    ReferenceTargetKind.NodeType, ReferenceTargetKind.RelType, ReferenceTargetKind.Timeline -> CompletionItemKind.Class
                 }
             }
         }
@@ -245,6 +243,7 @@ private class GraphMdWorkspaceIndex {
                         ReferenceTargetKind.Node -> "Node"
                         ReferenceTargetKind.NodeType -> "NodeType"
                         ReferenceTargetKind.RelType -> "RelType"
+                        ReferenceTargetKind.Timeline -> "Timeline"
                     },
                 )
                 append("** `")
@@ -293,7 +292,7 @@ private class GraphMdWorkspaceIndex {
             parsedDocument = document.analysis.parsed.document,
             nodeTypeIds = completionIds(ReferenceTargetKind.NodeType),
             relTypeIds = completionIds(ReferenceTargetKind.RelType),
-            timelineIds = timelineIds(),
+            timelineIds = completionIds(ReferenceTargetKind.Timeline),
             nodePropsSchema = (document.analysis.parsed.document as? NodeDocument)?.let { nodeTypeSchema(it.type)?.props }.orEmpty(),
         )
         return resolver.resolve()?.map { entry ->
@@ -343,6 +342,7 @@ private class GraphMdWorkspaceIndex {
         return when (kind) {
             ReferenceTargetKind.Node -> definitionsOf(kind).map { it.id }
             ReferenceTargetKind.NodeType, ReferenceTargetKind.RelType -> definitionsOf(kind).filter { it.path.toString().contains("/types/") }.ifEmpty { definitionsOf(kind) }.map { it.id }
+            ReferenceTargetKind.Timeline -> definitionsOf(kind).map { it.id }
         }.distinct().sorted()
     }
 
@@ -399,6 +399,15 @@ private class GraphMdWorkspaceIndex {
         Regex("""^Unknown Node target: (.+)$""").matchEntire(message)?.let {
             return DiagnosticReferenceTarget(ReferenceTargetKind.Node, it.groupValues[1], "relation.target")
         }
+        Regex("""^Unknown Timeline: (.+)$""").matchEntire(message)?.let {
+            return DiagnosticReferenceTarget(ReferenceTargetKind.Timeline, it.groupValues[1], null)
+        }
+        Regex("""^Unknown parent Timeline: (.+)$""").matchEntire(message)?.let {
+            return DiagnosticReferenceTarget(ReferenceTargetKind.Timeline, it.groupValues[1], "extends")
+        }
+        Regex("""^Unknown mapped Timeline: (.+)$""").matchEntire(message)?.let {
+            return DiagnosticReferenceTarget(ReferenceTargetKind.Timeline, it.groupValues[1], null)
+        }
         return null
     }
 }
@@ -451,26 +460,24 @@ internal class FrontMatterCompletionResolver(
         nodePropsYamlCompletions(lines, lineIndex, indent, path, hasColon, currentKeyPrefix, valuePrefix)?.let { return it }
         return when {
             indent == 0 && keyCandidate.isNotEmpty() && !hasColon -> topLevelKeyCompletions(keyCandidate)
-            hasColon && path == listOf("kind") -> enumCompletions(valuePrefix, listOf("Node", "NodeType", "RelType", "Timeline"), "kind")
+            hasColon && path == listOf("kind") -> enumCompletions(valuePrefix, listOf("Node", "Media", "NodeType", "RelType", "Timeline"), "kind")
             hasColon && path == listOf("type") && parsedDocument is NodeDocument -> idCompletions(valuePrefix, nodeTypeIds, "NodeType")
             hasColon && path == listOf("extends") && parsedDocument is NodeTypeDocument -> idCompletions(valuePrefix, nodeTypeIds, "NodeType")
             hasColon && path == listOf("extends") && parsedDocument is RelTypeDocument -> idCompletions(valuePrefix, relTypeIds, "RelType")
             hasColon && path == listOf("extends") && parsedDocument is TimelineDocument -> idCompletions(valuePrefix, timelineIds, "Timeline")
+            hasColon && parsedDocument is TimelineDocument && "mappings" in path && path.lastOrNull() in setOf("from", "to") ->
+                idCompletions(valuePrefix, timelineIds, "Timeline")
             hasColon && (path == listOf("from") || path == listOf("to")) -> idCompletions(valuePrefix, nodeTypeIds, "NodeType")
             hasColon && path.lastOrNull() == "required" ->
                 enumCompletions(valuePrefix, listOf("true", "false"), "boolean")
             hasColon && path == listOf("timecode", "type") ->
-                enumCompletions(valuePrefix, TimecodeType.entries.map { it.name }, "timecode type")
-            hasColon && path == listOf("timecode", "direction") ->
-                enumCompletions(valuePrefix, TimecodeDirection.entries.map { it.name }, "timecode direction")
+                enumCompletions(valuePrefix, listOf("number"), "timecode type")
             hasColon && path.lastOrNull() == "type" ->
-                enumCompletions(valuePrefix, PropType.entries.map { it.name }, "prop type")
+                enumCompletions(valuePrefix, listOf("number", "string", "text", "instant", "duration", "array"), "prop type")
             hasColon && path.lastOrNull() == "index" ->
-                enumCompletions(valuePrefix, PropIndex.entries.map { it.name }, "prop index")
+                enumCompletions(valuePrefix, listOf("fulltext", "range"), "prop index")
             hasColon && path.lastOrNull() == "timeline" ->
-                timelineSelectorCompletions(valuePrefix, includeAny = true)
-            hasColon && path.lastOrNull() == "timelines" ->
-                timelineSelectorCompletions(valuePrefix, includeAny = true)
+                timelineSelectorCompletions(valuePrefix)
             hasColon && valuePrefix.isEmpty() -> nestedKeyCompletions(path, "", lines, lineIndex)
             indent == 0 -> topLevelKeyCompletions(keyCandidate)
             else -> nestedKeyCompletions(path, currentKeyPrefix, lines, lineIndex)
@@ -481,11 +488,12 @@ internal class FrontMatterCompletionResolver(
         val kind = parsedDocument?.kind
         val keys = mutableListOf("id", "kind")
         when (kind) {
-            DocumentKind.Node -> keys += listOf("type", "props")
+            DocumentKind.Node -> keys += listOf("type", "url", "validTime", "props")
+            DocumentKind.Media -> keys += listOf("type", "url", "validTime", "props")
             DocumentKind.NodeType -> keys += listOf("extends", "props")
             DocumentKind.RelType -> keys += listOf("extends", "from", "to", "props")
             DocumentKind.Timeline -> keys += listOf("extends", "timecode", "mappings", "props")
-            null -> keys += listOf("type", "extends", "from", "to", "props", "timecode", "mappings")
+            null -> keys += listOf("type", "url", "validTime", "extends", "from", "to", "props", "timecode", "mappings")
         }
         val filteredKeys = keys.distinct().filter { key ->
             key.startsWith(prefix)
@@ -530,10 +538,8 @@ internal class FrontMatterCompletionResolver(
         val schema = parentContainer.properties[currentKey]
         return when {
             currentKey == "timeline" ->
-                idCompletions(valuePrefix, timelineIds + listOf("any"), "Timeline")
-            currentKey == "fromInclusive" || currentKey == "toInclusive" || schema?.type == PropType.boolean ->
-                enumCompletions(valuePrefix, listOf("true", "false"), "boolean")
-            valuePrefix.isEmpty() && (schema?.type == PropType.instant || schema?.type == PropType.interval || schema?.type == PropType.duration || schema?.type == PropType.`object`) ->
+                idCompletions(valuePrefix, timelineIds, "Timeline")
+            valuePrefix.isEmpty() && (schema?.type == PropType.instant || schema?.type == PropType.duration) ->
                 listOf(CompletionEntry("{", CompletionItemKind.Operator, "{ }", "object"))
             else -> null
         }
@@ -571,15 +577,14 @@ internal class FrontMatterCompletionResolver(
         lineIndex: Int,
     ): List<CompletionEntry>? {
         val keys = when {
-            isInsidePropSchema(path) -> listOf("type", "required", "default", "index", "timeline", "timelines", "items", "properties")
-            path == listOf("timecode") -> {
-                val typeValue = siblingScalarValue(lines, lineIndex, "type")
-                listOfNotNull("type", "direction".takeIf { typeValue == null || typeValue == "number" })
-            }
+            path.lastOrNull() == "validTime" -> listOf("timeline", "from", "to")
+            path.takeLast(2).let { it == listOf("validTime", "from") || it == listOf("validTime", "to") } ->
+                listOf("value", "timecode")
+            isInsidePropSchema(path) -> listOf("type", "required", "index", "timeline", "items")
+            path == listOf("timecode") -> listOf("type")
             path == listOf("mappings") -> when (siblingScalarValue(lines, lineIndex, "kind")) {
-                "offset" -> listOf("kind", "to", "offset")
-                "table" -> listOf("kind", "to", "entries")
-                else -> listOf("kind", "to", "offset", "entries")
+                "offset" -> listOf("kind", "from", "to", "offset")
+                else -> listOf("kind", "from", "to", "offset")
             }
             else -> return null
         }
@@ -592,16 +597,9 @@ internal class FrontMatterCompletionResolver(
     private fun idCompletions(prefix: String, values: List<String>, detail: String): List<CompletionEntry> =
         values.distinct().filter { it.startsWith(prefix) }.map { CompletionEntry(it, CompletionItemKind.Reference, it, detail) }
 
-    private fun timelineSelectorCompletions(prefix: String, includeAny: Boolean): List<CompletionEntry> {
+    private fun timelineSelectorCompletions(prefix: String): List<CompletionEntry> {
         val entries = mutableListOf<CompletionEntry>()
-        val scalarPool = if (includeAny) timelineIds + listOf("any") else timelineIds
-        entries += idCompletions(prefix, scalarPool, "Timeline")
-        val showMapped = prefix.isEmpty() || prefix == "{" || "mapped".startsWith(prefix)
-        if (showMapped) {
-            entries += timelineIds.map {
-                CompletionEntry("mapped: $it", CompletionItemKind.Reference, "{ mapped: $it }", "mapped Timeline")
-            }
-        }
+        entries += idCompletions(prefix, timelineIds, "Timeline")
         return entries
     }
 
@@ -615,8 +613,10 @@ internal class FrontMatterCompletionResolver(
                 is TimelineDocument -> idCompletions(prefix, timelineIds, "Timeline")
                 else -> null
             }
-            "from", "to" -> idCompletions(prefix, nodeTypeIds, "NodeType")
-            "timelines" -> timelineSelectorCompletions(prefix, includeAny = true)
+            "from", "to" -> idCompletions(prefix, if (parsedDocument is TimelineDocument) timelineIds else nodeTypeIds, if (parsedDocument is TimelineDocument) "Timeline" else "NodeType")
+            "timeline" -> timelineSelectorCompletions(prefix)
+            "validTime" -> listOf(CompletionEntry("timeline", CompletionItemKind.Field, "timeline: ", "validTime"))
+            "mappings" -> listOf(CompletionEntry("kind", CompletionItemKind.Field, "kind: offset", "offset mapping"))
             else -> null
         }
     }
@@ -725,19 +725,12 @@ internal class FrontMatterCompletionResolver(
         return NodePropsContainer(currentProperties, currentSpecialKeys)
     }
 
-    private fun nestedProperties(schema: ResolvedPropSchema): Map<String, ResolvedPropSchema> {
-        return when (schema.type) {
-            PropType.`object` -> schema.properties
-            else -> emptyMap()
-        }
-    }
+    private fun nestedProperties(schema: ResolvedPropSchema): Map<String, ResolvedPropSchema> = emptyMap()
 
     private fun specialKeys(schema: ResolvedPropSchema): List<String> {
         return when (schema.type) {
-            PropType.instant -> listOf("timeline", "value", "timecode", "precision")
-            PropType.interval -> listOf("timeline", "from", "to", "fromInclusive", "toInclusive")
-            PropType.duration -> listOf("timeline", "unit", "value")
-            PropType.text -> listOf("default")
+            PropType.instant -> listOf("timeline", "value", "timecode")
+            PropType.duration -> listOf("timeline", "from", "to")
             else -> emptyList()
         }
     }
@@ -952,35 +945,24 @@ internal class PropsPrefixScanner(
             key == "timeline" -> timelineIds
                 .filter { it.startsWith(prefix) }
                 .map { CompletionEntry(it, CompletionItemKind.Value, it, "timeline") }
-            schema?.type == PropType.boolean || key == "fromInclusive" || key == "toInclusive" ->
-                listOf("true", "false")
-                    .filter { it.startsWith(prefix) }
-                    .map { CompletionEntry(it, CompletionItemKind.Value, it, "boolean") }
-            schema?.type == PropType.instant && schema.timeline is TimelineSelector.Id ->
+            schema?.type == PropType.instant ->
                 listOf(
-                    CompletionEntry("\"\"", CompletionItemKind.Value, "\"\"", "instant value"),
+                    CompletionEntry("0", CompletionItemKind.Value, "0", "instant timecode"),
                     CompletionEntry("{", CompletionItemKind.Operator, "{  }", "instant object"),
                 ).filter { it.label.startsWith(prefix) || prefix.isEmpty() }
-            schema?.type == PropType.instant || schema?.type == PropType.interval || schema?.type == PropType.duration || schema?.type == PropType.`object` ->
+            schema?.type == PropType.duration ->
                 listOf(CompletionEntry("{", CompletionItemKind.Operator, "{  }", "object"))
             else -> emptyList()
         }
         return if (entries.isEmpty()) null else PropsCompletionResult(entries)
     }
 
-    private fun nestedProperties(schema: ResolvedPropSchema?): Map<String, ResolvedPropSchema> {
-        return when (schema?.type) {
-            PropType.`object` -> schema.properties
-            else -> emptyMap()
-        }
-    }
+    private fun nestedProperties(schema: ResolvedPropSchema?): Map<String, ResolvedPropSchema> = emptyMap()
 
     private fun specialKeys(schema: ResolvedPropSchema?): List<String> {
         return when (schema?.type) {
-            PropType.instant -> listOf("timeline", "value", "timecode", "precision")
-            PropType.interval -> listOf("timeline", "from", "to", "fromInclusive", "toInclusive")
-            PropType.duration -> listOf("timeline", "unit", "value")
-            PropType.text -> listOf("default")
+            PropType.instant -> listOf("timeline", "value", "timecode")
+            PropType.duration -> listOf("timeline", "from", "to")
             else -> emptyList()
         }
     }
@@ -1041,31 +1023,60 @@ internal class RelationPropsCompletionContextResolver(
     private val offset: Int,
 ) {
     fun resolve(): RelationPropsContext? {
+        return resolveCanonical()
+    }
+
+    private fun resolveCanonical(): RelationPropsContext? {
         var searchIndex = offset.coerceAtMost(text.length)
         while (searchIndex >= 0) {
-            val relationStart = text.lastIndexOf("@[", searchIndex)
+            val relationStart = text.lastIndexOf("@link", searchIndex)
             if (relationStart < 0) return null
-            val closeLabel = findUnescaped(']', relationStart + 2) ?: return null
-            if (text.getOrNull(closeLabel + 1) != '(') {
+            var cursor = relationStart + "@link".length
+            if (text.getOrNull(cursor) == '(') {
+                cursor = balancedEnd(cursor, '(', ')') ?: return null
+            }
+            if (text.getOrNull(cursor) != '{') {
                 searchIndex = relationStart - 1
                 continue
             }
-            val closeParen = findUnescaped(')', closeLabel + 2) ?: return null
-            val raw = text.substring(closeLabel + 2, closeParen)
-            val relType = parseRelationTargetAndType(raw)?.second
-            val braceStart = text.indexOfFirstAfter(closeParen) { it == '{' }
-            if (relType != null && braceStart >= 0 && offset > braceStart && isInsideBraceRange(braceStart, offset)) {
-                return RelationPropsContext(relType, braceStart)
+            val braceStart = cursor
+            val braceEnd = balancedEnd(braceStart, '{', '}') ?: text.length
+            if (offset <= braceStart || offset > braceEnd) {
+                searchIndex = relationStart - 1
+                continue
             }
-            searchIndex = relationStart - 1
+            val labelOpen = braceEnd
+            if (text.getOrNull(labelOpen) != '[') return null
+            val closeLabel = findUnescaped(']', labelOpen + 1) ?: return null
+            if (text.getOrNull(closeLabel + 1) != '(') return null
+            val closeParen = findUnescaped(')', closeLabel + 2) ?: return null
+            val relType = parseRelationTargetAndType(text.substring(closeLabel + 2, closeParen))?.second ?: return null
+            return RelationPropsContext(relType, braceStart)
         }
         return null
     }
 
-    private fun String.indexOfFirstAfter(start: Int, predicate: (Char) -> Boolean): Int {
-        var index = start + 1
-        while (index < length && this[index].isWhitespace()) index++
-        return if (index < length && predicate(this[index])) index else -1
+    private fun balancedEnd(start: Int, open: Char, close: Char): Int? {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (index in start until text.length) {
+            val char = text[index]
+            if (inString) {
+                when {
+                    escaped -> escaped = false
+                    char == '\\' -> escaped = true
+                    char == '"' -> inString = false
+                }
+            } else {
+                when (char) {
+                    '"' -> inString = true
+                    open -> depth++
+                    close -> if (--depth == 0) return index + 1
+                }
+            }
+        }
+        return null
     }
 
     private fun findUnescaped(target: Char, start: Int): Int? {
@@ -1174,7 +1185,12 @@ private data class IndexedDocument(
         return Range(positionAt(sourceRange.start), positionAt(sourceRange.end))
     }
 
-    fun isGraphDocumentCandidate(): Boolean = text.startsWith("---")
+    fun isGraphDocumentCandidate(): Boolean {
+        if (!text.startsWith("---")) return false
+        val frontMatterEnd = text.indexOf("\n---", startIndex = 3).takeIf { it >= 0 } ?: return false
+        val frontMatter = text.substring(3, frontMatterEnd)
+        return Regex("""(?m)^kind:\s*["']?(Node|Media|NodeType|RelType|Timeline)["']?\s*$""").containsMatchIn(frontMatter)
+    }
 
     private fun positionAt(offset: Int): Position {
         val safeOffset = offset.coerceIn(0, text.length)
