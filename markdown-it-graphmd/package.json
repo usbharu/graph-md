@@ -21,7 +21,9 @@
     "sync-vendor": "bash sync-vendor.sh",
     "prebuild": "npm run sync-vendor",
     "build": "tsup",
+    "pretypecheck": "npm run sync-vendor",
     "typecheck": "tsc --noEmit",
+    "pretest": "npm run sync-vendor",
     "test": "vitest run"
   },
   "peerDependencies": {

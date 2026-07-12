@@ -8,9 +8,9 @@ function render(input: string, options?: GraphMdOptions): string {
   return md.render(input);
 }
 
-/** Extracts and HTML-decodes the `data-props` attribute value from rendered HTML. */
+/** Extracts and HTML-decodes a props attribute value from rendered HTML. */
 function dataProps(html: string): string | null {
-  const m = html.match(/data-props="([^"]*)"/);
+  const m = html.match(/data-(?:link-)?props="([^"]*)"/);
   if (!m) {
     return null;
   }
@@ -23,60 +23,66 @@ function dataProps(html: string): string | null {
 
 describe("relation link", () => {
   it("renders the recommended hyperlink form", () => {
-    const html = render("Hello @[Bob](bob friendOf)");
-    expect(html).toContain('<a href="bob" data-rel-type="friendOf">Bob</a>');
+    const html = render("Hello @link{}[Bob](bob friendOf)");
+    expect(html).toContain('<a href="bob" data-link-rel="friendOf">Bob</a>');
+  });
+
+  it("renders canonical properties and validTime", () => {
+    const html = render("@link(validTime=CommonEra){weight=0.2}[Bob](bob friendOf)");
+    expect(html).toContain('data-link-valid-time="CommonEra"');
+    expect(dataProps(html)).toBe('{"weight":0.2}');
   });
 
   it("serialises props into an escaped data-props attribute", () => {
-    const html = render("@[Bob](bob friendOf){weight = 0.82}");
-    expect(html).toContain("data-props=");
+    const html = render("@link{weight = 0.82}[Bob](bob friendOf)");
+    expect(html).toContain("data-link-props=");
     expect(html).toContain("&quot;weight&quot;:0.82");
     expect(dataProps(html)).toBe('{"weight":0.82}');
   });
 
   it("parses nested inline objects", () => {
-    const html = render('@[Bob](bob friendOf){note = { default = "close", ja = "親密" }}');
+    const html = render('@link{note = { default = "close", ja = "親密" }}[Bob](bob friendOf)');
     expect(dataProps(html)).toBe('{"note":{"default":"close","ja":"親密"}}');
   });
 
   it("supports double-quoted relType with spaces", () => {
-    const html = render('@[Bob](bob "best friend")');
-    expect(html).toContain('data-rel-type="best friend"');
+    const html = render('@link{}[Bob](bob "best friend")');
+    expect(html).toContain('data-link-rel="best friend"');
   });
 
   it("unescapes and html-escapes the label", () => {
-    const html = render("@[A & B \\] C](ab friendOf)");
+    const html = render("@link{}[A & B \\] C](ab friendOf)");
     expect(html).toContain("A &amp; B ] C");
   });
 
   it("does not extract inside inline code spans", () => {
-    const html = render("`@[Bob](bob friendOf)`");
-    expect(html).not.toContain("data-rel-type");
+    const html = render("`@link{}[Bob](bob friendOf)`");
+    expect(html).not.toContain("data-link-rel");
   });
 
   it("does not extract inside fenced code blocks", () => {
-    const html = render("```\n@[Bob](bob friendOf)\n```");
-    expect(html).not.toContain("data-rel-type");
+    const html = render("```\n@link{}[Bob](bob friendOf)\n```");
+    expect(html).not.toContain("data-link-rel");
   });
 
   it("is disabled by a preceding backslash escape", () => {
-    const html = render("\\@[Bob](bob friendOf)");
-    expect(html).not.toContain("data-rel-type");
+    const html = render("\\@link{}[Bob](bob friendOf)");
+    expect(html).not.toContain("data-link-rel");
   });
 
   it("leaves malformed relations as ordinary text", () => {
-    const html = render("@[Bob](bob)");
-    expect(html).not.toContain("data-rel-type");
+    const html = render("@link{}[Bob](bob)");
+    expect(html).not.toContain("data-link-rel");
   });
 
   it("applies hrefTransform", () => {
-    const html = render("@[Bob](bob friendOf)", { hrefTransform: (t) => `${t}.html` });
+    const html = render("@link{}[Bob](bob friendOf)", { hrefTransform: (t) => `${t}.html` });
     expect(html).toContain('href="bob.html"');
   });
 
   it("renders inline within Japanese text", () => {
-    const html = render("Aliceは@[Bob](bob friendOf)と友人です。");
-    expect(html).toContain('<a href="bob" data-rel-type="friendOf">Bob</a>');
+    const html = render("Aliceは@link{}[Bob](bob friendOf)と友人です。");
+    expect(html).toContain('<a href="bob" data-link-rel="friendOf">Bob</a>');
   });
 });
 
@@ -108,5 +114,18 @@ describe("@props", () => {
   it("keeps malformed block as ordinary paragraph text", () => {
     const html = render("@props not a block");
     expect(html).not.toContain("graphmd-props");
+  });
+
+  it("serialises directive-wide and property validTime assertions", () => {
+    const html = render('@props(validTime=CommonEra){age=25,name(validTime=Branch(from=1,to=2))="Alice"}');
+    const parsed = JSON.parse(dataProps(html) ?? "null");
+    expect(parsed.age[0].validTime[0].timeline).toBe("CommonEra");
+    expect(parsed.name[0].validTime[0].timeline).toBe("Branch");
+    expect(parsed.name[0].validTime[0].from.timecode).toBe(1);
+  });
+
+  it("serialises text key annotations", () => {
+    const html = render('@props{name(key="lang:ja")="アリス",name(key="lang:us")="Alice"}');
+    expect(JSON.parse(dataProps(html) ?? "null").name).toEqual({ "lang:ja": "アリス", "lang:us": "Alice" });
   });
 });

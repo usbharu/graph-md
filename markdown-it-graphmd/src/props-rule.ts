@@ -1,5 +1,5 @@
 import { escapeAttr, findBalanced } from "./scan";
-import { parseInlineObjectJson } from "./core-bindings";
+import { parsePropsDirectiveJson } from "./core-bindings";
 
 const AT = 0x40;
 const SPACE = 0x20;
@@ -12,7 +12,7 @@ export interface PropsTokenMeta {
 
 function safePropsJson(content: string): string | null {
   try {
-    return parseInlineObjectJson(content);
+    return parsePropsDirectiveJson(content);
   } catch {
     return null;
   }
@@ -39,6 +39,11 @@ export function propsBlockRule(state: any, startLine: number, endLine: number, s
   while (p < lineEnd && (src.charCodeAt(p) === SPACE || src.charCodeAt(p) === TAB)) {
     p += 1;
   }
+  if (src[p] === "(") {
+    const closeArgs = findBalanced(src, p, src.length, 0x28, 0x29);
+    if (closeArgs < 0) return false;
+    p = closeArgs + 1;
+  }
   if (src.charCodeAt(p) !== LBRACE) {
     return false;
   }
@@ -61,7 +66,7 @@ export function propsBlockRule(state: any, startLine: number, endLine: number, s
     token.block = true;
     token.map = [startLine, lastLine + 1];
     token.markup = "@props";
-    token.meta = { props: safePropsJson(src.slice(p, closeBrace + 1)) } satisfies PropsTokenMeta;
+    token.meta = { props: safePropsJson(src.slice(startPos, closeBrace + 1)) } satisfies PropsTokenMeta;
   }
 
   state.line = lastLine + 1;
@@ -82,6 +87,11 @@ export function propsInlineRule(state: any, silent: boolean): boolean {
   while (p < end && (src.charCodeAt(p) === SPACE || src.charCodeAt(p) === TAB)) {
     p += 1;
   }
+  if (src[p] === "(") {
+    const closeArgs = findBalanced(src, p, end, 0x28, 0x29);
+    if (closeArgs < 0) return false;
+    p = closeArgs + 1;
+  }
   if (src.charCodeAt(p) !== LBRACE) {
     return false;
   }
@@ -93,7 +103,7 @@ export function propsInlineRule(state: any, silent: boolean): boolean {
 
   if (!silent) {
     const token = state.push("graphmd_props_inline", "span", 0);
-    token.meta = { props: safePropsJson(src.slice(p, closeBrace + 1)) } satisfies PropsTokenMeta;
+    token.meta = { props: safePropsJson(src.slice(start, closeBrace + 1)) } satisfies PropsTokenMeta;
     token.content = "";
   }
 

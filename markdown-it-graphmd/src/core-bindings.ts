@@ -12,6 +12,7 @@ export interface RelationParts {
 interface GraphMdInlineApi {
   parseRelationTargetAndType(inside: string): RelationParts | null;
   parseInlineObjectJson(content: string): string;
+  parsePropsDirectiveJson(content: string): string;
 }
 
 interface CoreModule {
@@ -47,4 +48,8 @@ export function parseRelationTargetAndType(inside: string): RelationParts | null
  */
 export function parseInlineObjectJson(content: string): string {
   return inline.parseInlineObjectJson(content);
+}
+
+export function parsePropsDirectiveJson(content: string): string {
+  return inline.parsePropsDirectiveJson(content);
 }

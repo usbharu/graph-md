@@ -6,10 +6,8 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SRC_DIR="$ROOT/core/build/dist/js/productionLibrary"
 DEST_DIR="$SCRIPT_DIR/vendor"
 
-if [ ! -f "$SRC_DIR/graph-md-core.js" ]; then
-  echo ">> Building core Kotlin/JS production library..."
-  "$ROOT/gradlew" -p "$ROOT" :core:jsNodeProductionLibraryDistribution --quiet
-fi
+echo ">> Building core Kotlin/JS production library..."
+"$ROOT/gradlew" -p "$ROOT" :core:jsNodeProductionLibraryDistribution --quiet
 
 mkdir -p "$DEST_DIR"
 
@@ -22,5 +20,6 @@ fi
 cp "$SRC_DIR/graph-md-core.js" "$DEST_DIR/graph-md-core.js"
 cp "$SRC_DIR/kotlin-kotlin-stdlib.js" "$DEST_DIR/kotlin-kotlin-stdlib.js"
 cp "$SRC_DIR/kotlin_org_jetbrains_kotlin_kotlin_dom_api_compat.js" "$DEST_DIR/kotlin_org_jetbrains_kotlin_kotlin_dom_api_compat.js"
+perl -pi -e 's/^\/\/# sourceMappingURL=.*\n?//' "$DEST_DIR"/*.js
 
 echo ">> vendor synced to $DEST_DIR"

@@ -14,7 +14,7 @@ export interface GraphMdOptions {
 /**
  * markdown-it plugin rendering Graph Markdown body syntax.
  *
- * - `@[label](target relType){props}` -> `<a href data-rel-type [data-props]>label</a>`
+ * - `@link(validTime=...){props}[label](target relType)` -> GraphMD relation anchor
  * - `@props{ ... }`                   -> hidden element carrying `data-props`
  */
 export function graphMdPlugin(md: MarkdownIt, options: GraphMdOptions = {}): void {
