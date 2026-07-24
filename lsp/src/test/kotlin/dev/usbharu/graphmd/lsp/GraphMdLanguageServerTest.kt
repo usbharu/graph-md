@@ -16,8 +16,15 @@ import org.eclipse.lsp4j.CodeActionContext
 import org.eclipse.lsp4j.CodeAction
 import org.eclipse.lsp4j.CodeActionKind
 import org.eclipse.lsp4j.CodeActionParams
+import org.eclipse.lsp4j.DidChangeTextDocumentParams
+import org.eclipse.lsp4j.DidChangeWatchedFilesParams
+import org.eclipse.lsp4j.DidCloseTextDocumentParams
 import org.eclipse.lsp4j.DidOpenTextDocumentParams
+import org.eclipse.lsp4j.DiagnosticSeverity
+import org.eclipse.lsp4j.FileChangeType
+import org.eclipse.lsp4j.FileEvent
 import org.eclipse.lsp4j.InitializeParams
+import org.eclipse.lsp4j.InitializedParams
 import org.eclipse.lsp4j.InsertTextFormat
 import org.eclipse.lsp4j.MessageActionItem
 import org.eclipse.lsp4j.MessageParams
@@ -25,9 +32,15 @@ import org.eclipse.lsp4j.PublishDiagnosticsParams
 import org.eclipse.lsp4j.Range
 import org.eclipse.lsp4j.Position
 import org.eclipse.lsp4j.ShowMessageRequestParams
+import org.eclipse.lsp4j.TextDocumentContentChangeEvent
 import org.eclipse.lsp4j.TextDocumentIdentifier
 import org.eclipse.lsp4j.TextDocumentItem
+import org.eclipse.lsp4j.VersionedTextDocumentIdentifier
+import org.eclipse.lsp4j.WorkspaceFolder
 import org.eclipse.lsp4j.services.LanguageClient
+import java.net.URI
+import java.nio.file.Files
+import java.nio.file.Path
 import java.util.concurrent.CompletableFuture
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -791,6 +804,185 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `invalid id warning highlights only the id value`() {
+        val uri = "file:///workspace/invalid-id.md"
+        val escapedUri = "file:///workspace/escaped-invalid-id.md"
+        val hashUri = "file:///workspace/hash-invalid-id.md"
+        val fixture = serverFixture(
+            mapOf(
+                uri to """
+                    ---
+                    id: "bad/id"
+                    kind: NodeType
+                    ---
+                """.trimIndent(),
+                escapedUri to """
+                    ---
+                    id: "bad\/id"
+                    kind: NodeType
+                    ---
+                """.trimIndent(),
+                hashUri to """
+                    ---
+                    id: "bad#id"
+                    kind: NodeType
+                    ---
+                """.trimIndent(),
+            ),
+        )
+
+        val diagnostic = fixture.diagnostics.getValue(uri).single {
+            it.message == "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*"
+        }
+        assertEquals(DiagnosticSeverity.Warning, diagnostic.severity)
+        assertEquals(Position(1, 5), diagnostic.range.start)
+        assertEquals(Position(1, 11), diagnostic.range.end)
+
+        val escapedDiagnostic = fixture.diagnostics.getValue(escapedUri).single {
+            it.message == "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*"
+        }
+        assertEquals(DiagnosticSeverity.Warning, escapedDiagnostic.severity)
+        assertEquals(Position(1, 5), escapedDiagnostic.range.start)
+        assertEquals(Position(1, 12), escapedDiagnostic.range.end)
+
+        val hashDiagnostic = fixture.diagnostics.getValue(hashUri).single {
+            it.message == "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*"
+        }
+        assertEquals(DiagnosticSeverity.Warning, hashDiagnostic.severity)
+        assertEquals(Position(1, 5), hashDiagnostic.range.start)
+        assertEquals(Position(1, 11), hashDiagnostic.range.end)
+    }
+
+    @Test
+    fun `initial diagnostics are published after initialized notification`() {
+        val root = Files.createTempDirectory("graphmd-lsp-initialized")
+        try {
+            val file = root.resolve("timeline.md")
+            val uri = file.toUri().toString()
+            Files.writeString(file, graphDocument("INVALID ID@", "Timeline"))
+            val client = RecordingLanguageClient()
+            val server = GraphMdLanguageServer()
+            server.connect(client)
+
+            server.initialize(
+                InitializeParams().apply {
+                    workspaceFolders = listOf(WorkspaceFolder(root.toUri().toString(), "workspace"))
+                },
+            ).get()
+
+            assertTrue(client.notifications.isEmpty())
+            server.initialized(InitializedParams())
+            assertTrue(client.latest(uri).any { it.message == invalidIdWarning })
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `watched file events do not replace open document diagnostics`() {
+        val root = Files.createTempDirectory("graphmd-lsp-open-documents")
+        try {
+            val documents = listOf(
+                root.resolve("timeline.md") to "Timeline",
+                root.resolve("node-type.md") to "NodeType",
+            )
+            documents.forEach { (file, kind) ->
+                Files.writeString(file, graphDocument(file.fileName.toString().substringBefore('.'), kind))
+            }
+
+            val client = RecordingLanguageClient()
+            val server = GraphMdLanguageServer()
+            server.connect(client)
+            server.initialize(
+                InitializeParams().apply {
+                    workspaceFolders = listOf(WorkspaceFolder(root.toUri().toString(), "workspace"))
+                },
+            ).get()
+            server.initialized(InitializedParams())
+
+            documents.forEachIndexed { index, (file, kind) ->
+                val uri = file.toUri().toString()
+                val diskText = Files.readString(file)
+                val invalidText = graphDocument("INVALID ID@", kind)
+                server.textDocumentService.didOpen(
+                    DidOpenTextDocumentParams(TextDocumentItem(uri, "markdown", index + 1, diskText)),
+                )
+                server.textDocumentService.didChange(
+                    DidChangeTextDocumentParams(
+                        VersionedTextDocumentIdentifier(uri, index + 2),
+                        listOf(TextDocumentContentChangeEvent(invalidText)),
+                    ),
+                )
+                assertTrue(client.latest(uri).any { it.message == invalidIdWarning })
+
+                listOf(FileChangeType.Created, FileChangeType.Changed, FileChangeType.Deleted).forEach { changeType ->
+                    server.workspaceService.didChangeWatchedFiles(
+                        DidChangeWatchedFilesParams(listOf(FileEvent(uri, changeType))),
+                    )
+                    assertTrue(client.latest(uri).any { it.message == invalidIdWarning })
+                }
+
+                server.textDocumentService.didClose(
+                    DidCloseTextDocumentParams(TextDocumentIdentifier(uri)),
+                )
+                assertTrue(client.latest(uri).none { it.message == invalidIdWarning })
+
+                Files.writeString(file, invalidText)
+                server.workspaceService.didChangeWatchedFiles(
+                    DidChangeWatchedFilesParams(listOf(FileEvent(uri, FileChangeType.Changed))),
+                )
+                assertTrue(client.latest(uri).any { it.message == invalidIdWarning })
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `encoded client uri does not duplicate diagnostics for the same file`() {
+        val root = Files.createTempDirectory("graphmd-lsp-encoded-uri")
+        try {
+            val file = root.resolve("THE IDOLM@STER2.md")
+            val diskUri = file.toUri().toString()
+            val clientUri = diskUri.replace("@", "%40")
+            Files.writeString(file, graphDocument("THE_IDOLMASTER2", "Timeline"))
+            assertTrue(clientUri != diskUri)
+
+            val client = RecordingLanguageClient()
+            val server = GraphMdLanguageServer()
+            server.connect(client)
+            server.initialize(
+                InitializeParams().apply {
+                    workspaceFolders = listOf(WorkspaceFolder(root.toUri().toString(), "workspace"))
+                },
+            ).get()
+            server.initialized(InitializedParams())
+            server.textDocumentService.didOpen(
+                DidOpenTextDocumentParams(
+                    TextDocumentItem(clientUri, "markdown", 1, Files.readString(file)),
+                ),
+            )
+
+            client.notifications.clear()
+            server.textDocumentService.didChange(
+                DidChangeTextDocumentParams(
+                    VersionedTextDocumentIdentifier(clientUri, 2),
+                    listOf(TextDocumentContentChangeEvent(graphDocument("THE_IDOLM@STER2", "Timeline"))),
+                ),
+            )
+
+            val notifications = client.notifications.filter {
+                Path.of(URI.create(it.uri)) == file
+            }
+            assertEquals(1, notifications.size)
+            assertEquals(diskUri, notifications.single().uri)
+            assertTrue(notifications.single().diagnostics.any { it.message == invalidIdWarning })
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `front matter completion suggests node props keys and timeline values`() {
         val schema = mapOf(
             "name" to ResolvedPropSchema(type = PropType.string),
@@ -1288,6 +1480,37 @@ class GraphMdLanguageServerTest {
             )
         }
         return ServerFixture(server, published)
+    }
+
+    private fun graphDocument(id: String, kind: String): String = """
+        ---
+        id: $id
+        kind: $kind
+        ---
+    """.trimIndent()
+
+    private class RecordingLanguageClient : LanguageClient {
+        val notifications = mutableListOf<PublishDiagnosticsParams>()
+
+        override fun publishDiagnostics(params: PublishDiagnosticsParams) {
+            notifications += params
+        }
+
+        fun latest(uri: String): List<org.eclipse.lsp4j.Diagnostic> =
+            notifications.last { it.uri == uri }.diagnostics
+
+        override fun telemetryEvent(p0: Any) = Unit
+
+        override fun showMessage(p0: MessageParams) = Unit
+
+        override fun showMessageRequest(p0: ShowMessageRequestParams): CompletableFuture<MessageActionItem> =
+            CompletableFuture.completedFuture(MessageActionItem())
+
+        override fun logMessage(p0: MessageParams) = Unit
+    }
+
+    private companion object {
+        const val invalidIdWarning = "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*"
     }
 
     private data class ServerFixture(

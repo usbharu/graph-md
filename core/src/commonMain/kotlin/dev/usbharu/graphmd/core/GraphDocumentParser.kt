@@ -49,6 +49,13 @@ class GraphDocumentParser {
             diagnostics += schemaError("id MUST be non-empty", sourcePath)
             return null
         }
+        if (!id.matches(Regex("""[A-Za-z_][A-Za-z0-9_.:-]*"""))) {
+            diagnostics += schemaWarning(
+                "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*",
+                sourcePath,
+                id,
+            )
+        }
         val kindName = root.requireString("kind", sourcePath, diagnostics) ?: return null
         return when (kindName) {
             "Node" -> parseNodeDocument(id, root, body, sourcePath, diagnostics, media = false)
@@ -422,6 +429,9 @@ class GraphDocumentParser {
 
     private fun schemaError(message: String, sourcePath: String, documentId: String? = null): Diagnostic =
         Diagnostic(DiagnosticCategory.SchemaError, Severity.Error, message, SourceInfo(sourcePath, documentId))
+
+    private fun schemaWarning(message: String, sourcePath: String, documentId: String? = null): Diagnostic =
+        Diagnostic(DiagnosticCategory.SchemaError, Severity.Warning, message, SourceInfo(sourcePath, documentId))
 }
 
 private data class FrontMatterSplit(
