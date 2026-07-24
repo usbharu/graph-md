@@ -30,7 +30,6 @@ class GraphMdLanguageServer : LanguageServer, LanguageClientAware {
         val roots = params.workspaceFolders.orEmpty().map { Paths.get(URI.create(it.uri)) }
         workspaceIndex.setWorkspaceRoots(roots)
         workspaceIndex.loadWorkspace()
-        publishDiagnostics()
         return CompletableFuture.completedFuture(
             InitializeResult(
                 ServerCapabilities().apply {
@@ -51,6 +50,10 @@ class GraphMdLanguageServer : LanguageServer, LanguageClientAware {
                 },
             ),
         )
+    }
+
+    override fun initialized(params: InitializedParams) {
+        publishDiagnostics()
     }
 
     override fun shutdown(): CompletableFuture<Any> {
@@ -85,7 +88,7 @@ private class GraphMdTextDocumentService(
     private val index: GraphMdWorkspaceIndex,
 ) : TextDocumentService {
     override fun didOpen(params: DidOpenTextDocumentParams) {
-        index.upsert(params.textDocument.uri, params.textDocument.text)
+        index.open(params.textDocument.uri, params.textDocument.text)
         server.publishDiagnostics()
     }
 
@@ -96,7 +99,7 @@ private class GraphMdTextDocumentService(
     }
 
     override fun didClose(params: DidCloseTextDocumentParams) {
-        index.reload(params.textDocument.uri)
+        index.close(params.textDocument.uri)
         server.publishDiagnostics()
     }
 
@@ -139,12 +142,7 @@ private class GraphMdWorkspaceService(
     override fun didChangeConfiguration(params: DidChangeConfigurationParams) = Unit
 
     override fun didChangeWatchedFiles(params: DidChangeWatchedFilesParams) {
-        params.changes.forEach { change ->
-            when (change.type) {
-                FileChangeType.Deleted -> index.remove(change.uri)
-                else -> index.reload(change.uri)
-            }
-        }
+        params.changes.forEach(index::updateFromDisk)
         server.publishDiagnostics()
     }
 }
@@ -154,6 +152,7 @@ private class GraphMdWorkspaceIndex {
     private val compiler = GraphCompiler()
     private var roots: List<Path> = emptyList()
     private val documents = linkedMapOf<String, IndexedDocument>()
+    private val openDocuments = mutableSetOf<String>()
     private var compiledCache: GraphCompilationResult? = null
 
     fun setWorkspaceRoots(roots: List<Path>) {
@@ -162,6 +161,7 @@ private class GraphMdWorkspaceIndex {
 
     fun loadWorkspace() {
         documents.clear()
+        openDocuments.clear()
         compiledCache = null
         roots.forEach { root ->
             if (!Files.exists(root)) return@forEach
@@ -179,6 +179,24 @@ private class GraphMdWorkspaceIndex {
                         upsert(uri, file.readText())
                     }
             }
+        }
+    }
+
+    fun open(uri: String, text: String) {
+        openDocuments += uri
+        upsert(uri, text)
+    }
+
+    fun close(uri: String) {
+        openDocuments -= uri
+        reload(uri)
+    }
+
+    fun updateFromDisk(change: FileEvent) {
+        if (change.uri in openDocuments) return
+        when (change.type) {
+            FileChangeType.Deleted -> remove(change.uri)
+            else -> reload(change.uri)
         }
     }
 
