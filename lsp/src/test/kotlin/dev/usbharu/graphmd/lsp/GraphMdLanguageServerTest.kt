@@ -747,6 +747,129 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `validTime list completion produces natural yaml and timeline values`() {
+        fun completionFor(line: String, timelineIds: List<String> = listOf("CommonEra", "ThirdAge")): List<CompletionEntry> {
+            val text = "---\nid: alice\nkind: Node\ntype: Person\nvalidTime:\n$line\n---"
+            return FrontMatterCompletionResolver(
+                text = text,
+                offset = text.indexOf(line) + line.length,
+                parsedDocument = NodeDocument(id = "alice", type = "Person", sourcePath = "/tmp/alice.md"),
+                nodeTypeIds = listOf("Person"),
+                relTypeIds = emptyList(),
+                timelineIds = timelineIds,
+            ).resolve().orEmpty()
+        }
+
+        val blank = completionFor("  ").single { it.label == "timeline" }
+        assertEquals("- timeline: ", blank.insertText)
+        assertEquals("  - timeline: ", "  " + blank.insertText)
+
+        val dash = completionFor("  -").single { it.label == "timeline" }
+        assertEquals(" timeline: ", dash.insertText)
+        assertEquals("  - timeline: ", "  -" + dash.insertText)
+
+        val spacedDash = completionFor("  - ").single { it.label == "timeline" }
+        assertEquals("timeline: ", spacedDash.insertText)
+        assertEquals("  - timeline: ", "  - " + spacedDash.insertText)
+
+        val prefixedDash = completionFor("  -tim").single { it.label == "timeline" }
+        assertEquals(" timeline: ", prefixedDash.insertText)
+        assertEquals("  - timeline: ", "  -tim".removeSuffix("tim") + prefixedDash.insertText)
+
+        val spacedPrefixedDash = completionFor("  - tim").single { it.label == "timeline" }
+        assertEquals("timeline: ", spacedPrefixedDash.insertText)
+        assertEquals("  - timeline: ", "  - tim".removeSuffix("tim") + spacedPrefixedDash.insertText)
+
+        val timelineValues = completionFor("  - timeline: ").map { it.label }
+        assertEquals(listOf("CommonEra", "ThirdAge"), timelineValues)
+
+        val filteredTimelineValues = completionFor("  - timeline: Com").map { it.label }
+        assertEquals(listOf("CommonEra"), filteredTimelineValues)
+
+        val commentedParentText = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            validTime: # validity period
+              <cursor>
+            ---
+        """.trimIndent()
+        val marker = "<cursor>"
+        val commentedParentOffset = commentedParentText.indexOf(marker)
+        val commentedParentItems = FrontMatterCompletionResolver(
+            text = commentedParentText.replace(marker, ""),
+            offset = commentedParentOffset,
+            parsedDocument = NodeDocument(id = "alice", type = "Person", sourcePath = "/tmp/alice.md"),
+            nodeTypeIds = listOf("Person"),
+            relTypeIds = emptyList(),
+            timelineIds = listOf("CommonEra"),
+        ).resolve().orEmpty()
+        assertEquals("- timeline: ", commentedParentItems.single { it.label == "timeline" }.insertText)
+    }
+
+    @Test
+    fun `validTime mapping completion excludes keys already used in the current list item`() {
+        fun completionAt(markedText: String): List<String> {
+            val marker = "<cursor>"
+            val offset = markedText.indexOf(marker)
+            val text = markedText.replace(marker, "")
+            return FrontMatterCompletionResolver(
+                text = text,
+                offset = offset,
+                parsedDocument = NodeDocument(id = "alice", type = "Person", sourcePath = "/tmp/alice.md"),
+                nodeTypeIds = listOf("Person"),
+                relTypeIds = emptyList(),
+                timelineIds = listOf("TimelineA"),
+            ).resolve().orEmpty().map { it.label }
+        }
+
+        val afterTimeline = completionAt(
+            """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            validTime:
+              - timeline: TimelineA
+                <cursor>
+            ---
+            """.trimIndent(),
+        )
+        assertEquals(listOf("from", "to"), afterTimeline)
+
+        val afterTimelineAndFrom = completionAt(
+            """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            validTime:
+              - timeline: TimelineA
+                from:
+                  timecode: 1
+                <cursor>
+            ---
+            """.trimIndent(),
+        )
+        assertEquals(listOf("to"), afterTimelineAndFrom)
+
+        val nextListItem = completionAt(
+            """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            validTime:
+              - timeline: TimelineA
+              - <cursor>
+            ---
+            """.trimIndent(),
+        )
+        assertEquals(listOf("timeline"), nextListItem)
+    }
+
+    @Test
     fun `front matter completion offers canonical timeline selector ids`() {
         val timelineText = """
             ---
