@@ -1163,9 +1163,16 @@ private class GraphMdWorkspaceIndex {
 
     private fun frontMatterScalar(text: String, key: String): String? {
         val frontMatterEnd = text.indexOf("\n---", startIndex = 3).takeIf { it >= 0 } ?: text.length
-        return Regex("""(?m)^${Regex.escape(key)}\s*:\s*([^#\r\n]+)""")
+        val match = Regex(
+            """(?m)^${Regex.escape(key)}\s*:\s*(?:"((?:\\.|[^"\\])*)"|'((?:''|[^'])*)'|([^#\r\n]+))""",
+        )
             .find(text.substring(0, frontMatterEnd))
-            ?.groupValues?.get(1)?.trim()?.trim('"', '\'')?.takeIf { it.isNotEmpty() }
+            ?: return null
+        return (
+            match.groups[1]?.value
+                ?: match.groups[2]?.value
+                ?: match.groups[3]?.value?.trim()
+            )?.takeIf { it.isNotEmpty() }
     }
 
     private fun completionIds(kind: ReferenceTargetKind): List<String> {
@@ -1230,9 +1237,12 @@ private class GraphMdWorkspaceIndex {
             return document.yamlScalarRange("id", it.groupValues[1])
         }
         if (diagnostic.message.startsWith("id MUST match ")) {
-            val rawId = frontMatterScalar(document.text, "id")
-                ?: document.analysis.parsed.document?.id
-            rawId?.let { return document.yamlScalarRange("id", it) }
+            frontMatterScalar(document.text, "id")
+                ?.let { document.yamlScalarRange("id", it) }
+                ?.let { return it }
+            document.analysis.parsed.document?.id
+                ?.let { document.yamlScalarRange("id", it) }
+                ?.let { return it }
         }
         Regex("""Unknown property ([A-Za-z_][A-Za-z0-9_.:-]*) on .+""").matchEntire(diagnostic.message)?.let {
             return document.propertyAssignmentRange(it.groupValues[1])

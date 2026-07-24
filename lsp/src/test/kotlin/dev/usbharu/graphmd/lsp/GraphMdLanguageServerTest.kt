@@ -773,6 +773,7 @@ class GraphMdLanguageServerTest {
     fun `invalid id warning highlights only the id value`() {
         val uri = "file:///workspace/invalid-id.md"
         val escapedUri = "file:///workspace/escaped-invalid-id.md"
+        val hashUri = "file:///workspace/hash-invalid-id.md"
         val fixture = serverFixture(
             mapOf(
                 uri to """
@@ -784,6 +785,12 @@ class GraphMdLanguageServerTest {
                 escapedUri to """
                     ---
                     id: "bad\/id"
+                    kind: NodeType
+                    ---
+                """.trimIndent(),
+                hashUri to """
+                    ---
+                    id: "bad#id"
                     kind: NodeType
                     ---
                 """.trimIndent(),
@@ -803,6 +810,13 @@ class GraphMdLanguageServerTest {
         assertEquals(DiagnosticSeverity.Warning, escapedDiagnostic.severity)
         assertEquals(Position(1, 5), escapedDiagnostic.range.start)
         assertEquals(Position(1, 12), escapedDiagnostic.range.end)
+
+        val hashDiagnostic = fixture.diagnostics.getValue(hashUri).single {
+            it.message == "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*"
+        }
+        assertEquals(DiagnosticSeverity.Warning, hashDiagnostic.severity)
+        assertEquals(Position(1, 5), hashDiagnostic.range.start)
+        assertEquals(Position(1, 11), hashDiagnostic.range.end)
     }
 
     @Test
