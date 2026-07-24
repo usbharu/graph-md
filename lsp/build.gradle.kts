@@ -1,6 +1,13 @@
 plugins {
-    id("buildsrc.convention.kotlin-jvm")
+    alias(libs.plugins.kotlinJvm)
     application
+}
+
+kotlin {
+    jvmToolchain(21)
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
+    }
 }
 
 dependencies {
