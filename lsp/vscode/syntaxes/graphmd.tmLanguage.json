@@ -37,7 +37,7 @@
     },
     "graphmd-link": {
       "name": "meta.graphmd.relation.inline.markdown",
-      "begin": "(@link)(?:\\(validTime=(?:[^()]|\\([^)]*\\))*\\))?(?=\\{)",
+      "begin": "(@link)(?:\\(validTime=(?:[^()]|\\([^)]*\\))*\\))?(?=\\{|\\[)",
       "beginCaptures": {
         "1": {
           "name": "keyword.control.graphmd"

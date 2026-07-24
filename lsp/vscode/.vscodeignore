@@ -5,3 +5,4 @@ src/**
 esbuild.mjs
 sync-server.sh
 tsconfig.json
+syntaxes/*.test.mjs
