@@ -61,6 +61,13 @@ export function propsBlockRule(state: any, startLine: number, endLine: number, s
     return false;
   }
 
+  for (let cursor = closeBrace + 1; cursor < state.eMarks[lastLine]; cursor += 1) {
+    const ch = src.charCodeAt(cursor);
+    if (ch !== SPACE && ch !== TAB) {
+      return false;
+    }
+  }
+
   if (!silent) {
     const token = state.push("graphmd_props_block", "div", 0);
     token.block = true;

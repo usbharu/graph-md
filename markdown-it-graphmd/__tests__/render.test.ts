@@ -133,13 +133,27 @@ describe("@props", () => {
 
   it("handles a multi-line block", () => {
     const html = render("@props{\n  height = 162.5\n  active = true\n}");
+    expect(html).toMatch(/^<div class="graphmd-props"/);
     expect(dataProps(html)).toBe('{"height":162.5,"active":true}');
+  });
+
+  it("keeps a standalone props directive with trailing whitespace as a block", () => {
+    const html = render("@props{x = 1} \t");
+    expect(html).toMatch(/^<div class="graphmd-props"/);
+    expect(dataProps(html)).toBe('{"x":1}');
   });
 
   it("supports inline occurrence inside a paragraph", () => {
     const html = render("leading @props{x = 1} trailing");
     expect(html).toContain('class="graphmd-props"');
     expect(dataProps(html)).toBe('{"x":1}');
+  });
+
+  it("preserves prose and markdown after props at the start of a line", () => {
+    const html = render('@props{name = "Alice"}です。 **表示されます**');
+    expect(html).toMatch(/^<p><span class="graphmd-props"/);
+    expect(html).toContain("です。 <strong>表示されます</strong></p>");
+    expect(dataProps(html)).toBe('{"name":"Alice"}');
   });
 
   it("does not extract inside fenced code blocks", () => {
