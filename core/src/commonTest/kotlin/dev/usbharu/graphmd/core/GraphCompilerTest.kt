@@ -278,6 +278,28 @@ class GraphCompilerTest {
     }
 
     @Test
+    fun `does not report required prop missing when its inline block has a syntax error`() {
+        val result = compiler().compile(
+            listOf(
+                NodeTypeDocument(
+                    id = "Person",
+                    props = mapOf("age" to PropSchema(PropType.number, required = true)),
+                    sourcePath = "/tmp/person-type.md",
+                ),
+                NodeDocument(
+                    id = "alice",
+                    type = "Person",
+                    body = "@props{age = 14,age = 14}",
+                    sourcePath = "/tmp/alice.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.diagnostics.any { it.message.startsWith("Duplicate key: age") })
+        assertFalse(result.diagnostics.any { it.message == "Required property missing after normalization: age" })
+    }
+
+    @Test
     fun `reports duplicate ids and unresolved relation references`() {
         val result = compiler().compile(
             listOf(
