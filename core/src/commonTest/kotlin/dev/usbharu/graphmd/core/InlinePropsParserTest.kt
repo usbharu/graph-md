@@ -207,4 +207,35 @@ class InlinePropsParserTest {
             ).parseObject()
         }
     }
+
+    @Test
+    fun `keeps an empty array fallback when adding a timed assertion`() {
+        val parsed = InlinePropsParser(
+            """{tags=[],tags(validTime=TimelineA)=1}""",
+        ).parseObject()
+
+        val tags = parsed.values.getValue("tags") as RawArray
+        assertEquals(
+            RawObject(mapOf("value" to RawArray(emptyList()))),
+            tags.values[0],
+        )
+        assertEquals(
+            RawObject(
+                mapOf(
+                    "value" to RawInteger(1),
+                    "validTime" to RawArray(
+                        listOf(RawObject(mapOf("timeline" to RawString("TimelineA")))),
+                    ),
+                ),
+            ),
+            tags.values[1],
+        )
+    }
+
+    @Test
+    fun `rejects duplicate fallback assertions when the first value is an empty array`() {
+        assertFailsWith<InlinePropsParseException> {
+            InlinePropsParser("""{tags=[],tags=1}""").parseObject()
+        }
+    }
 }

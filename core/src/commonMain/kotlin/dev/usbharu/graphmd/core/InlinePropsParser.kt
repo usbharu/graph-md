@@ -82,6 +82,7 @@ class InlinePropsParser(private val input: String) {
 
     private fun timedEntries(value: RawValue): List<RawObject>? {
         val values = (value as? RawArray)?.values ?: return null
+        if (values.isEmpty()) return null
         return values.map { entry ->
             val obj = entry as? RawObject ?: return null
             if ("value" !in obj.values || obj.values.keys.any { it !in setOf("value", "validTime") }) return null
