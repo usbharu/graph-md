@@ -130,20 +130,40 @@ function renderBoundProps(tag: "div" | "span", propsJson: string | null): string
     return `<${tag} class="graphmd-props"></${tag}>`;
   }
   const values = Object.entries(props).map(([name, value]) => {
-    const timelines = displayTimelines(value);
-    const superscript = timelines.length > 0
-      ? `<sup class="graphmd-prop-valid-time">${escapeText(timelines.join(","))}</sup>`
-      : "";
-    return `<span data-props-name="${escapeAttr(name)}"><span class="graphmd-prop-value">${escapeText(displayValue(value))}</span><span class="graphmd-prop-annotations">${superscript}<sub class="graphmd-prop-name">${escapeText(name)}</sub></span></span>`;
+    return `<span data-props-name="${escapeAttr(name)}"><span class="graphmd-prop-value">${renderPropertyValue(value)}</span><span class="graphmd-prop-annotations"><sub class="graphmd-prop-name">${escapeText(name)}</sub></span></span>`;
   }).join("");
   return `<${tag} class="graphmd-props" data-props-bind="${escapeAttr(propsJson)}">${values}</${tag}>`;
 }
 
-function displayValue(value: unknown): string {
-  if (Array.isArray(value) && value.every((entry) => isRecord(entry) && "value" in entry)) {
-    const values = value.map((entry) => (entry as Record<string, unknown>).value);
-    return values.length === 1 ? displayValue(values[0]) : JSON.stringify(values);
+function renderPropertyValue(value: unknown): string {
+  if (!isPropertyAssertions(value)) {
+    return escapeText(displayValue(value));
   }
+
+  if (value.length === 1) {
+    const entry = value[0];
+    return `${escapeText(displayValue(entry.value))}${renderTimelines(entry)}`;
+  }
+
+  const entries = value.map((entry) => {
+    return `${escapeText(displayArrayEntry(entry.value))}${renderTimelines(entry)}`;
+  });
+  return `[${entries.join(",")}]`;
+}
+
+function renderTimelines(entry: Record<string, unknown>): string {
+  const timelines = displayTimelines(entry);
+  return timelines.length > 0
+    ? `<sup class="graphmd-prop-valid-time">${escapeText(timelines.join(","))}</sup>`
+    : "";
+}
+
+function displayArrayEntry(value: unknown): string {
+  const serialised = JSON.stringify(value);
+  return serialised === undefined ? String(value) : serialised;
+}
+
+function displayValue(value: unknown): string {
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
     return String(value);
   }
@@ -153,18 +173,19 @@ function displayValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function displayTimelines(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
+function displayTimelines(entry: Record<string, unknown>): string[] {
+  if (!Array.isArray(entry.validTime)) return [];
   const timelines: string[] = [];
-  for (const entry of value) {
-    if (!isRecord(entry) || !Array.isArray(entry.validTime)) continue;
-    for (const validTime of entry.validTime) {
-      if (isRecord(validTime) && typeof validTime.timeline === "string" && !timelines.includes(validTime.timeline)) {
-        timelines.push(validTime.timeline);
-      }
+  for (const validTime of entry.validTime) {
+    if (isRecord(validTime) && typeof validTime.timeline === "string" && !timelines.includes(validTime.timeline)) {
+      timelines.push(validTime.timeline);
     }
   }
   return timelines;
+}
+
+function isPropertyAssertions(value: unknown): value is Record<string, unknown>[] {
+  return Array.isArray(value) && value.every((entry) => isRecord(entry) && "value" in entry);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

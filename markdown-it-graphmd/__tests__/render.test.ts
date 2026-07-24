@@ -116,9 +116,19 @@ describe("@props", () => {
     expect(html).toContain("歳</p>");
   });
 
-  it("stacks validTime above the property name and accepts spaces around equals", () => {
+  it("renders validTime next to its value and accepts spaces around equals", () => {
     const html = render("年齢は@props(validTime = CommonEra){age = 25}歳");
-    expect(html).toContain('<span class="graphmd-prop-value">25</span><span class="graphmd-prop-annotations"><sup class="graphmd-prop-valid-time">CommonEra</sup><sub class="graphmd-prop-name">age</sub>');
+    expect(html).toContain('<span class="graphmd-prop-value">25<sup class="graphmd-prop-valid-time">CommonEra</sup></span><span class="graphmd-prop-annotations"><sub class="graphmd-prop-name">age</sub>');
+  });
+
+  it("renders each validTime next to the property assertion it applies to", () => {
+    const html = render("@props{age(validTime=TimelineA)=17,age=18}");
+    expect(html).toContain('<span class="graphmd-prop-value">[18,17<sup class="graphmd-prop-valid-time">TimelineA</sup>]</span><span class="graphmd-prop-annotations"><sub class="graphmd-prop-name">age</sub>');
+  });
+
+  it("keeps multiple timelines on their own property assertion", () => {
+    const html = render("@props{age(validTime=[TimelineA,TimelineB,TimelineA])=17,age(validTime=TimelineC)=18}");
+    expect(html).toContain('[17<sup class="graphmd-prop-valid-time">TimelineA,TimelineB</sup>,18<sup class="graphmd-prop-valid-time">TimelineC</sup>]');
   });
 
   it("handles a multi-line block", () => {
