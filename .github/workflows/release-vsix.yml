@@ -77,13 +77,41 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.ref_name }}
+          VSIX_NAME: ${{ steps.version.outputs.vsix }}
           VSIX_PATH: lsp/vscode/${{ steps.version.outputs.vsix }}
         run: |
+          generated_notes="$(
+            gh api \
+              --method POST \
+              "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+              -f tag_name="$TAG_NAME" \
+              -f target_commitish="$GITHUB_SHA" \
+              --jq ".body"
+          )"
+
+          notes_file="$RUNNER_TEMP/release-notes.md"
+          {
+            echo "GraphMD language support for Visual Studio Code."
+            echo
+            echo "## 📦 Install"
+            echo
+            echo "Download [$VSIX_NAME](https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG_NAME/$VSIX_NAME), then run:"
+            echo
+            echo '```sh'
+            echo "code --install-extension $VSIX_NAME"
+            echo '```'
+            echo
+            printf '%s\n' "$generated_notes"
+          } > "$notes_file"
+
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
             gh release upload "$TAG_NAME" "$VSIX_PATH" --clobber
+            gh release edit "$TAG_NAME" \
+              --title "GraphMD VS Code $TAG_NAME" \
+              --notes-file "$notes_file"
           else
             gh release create "$TAG_NAME" "$VSIX_PATH" \
               --verify-tag \
-              --generate-notes \
-              --title "GraphMD VS Code $TAG_NAME"
+              --title "GraphMD VS Code $TAG_NAME" \
+              --notes-file "$notes_file"
           fi
