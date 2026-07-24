@@ -183,24 +183,31 @@ private class GraphMdWorkspaceIndex {
     }
 
     fun open(uri: String, text: String) {
-        openDocuments += uri
-        upsert(uri, text)
+        val normalizedUri = normalizeUri(uri)
+        openDocuments += normalizedUri
+        upsertNormalized(normalizedUri, text)
     }
 
     fun close(uri: String) {
-        openDocuments -= uri
-        reload(uri)
+        val normalizedUri = normalizeUri(uri)
+        openDocuments -= normalizedUri
+        reloadNormalized(normalizedUri)
     }
 
     fun updateFromDisk(change: FileEvent) {
-        if (change.uri in openDocuments) return
+        val normalizedUri = normalizeUri(change.uri)
+        if (normalizedUri in openDocuments) return
         when (change.type) {
-            FileChangeType.Deleted -> remove(change.uri)
-            else -> reload(change.uri)
+            FileChangeType.Deleted -> removeNormalized(normalizedUri)
+            else -> reloadNormalized(normalizedUri)
         }
     }
 
     fun upsert(uri: String, text: String) {
+        upsertNormalized(normalizeUri(uri), text)
+    }
+
+    private fun upsertNormalized(uri: String, text: String) {
         val path = Paths.get(URI.create(uri))
         val analysis = analyzer.analyze(text, path.toString())
         documents[uri] = IndexedDocument(uri, path, text, analysis)
@@ -208,22 +215,29 @@ private class GraphMdWorkspaceIndex {
     }
 
     fun reload(uri: String) {
+        reloadNormalized(normalizeUri(uri))
+    }
+
+    private fun reloadNormalized(uri: String) {
         val path = Paths.get(URI.create(uri))
         if (!Files.exists(path)) {
-            documents.remove(uri)
-            compiledCache = null
+            removeNormalized(uri)
             return
         }
-        upsert(uri, path.readText())
+        upsertNormalized(uri, path.readText())
     }
 
     fun remove(uri: String) {
+        removeNormalized(normalizeUri(uri))
+    }
+
+    private fun removeNormalized(uri: String) {
         documents.remove(uri)
         compiledCache = null
     }
 
     fun completions(uri: String, position: Position): List<CompletionItem> {
-        val document = documents[uri] ?: return emptyList()
+        val document = documents[normalizeUri(uri)] ?: return emptyList()
         yamlFrontMatterCompletions(document, position)?.let { return it }
         exactPropsCompletions(document, position)?.let { return it }
         exactRelationPropsCompletions(document, position)?.let { return it }
@@ -240,7 +254,7 @@ private class GraphMdWorkspaceIndex {
     }
 
     fun definitions(uri: String, position: Position): List<Location> {
-        val document = documents[uri] ?: return emptyList()
+        val document = documents[normalizeUri(uri)] ?: return emptyList()
         val reference = analyzer.findReferenceAt(document.analysis, document.offsetAt(position)) ?: return emptyList()
         return resolve(reference.kind, reference.targetId).map { resolved ->
             Location(resolved.uri, resolved.range())
@@ -248,7 +262,7 @@ private class GraphMdWorkspaceIndex {
     }
 
     fun references(uri: String, position: Position): List<Location> {
-        val document = documents[uri] ?: return emptyList()
+        val document = documents[normalizeUri(uri)] ?: return emptyList()
         val offset = document.offsetAt(position)
         val reference = analyzer.findReferenceAt(document.analysis, offset)?.let { it.kind to it.targetId }
             ?: analyzer.findDefinitionAt(document.analysis, offset)?.let { it.kind to it.id }
@@ -267,7 +281,7 @@ private class GraphMdWorkspaceIndex {
     }
 
     fun hover(uri: String, position: Position): Hover? {
-        val document = documents[uri] ?: return null
+        val document = documents[normalizeUri(uri)] ?: return null
         val offset = document.offsetAt(position)
         val symbol = analyzer.findReferenceAt(document.analysis, offset)?.let { it.kind to it.targetId }
             ?: analyzer.findDefinitionAt(document.analysis, offset)?.let { it.kind to it.id }
@@ -300,7 +314,7 @@ private class GraphMdWorkspaceIndex {
 
     fun rename(uri: String, position: Position, newName: String): WorkspaceEdit? {
         if (newName.isBlank() || newName.any { it.isWhitespace() }) return null
-        val document = documents[uri] ?: return null
+        val document = documents[normalizeUri(uri)] ?: return null
         val offset = document.offsetAt(position)
         val symbol = analyzer.findReferenceAt(document.analysis, offset)?.let { it.kind to it.targetId }
             ?: analyzer.findDefinitionAt(document.analysis, offset)?.let { it.kind to it.id }
@@ -318,7 +332,7 @@ private class GraphMdWorkspaceIndex {
     }
 
     fun codeActions(uri: String, diagnostics: List<org.eclipse.lsp4j.Diagnostic>): List<CodeAction> {
-        val document = documents[uri] ?: return emptyList()
+        val document = documents[normalizeUri(uri)] ?: return emptyList()
         return diagnostics
             .filter { it.source == null || it.source == "graphmd" }
             .flatMap { diagnostic -> codeActionsForDiagnostic(document, diagnostic) }
@@ -1032,6 +1046,9 @@ private class GraphMdWorkspaceIndex {
         documents.keys.forEach { uri -> diagnostics.putIfAbsent(uri, mutableListOf()) }
         return diagnostics
     }
+
+    private fun normalizeUri(uri: String): String =
+        Paths.get(URI.create(uri)).normalize().toUri().toString()
 
     private fun yamlFrontMatterCompletions(document: IndexedDocument, position: Position): List<CompletionItem>? {
         val resolver = FrontMatterCompletionResolver(

@@ -38,7 +38,9 @@ import org.eclipse.lsp4j.TextDocumentItem
 import org.eclipse.lsp4j.VersionedTextDocumentIdentifier
 import org.eclipse.lsp4j.WorkspaceFolder
 import org.eclipse.lsp4j.services.LanguageClient
+import java.net.URI
 import java.nio.file.Files
+import java.nio.file.Path
 import java.util.concurrent.CompletableFuture
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -796,6 +798,50 @@ class GraphMdLanguageServerTest {
                 )
                 assertTrue(client.latest(uri).any { it.message == invalidIdWarning })
             }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `encoded client uri does not duplicate diagnostics for the same file`() {
+        val root = Files.createTempDirectory("graphmd-lsp-encoded-uri")
+        try {
+            val file = root.resolve("THE IDOLM@STER2.md")
+            val diskUri = file.toUri().toString()
+            val clientUri = diskUri.replace("@", "%40")
+            Files.writeString(file, graphDocument("THE_IDOLMASTER2", "Timeline"))
+            assertTrue(clientUri != diskUri)
+
+            val client = RecordingLanguageClient()
+            val server = GraphMdLanguageServer()
+            server.connect(client)
+            server.initialize(
+                InitializeParams().apply {
+                    workspaceFolders = listOf(WorkspaceFolder(root.toUri().toString(), "workspace"))
+                },
+            ).get()
+            server.initialized(InitializedParams())
+            server.textDocumentService.didOpen(
+                DidOpenTextDocumentParams(
+                    TextDocumentItem(clientUri, "markdown", 1, Files.readString(file)),
+                ),
+            )
+
+            client.notifications.clear()
+            server.textDocumentService.didChange(
+                DidChangeTextDocumentParams(
+                    VersionedTextDocumentIdentifier(clientUri, 2),
+                    listOf(TextDocumentContentChangeEvent(graphDocument("THE_IDOLM@STER2", "Timeline"))),
+                ),
+            )
+
+            val notifications = client.notifications.filter {
+                Path.of(URI.create(it.uri)) == file
+            }
+            assertEquals(1, notifications.size)
+            assertEquals(diskUri, notifications.single().uri)
+            assertTrue(notifications.single().diagnostics.any { it.message == invalidIdWarning })
         } finally {
             root.toFile().deleteRecursively()
         }
