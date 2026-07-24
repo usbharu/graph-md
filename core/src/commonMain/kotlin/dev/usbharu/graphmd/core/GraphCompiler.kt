@@ -72,6 +72,7 @@ class GraphCompiler(
                 documentId = document.id,
                 timelineById = timelineById,
                 diagnostics = diagnostics,
+                emitRequiredDiagnostics = extraction.propsSyntaxValid,
             )
             val props = propEntries.mapValues { it.value.last().value }
             propEntries.values.flatten().forEach {
@@ -608,6 +609,7 @@ class GraphCompiler(
         documentId: String,
         timelineById: Map<String, NormalizedTimeline>,
         diagnostics: MutableList<Diagnostic>,
+        emitRequiredDiagnostics: Boolean = true,
     ): Map<String, List<NormalizedPropEntry>> {
         val result = linkedMapOf<String, List<NormalizedPropEntry>>()
         rawProps.forEach { (key, rawValue) ->
@@ -631,13 +633,15 @@ class GraphCompiler(
             }
             if (normalized.isNotEmpty()) result[key] = normalized
         }
-        schema.forEach { (key, propSchema) ->
-            if (key !in result) {
-                when {
-                    propSchema.required -> diagnostics += constraintError(
-                        "Required property missing after normalization: $key",
-                        SourceInfo(sourcePath, documentId),
-                    )
+        if (emitRequiredDiagnostics) {
+            schema.forEach { (key, propSchema) ->
+                if (key !in result) {
+                    when {
+                        propSchema.required -> diagnostics += constraintError(
+                            "Required property missing after normalization: $key",
+                            SourceInfo(sourcePath, documentId),
+                        )
+                    }
                 }
             }
         }

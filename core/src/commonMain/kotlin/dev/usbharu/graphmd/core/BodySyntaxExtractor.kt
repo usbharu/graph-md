@@ -6,6 +6,7 @@ data class BodySyntaxExtraction(
     val propsBlocks: List<ExtractedPropsBlock>,
     val relations: List<ExtractedRelation>,
     val diagnostics: List<Diagnostic>,
+    val propsSyntaxValid: Boolean = true,
 )
 
 class BodySyntaxExtractor {
@@ -13,6 +14,7 @@ class BodySyntaxExtractor {
         val diagnostics = mutableListOf<Diagnostic>()
         val propsBlocks = mutableListOf<ExtractedPropsBlock>()
         val relations = mutableListOf<ExtractedRelation>()
+        var propsSyntaxValid = true
         val masked = maskCodeRegions(body)
         var index = 0
         while (index < masked.length) {
@@ -24,6 +26,7 @@ class BodySyntaxExtractor {
                         if (masked.getOrNull(objectStart) == '(') {
                             val args = readBalanced(masked, objectStart, '(', ')')
                             if (args == null) {
+                                propsSyntaxValid = false
                                 diagnostics += syntaxDiagnostic("Unclosed @props arguments", sourcePath, documentId, index, body.length)
                                 index += 1
                                 continue
@@ -31,6 +34,7 @@ class BodySyntaxExtractor {
                             val argumentText = body.substring(objectStart + 1, args.end - 1).trim()
                             val validTimeArgument = Regex("""^validTime\s*=\s*(.+)$""").matchEntire(argumentText)
                             if (validTimeArgument == null) {
+                                propsSyntaxValid = false
                                 diagnostics += syntaxDiagnostic("@props only accepts validTime=...", sourcePath, documentId, index, args.end)
                                 index = args.end
                                 continue
@@ -40,6 +44,7 @@ class BodySyntaxExtractor {
                                 val dummy = InlinePropsParser("{x(validTime=$expression)=0}").parseObject().values.getValue("x") as RawArray
                                 ((dummy.values.single() as RawObject).values.getValue("validTime") as RawArray)
                             } catch (e: Exception) {
+                                propsSyntaxValid = false
                                 diagnostics += syntaxDiagnostic(e.message ?: "Invalid @props validTime", sourcePath, documentId, index, args.end)
                                 index = args.end
                                 continue
@@ -55,6 +60,7 @@ class BodySyntaxExtractor {
                                     val props = defaultValidTime?.let { applyDefaultValidTime(parsed.values, it) } ?: parsed.values
                                     propsBlocks += ExtractedPropsBlock(props, SourceRange(index, range.end))
                                 } catch (e: InlinePropsParseException) {
+                                    propsSyntaxValid = false
                                     val errorRange = e.errorRange?.let {
                                         SourceRange(objectStart + it.start, objectStart + it.end)
                                     } ?: SourceRange(index, range.end)
@@ -69,6 +75,7 @@ class BodySyntaxExtractor {
                                 index = range.end
                                 continue
                             }
+                            propsSyntaxValid = false
                             diagnostics += syntaxDiagnostic("Unclosed @props block", sourcePath, documentId, index, body.length)
                         }
                     }
@@ -84,7 +91,7 @@ class BodySyntaxExtractor {
             }
             index += 1
         }
-        return BodySyntaxExtraction(propsBlocks, relations, diagnostics)
+        return BodySyntaxExtraction(propsBlocks, relations, diagnostics, propsSyntaxValid)
     }
 
     private fun applyDefaultValidTime(props: Map<String, RawValue>, validTime: RawArray): Map<String, RawValue> =

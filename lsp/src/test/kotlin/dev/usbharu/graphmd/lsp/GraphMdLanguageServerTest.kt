@@ -220,6 +220,40 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `duplicate required inline prop reports only the duplicate at the second key`() {
+        val typeUri = "file:///workspace/types/Person.md"
+        val nodeUri = "file:///workspace/alice.md"
+        val fixture = serverFixture(
+            mapOf(
+                typeUri to """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    props:
+                      age:
+                        type: number
+                        required: true
+                    ---
+                """.trimIndent(),
+                nodeUri to """
+                    ---
+                    id: alice
+                    kind: Node
+                    type: Person
+                    ---
+                    @props{age = 14,age = 14}
+                """.trimIndent(),
+            ),
+        )
+
+        val diagnostics = fixture.diagnostics.getValue(nodeUri)
+        val duplicate = diagnostics.single { it.message.startsWith("Duplicate key: age at index") }
+
+        assertTrue(diagnostics.none { it.message == "Required property missing after normalization: age" })
+        assertEquals(Range(Position(5, 16), Position(5, 19)), duplicate.range)
+    }
+
+    @Test
     fun `quick fixes normalize inline arguments and relation layout`() {
         val argumentsUri = "file:///workspace/arguments.md"
         val whitespaceUri = "file:///workspace/whitespace.md"
