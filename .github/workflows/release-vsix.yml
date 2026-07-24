@@ -1,0 +1,89 @@
+name: Release VSIX
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-vsix-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and release VSIX
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            markdown-it-graphmd/package-lock.json
+            lsp/vscode/package-lock.json
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          version="${TAG_NAME#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag must use the format vMAJOR.MINOR.PATCH (for example, v1.2.3)."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "vsix=graph-md-vscode-$version.vsix" >> "$GITHUB_OUTPUT"
+
+      - name: Build Markdown preview plugin
+        working-directory: markdown-it-graphmd
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install VS Code extension dependencies
+        working-directory: lsp/vscode
+        run: npm ci
+
+      - name: Apply tag version to extension
+        working-directory: lsp/vscode
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: npm version "$VERSION" --no-git-tag-version --allow-same-version
+
+      - name: Package VSIX
+        working-directory: lsp/vscode
+        env:
+          VSIX_NAME: ${{ steps.version.outputs.vsix }}
+        run: npx --yes @vscode/vsce@3.9.2 package --out "$VSIX_NAME"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+          VSIX_PATH: lsp/vscode/${{ steps.version.outputs.vsix }}
+        run: |
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" "$VSIX_PATH" --clobber
+          else
+            gh release create "$TAG_NAME" "$VSIX_PATH" \
+              --verify-tag \
+              --generate-notes \
+              --title "GraphMD VS Code $TAG_NAME"
+          fi
