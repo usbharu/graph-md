@@ -30,10 +30,10 @@ The `graphmd` CLI is implemented in the `cli` multiplatform module.
 ./gradlew :cli:run --args="stats ./documents"
 ```
 
-Build the Node.js executable with `./gradlew :cli:jsProductionExecutableCompileSync`.
-Native release executables are available through the corresponding
-`linkReleaseExecutableMacosArm64`, `linkReleaseExecutableMacosX64`,
-`linkReleaseExecutableLinuxX64`, and `linkReleaseExecutableMingwX64` tasks.
+Release archives are built with `jvmReleaseJar`, `jsReleaseArchive`,
+`macosArm64ReleaseArchive`, `macosX64ReleaseArchive`,
+`linuxX64ReleaseArchive`, and `mingwX64ReleaseArchive`. Tag pushes matching
+`vMAJOR.MINOR.PATCH` publish these archives and the VSIX to one GitHub Release.
 
 When no path is supplied, the CLI searches the current directory recursively.
 Discovered `.md` files are treated as GraphMD only when their first line is

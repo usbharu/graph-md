@@ -82,14 +82,12 @@ internal sealed interface ParseResult {
 }
 
 internal object CliArguments {
-    const val version = "0.1.0"
-
     fun parse(arguments: List<String>): ParseResult {
         if (arguments.isEmpty()) return ParseResult.Print(rootHelp())
         val json = "--json" in arguments
         val help = "--help" in arguments || "-h" in arguments
         if ("--version" in arguments || "-V" in arguments) {
-            return ParseResult.Print("graphmd $version\n")
+            return ParseResult.Print("graphmd $cliVersion\n")
         }
         val remaining = arguments.filterNot { it == "--json" || it == "--help" || it == "-h" }
         if (remaining.isEmpty()) return ParseResult.Print(rootHelp())
