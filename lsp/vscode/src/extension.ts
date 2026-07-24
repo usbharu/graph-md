@@ -121,7 +121,7 @@ function resolveDocumentHref(target: string, env?: unknown): string {
     return target;
   }
 
-  return relativeMarkdownHref(currentDocument.fsPath, targetUri.fsPath);
+  return relativeMarkdownHref(currentDocument.fsPath, targetUri.fsPath) ?? target;
 }
 
 function parseMediaFrontMatter(text: string): { id: string; url: string } | null {
