@@ -1124,7 +1124,7 @@ LSPはワークスペース内のMarkdownファイルを走査し、frontmatter�
 
 索引化したすべてのID定義およびID参照に対して、LSPは次の機能を提供しなければならない。
 
-- 定義へ移動: 参照位置から、そのIDをfrontmatterで定義しているファイルと範囲へ移動する。定義位置自身から実行した場合も、その定義位置を返す。
+- 定義へ移動: 参照位置から、そのIDをfrontmatterで定義しているファイルと範囲へ移動する。Nodeのfrontmatterおよび`@props`のPropertyキーはNodeType、`@link`のPropertyキーはRelTypeの`props`宣言へ移動し、継承されたPropertyは最も近い宣言を返す。定義位置自身から実行した場合も、その定義位置を返す。
 - 参照を検索: 定義と、Markdown本文およびfrontmatter内のすべての参照を返す。
 - ホバー: IDのkind、定義ファイル、および利用可能な型情報を表示する。
 - 補完: 文脈に適合するkindのIDを候補として提示する。例えば`@link`のリンク先にはNodeまたはMedia、RelType位置にはRelType、timeline位置にはTimelineを提示する。

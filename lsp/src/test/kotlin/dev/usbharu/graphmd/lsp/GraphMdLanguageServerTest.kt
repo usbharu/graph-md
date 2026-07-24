@@ -20,6 +20,7 @@ import org.eclipse.lsp4j.DidChangeTextDocumentParams
 import org.eclipse.lsp4j.DidChangeWatchedFilesParams
 import org.eclipse.lsp4j.DidCloseTextDocumentParams
 import org.eclipse.lsp4j.DidOpenTextDocumentParams
+import org.eclipse.lsp4j.DefinitionParams
 import org.eclipse.lsp4j.DiagnosticSeverity
 import org.eclipse.lsp4j.FileChangeType
 import org.eclipse.lsp4j.FileEvent
@@ -442,6 +443,139 @@ class GraphMdLanguageServerTest {
         assertTrue(analysis.references.any { it.kind == ReferenceTargetKind.Node && it.targetId == "bob" })
         assertTrue(analysis.references.any { it.kind == ReferenceTargetKind.RelType && it.targetId == "friendOf" })
         assertEquals(2, analysis.references.count { it.kind == ReferenceTargetKind.Timeline && it.targetId == "CommonEra" })
+    }
+
+    @Test
+    fun `definition resolves yaml inline and relation property keys`() {
+        val nodeTypeUri = "file:///workspace/types/Person.md"
+        val relTypeUri = "file:///workspace/types/friendOf.md"
+        val nodeUri = "file:///workspace/alice.md"
+        val nodeText = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            props:
+              name: Alice
+            ---
+            @props{name = "Alice"}
+            @link{weight = 0.5}[Bob](bob friendOf)
+        """.trimIndent()
+        val fixture = serverFixture(
+            mapOf(
+                nodeTypeUri to """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    props:
+                      name:
+                        type: string
+                    ---
+                """.trimIndent(),
+                relTypeUri to """
+                    ---
+                    id: friendOf
+                    kind: RelType
+                    props:
+                      weight:
+                        type: number
+                    ---
+                """.trimIndent(),
+                nodeUri to nodeText,
+            ),
+        )
+
+        val yamlDefinition = fixture.definitions(nodeUri, nodeText.indexOf("name:") + 1).single()
+        val inlineDefinition = fixture.definitions(nodeUri, nodeText.indexOf("name =") + 1).single()
+        val relationDefinition = fixture.definitions(nodeUri, nodeText.indexOf("weight") + 1).single()
+
+        assertEquals(nodeTypeUri, yamlDefinition.uri)
+        assertEquals(Position(4, 2), yamlDefinition.range.start)
+        assertEquals(yamlDefinition, inlineDefinition)
+        assertEquals(
+            yamlDefinition,
+            fixture.definitions(nodeTypeUri, fixture.documents.getValue(nodeTypeUri).indexOf("name:") + 1).single(),
+        )
+        assertEquals(relTypeUri, relationDefinition.uri)
+        assertEquals(Position(4, 2), relationDefinition.range.start)
+    }
+
+    @Test
+    fun `property definition follows inheritance and prefers refinements`() {
+        val nodeUri = "file:///workspace/alice.md"
+        val nodeText = """
+            ---
+            id: alice
+            kind: Node
+            type: Employee
+            props:
+              name: Alice
+              age: 20
+              unknown: value
+            ---
+        """.trimIndent()
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/Entity.md" to """
+                    ---
+                    id: Entity
+                    kind: NodeType
+                    props:
+                      name:
+                        type: string
+                      age:
+                        type: number
+                    ---
+                """.trimIndent(),
+                "file:///workspace/types/Person.md" to """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    extends: [Entity]
+                    props:
+                      age:
+                        type: number
+                    ---
+                """.trimIndent(),
+                "file:///workspace/types/Employee.md" to """
+                    ---
+                    id: Employee
+                    kind: NodeType
+                    extends: [Person]
+                    ---
+                """.trimIndent(),
+                nodeUri to nodeText,
+            ),
+        )
+
+        assertEquals(
+            "file:///workspace/types/Entity.md",
+            fixture.definitions(nodeUri, nodeText.indexOf("name:") + 1).single().uri,
+        )
+        assertEquals(
+            "file:///workspace/types/Person.md",
+            fixture.definitions(nodeUri, nodeText.indexOf("age:") + 1).single().uri,
+        )
+        assertTrue(fixture.definitions(nodeUri, nodeText.indexOf("unknown:") + 1).isEmpty())
+    }
+
+    @Test
+    fun `property definition returns declarations from multiple inheritance branches`() {
+        val nodeUri = "file:///workspace/item.md"
+        val nodeText = "---\nid: item\nkind: Node\ntype: Combined\nprops:\n  label: value\n---"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/Left.md" to "---\nid: Left\nkind: NodeType\nprops:\n  label:\n    type: string\n---",
+                "file:///workspace/types/Right.md" to "---\nid: Right\nkind: NodeType\nprops:\n  label:\n    type: string\n---",
+                "file:///workspace/types/Combined.md" to "---\nid: Combined\nkind: NodeType\nextends: [Left, Right]\n---",
+                nodeUri to nodeText,
+            ),
+        )
+
+        assertEquals(
+            setOf("file:///workspace/types/Left.md", "file:///workspace/types/Right.md"),
+            fixture.definitions(nodeUri, nodeText.indexOf("label") + 1).map { it.uri }.toSet(),
+        )
     }
 
     @Test
@@ -1479,7 +1613,7 @@ class GraphMdLanguageServerTest {
                 DidOpenTextDocumentParams(TextDocumentItem(uri, "markdown", 1, text)),
             )
         }
-        return ServerFixture(server, published)
+        return ServerFixture(server, published, documents)
     }
 
     private fun graphDocument(id: String, kind: String): String = """
@@ -1516,7 +1650,17 @@ class GraphMdLanguageServerTest {
     private data class ServerFixture(
         val server: GraphMdLanguageServer,
         val diagnostics: Map<String, List<org.eclipse.lsp4j.Diagnostic>>,
+        val documents: Map<String, String>,
     ) {
+        fun definitions(uri: String, offset: Int): List<org.eclipse.lsp4j.Location> {
+            val text = documents.getValue(uri)
+            val line = text.substring(0, offset).count { it == '\n' }
+            val lineStart = text.lastIndexOf('\n', offset - 1).let { if (it < 0) 0 else it + 1 }
+            return server.textDocumentService.definition(
+                DefinitionParams(TextDocumentIdentifier(uri), Position(line, offset - lineStart)),
+            ).get().left.orEmpty()
+        }
+
         fun actions(uri: String, message: String): List<CodeAction> {
             val diagnostic = diagnostics.getValue(uri).first { it.message == message }
             return actions(uri, diagnostic)
