@@ -435,12 +435,6 @@ private class GraphMdWorkspaceIndex {
                 add(replaceAction(document, diagnostic, "Change property type to '${value.name}'", range, value.name, index == 0))
             }
         }
-        Regex("""Unknown prop index: (.+)""").matchEntire(message)?.let { match ->
-            val range = document.yamlScalarRange("index", match.groupValues[1]) ?: diagnostic.range
-            PropIndex.entries.forEachIndexed { index, value ->
-                add(replaceAction(document, diagnostic, "Change index to '${value.name}'", range, value.name, index == 0))
-            }
-        }
         Regex("""Unknown timecode type: (.+)""").matchEntire(message)?.let { match ->
             val range = document.yamlScalarRange("type", match.groupValues[1]) ?: diagnostic.range
             add(replaceAction(document, diagnostic, "Use numeric timecodes", range, "number", preferred = true))
@@ -1283,9 +1277,6 @@ private class GraphMdWorkspaceIndex {
         Regex("""Unknown prop type: (.+)""").matchEntire(diagnostic.message)?.let {
             return document.yamlScalarRange("type", it.groupValues[1])
         }
-        Regex("""Unknown prop index: (.+)""").matchEntire(diagnostic.message)?.let {
-            return document.yamlScalarRange("index", it.groupValues[1])
-        }
         Regex("""Unknown (?:timecode type|mapping kind): (.+)""").matchEntire(diagnostic.message)?.let {
             val field = if (diagnostic.message.startsWith("Unknown timecode")) "type" else "kind"
             return document.yamlScalarRange(field, it.groupValues[1])
@@ -1427,8 +1418,6 @@ internal class FrontMatterCompletionResolver(
                 enumCompletions(valuePrefix, listOf("number"), "timecode type")
             hasColon && path.lastOrNull() == "type" ->
                 enumCompletions(valuePrefix, listOf("number", "string", "text", "instant", "duration", "array"), "prop type")
-            hasColon && path.lastOrNull() == "index" ->
-                enumCompletions(valuePrefix, listOf("fulltext", "range"), "prop index")
             hasColon && path.lastOrNull() == "timeline" ->
                 timelineSelectorCompletions(valuePrefix)
             hasColon && valuePrefix.isEmpty() -> nestedKeyCompletions(path, "", lines, lineIndex)
@@ -1541,9 +1530,9 @@ internal class FrontMatterCompletionResolver(
             path.takeLast(2).let { it == listOf("validTime", "from") || it == listOf("validTime", "to") } ->
                 listOf("value", "timecode")
             isInsidePropSchema(path) -> when (siblingScalarValue(lines, lineIndex, "type")) {
-                "instant", "duration" -> listOf("type", "required", "index", "timeline")
-                "array" -> listOf("type", "required", "index", "items")
-                else -> listOf("type", "required", "index")
+                "instant", "duration" -> listOf("type", "required", "timeline")
+                "array" -> listOf("type", "required", "items")
+                else -> listOf("type", "required")
             }
             path == listOf("timecode") -> listOf("type")
             path == listOf("mappings") -> when (siblingScalarValue(lines, lineIndex, "kind")) {

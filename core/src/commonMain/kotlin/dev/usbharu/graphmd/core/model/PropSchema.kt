@@ -9,15 +9,9 @@ enum class PropType {
     array,
 }
 
-enum class PropIndex {
-    fulltext,
-    range,
-}
-
 data class PropSchema(
     val type: PropType,
     val required: Boolean = false,
-    val index: PropIndex? = null,
     val timeline: TimelineSelector? = null,
     val timelines: List<TimelineSelector>? = null,
     val items: PropSchema? = null,
@@ -26,7 +20,6 @@ data class PropSchema(
 data class ResolvedPropSchema(
     val type: PropType,
     val required: Boolean = false,
-    val index: PropIndex? = null,
     val timeline: TimelineSelector? = null,
     val timelines: List<TimelineSelector>? = null,
     val items: ResolvedPropSchema? = null,

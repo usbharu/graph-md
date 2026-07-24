@@ -13,7 +13,7 @@
 - 入力途中の front matter でも `kind` / `type` を推論し、既入力キーを除外した文脈補完
 - 診断から利用できる VS Code Quick Fix
   - 未定義の Node / NodeType / RelType / Timeline を既存定義へ置換、または定義ファイルを作成
-  - front matter の追加・閉じ、必須フィールド、未知フィールド、不正な kind / Property type / index の修正
+  - front matter の追加・閉じ、必須フィールド、未知フィールド、不正な kind / Property type の修正
   - 必須 Property の追加、未知 Property の削除または NodeType / RelType への宣言
   - 重複 ID、YAML 値型・リスト、Timeline selector、継承・from/to 制約の修正
   - `@props` / `@link` / relation の引数・空白・閉じ括弧・target/type 形式の修正

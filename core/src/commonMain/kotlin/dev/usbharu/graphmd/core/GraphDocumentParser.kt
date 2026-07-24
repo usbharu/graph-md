@@ -304,22 +304,11 @@ class GraphDocumentParser {
                 }
             }
         } ?: PropType.string
-        val index = map.string("index", sourcePath, diagnostics, documentId)?.let {
-            when (it) {
-                "fulltext" -> PropIndex.fulltext
-                "range" -> PropIndex.range
-                else -> {
-                    diagnostics += schemaError("Unknown prop index: $it", sourcePath, documentId)
-                    null
-                }
-            }
-        }
-        val unknown = map.map.keys - setOf("type", "required", "index", "timeline", "items")
+        val unknown = map.map.keys - setOf("type", "required", "timeline", "items")
         unknown.forEach { diagnostics += schemaError("Unknown property schema field: $fieldName.$it", sourcePath, documentId) }
         return PropSchema(
             type = type,
             required = map.boolean("required", sourcePath, diagnostics, documentId) ?: false,
-            index = index,
             timeline = map.map["timeline"]?.takeUnless { it is YamlList }?.let {
                 parseTimelineSelector(it, sourcePath, diagnostics, documentId, "$fieldName.timeline")
             },

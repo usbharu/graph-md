@@ -6,7 +6,6 @@ import dev.usbharu.graphmd.core.ReferenceTargetKind
 import dev.usbharu.graphmd.core.model.DocumentKind
 import dev.usbharu.graphmd.core.model.NodeDocument
 import dev.usbharu.graphmd.core.model.NodeTypeDocument
-import dev.usbharu.graphmd.core.model.PropIndex
 import dev.usbharu.graphmd.core.model.PropType
 import dev.usbharu.graphmd.core.model.ResolvedPropSchema
 import dev.usbharu.graphmd.core.model.SourceDocument
@@ -646,7 +645,7 @@ class GraphMdLanguageServerTest {
     fun `strict props completion suggests schema keys and timeline ids`() {
         val schema = mapOf(
             "name" to ResolvedPropSchema(type = PropType.string),
-            "birthDate" to ResolvedPropSchema(type = PropType.instant, index = PropIndex.range, timeline = TimelineSelector.Id("CommonEra")),
+            "birthDate" to ResolvedPropSchema(type = PropType.instant, timeline = TimelineSelector.Id("CommonEra")),
         )
         val keyResolver = PropsCompletionContextResolver(
             text = """
@@ -1163,7 +1162,7 @@ class GraphMdLanguageServerTest {
     fun `front matter completion suggests node props keys and timeline values`() {
         val schema = mapOf(
             "name" to ResolvedPropSchema(type = PropType.string),
-            "birthDate" to ResolvedPropSchema(type = PropType.instant, index = PropIndex.range, timeline = TimelineSelector.Id("CommonEra")),
+            "birthDate" to ResolvedPropSchema(type = PropType.instant, timeline = TimelineSelector.Id("CommonEra")),
         )
         val propKeyText = """
             ---
@@ -1208,7 +1207,7 @@ class GraphMdLanguageServerTest {
         assertEquals(listOf("CommonEra"), timelineItems)
 
         val intervalSchema = mapOf(
-            "activeDuring" to ResolvedPropSchema(type = PropType.duration, index = PropIndex.range, timeline = TimelineSelector.Id("CommonEra")),
+            "activeDuring" to ResolvedPropSchema(type = PropType.duration, timeline = TimelineSelector.Id("CommonEra")),
         )
         val intervalKeyText = """
             ---
@@ -1587,7 +1586,7 @@ class GraphMdLanguageServerTest {
             relTypeIds = emptyList(),
             timelineIds = listOf("CommonEra"),
         ).resolve()?.map { it.label }.orEmpty()
-        assertTrue("index" in nextKeyItems)
+        assertTrue("index" !in nextKeyItems)
         assertTrue("string" !in nextKeyItems)
 
         val blankNextKeyText = """
@@ -1609,7 +1608,7 @@ class GraphMdLanguageServerTest {
             relTypeIds = emptyList(),
             timelineIds = listOf("CommonEra"),
         ).resolve()?.map { it.label }.orEmpty()
-        assertTrue("index" in blankNextKeyItems)
+        assertTrue("index" !in blankNextKeyItems)
         assertTrue("true" !in blankNextKeyItems)
 
         val listText = """

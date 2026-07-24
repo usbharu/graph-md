@@ -561,7 +561,6 @@ class GraphCompiler(
         return ResolvedPropSchema(
             type = schema.type,
             required = schema.required,
-            index = schema.index,
             timeline = schema.timeline,
             timelines = schema.timelines,
             items = schema.items?.let { resolveSchema(it, timelineById, diagnostics, sourcePath, documentId, "$propName[]") },

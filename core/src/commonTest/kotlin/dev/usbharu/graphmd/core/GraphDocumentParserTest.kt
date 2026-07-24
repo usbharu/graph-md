@@ -55,7 +55,6 @@ class GraphDocumentParserTest {
                   name:
                     type: text
                     required: true
-                    index: fulltext
                 ---
             """.trimIndent(),
             "/tmp/person.md",
@@ -478,7 +477,7 @@ class GraphDocumentParserTest {
     }
 
     @Test
-    fun `reports unknown prop type and index`() {
+    fun `reports unknown prop type and rejects removed index field`() {
         val parsed = compiler.parseDocument(
             """
                 ---
@@ -487,14 +486,14 @@ class GraphDocumentParserTest {
                 props:
                   name:
                     type: unknownType
-                    index: unknownIndex
+                    index: fulltext
                 ---
             """.trimIndent(),
             "/tmp/p.md",
         )
 
         assertTrue(parsed.diagnostics.any { "Unknown prop type: unknownType" in it.message })
-        assertTrue(parsed.diagnostics.any { "Unknown prop index: unknownIndex" in it.message })
+        assertTrue(parsed.diagnostics.any { "Unknown property schema field: props.name.index" in it.message })
         val document = parsed.document as? NodeTypeDocument
         assertNotNull(document)
         assertEquals(PropType.string, document.props.getValue("name").type)
