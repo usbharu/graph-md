@@ -2,10 +2,11 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { Executable, LanguageClient, LanguageClientOptions, ServerOptions, TransportKind } from "vscode-languageclient/node";
 import { graphMdPlugin } from "markdown-it-graphmd";
+import { relativeMarkdownHref } from "./preview-links";
 
 let client: LanguageClient | undefined;
 const mediaTargets = new Map<string, string>();
-const documentTargets = new Map<string, string>();
+const documentTargets = new Map<string, vscode.Uri>();
 const semanticLegend = new vscode.SemanticTokensLegend([
   "graphmdRelationOperator",
   "graphmdRelationLabel",
@@ -58,7 +59,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<GraphM
   return {
     extendMarkdownIt(md: any): any {
       md.use(graphMdPlugin, {
-        hrefTransform: (target: string) => documentTargets.get(target) ?? target,
+        hrefTransform: (target: string, _relType: string, env?: unknown) => resolveDocumentHref(target, env),
       });
       const defaultLinkOpen = md.renderer.rules.link_open ?? ((tokens: any[], idx: number, options: any, _env: any, self: any) => self.renderToken(tokens, idx, options));
       md.renderer.rules.link_open = (tokens: any[], idx: number, options: any, env: any, self: any): string => {
@@ -78,12 +79,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<GraphM
 async function refreshMediaTargets(): Promise<void> {
   const files = await vscode.workspace.findFiles("**/*.md", "**/{node_modules,.git,build,dist}/**");
   const next = new Map<string, string>();
-  const nextDocuments = new Map<string, string>();
+  const nextDocuments = new Map<string, vscode.Uri>();
   await Promise.all(files.map(async (uri) => {
     const bytes = await vscode.workspace.fs.readFile(uri);
     const text = Buffer.from(bytes).toString("utf8");
     const documentId = parseFrontMatterScalar(text, "id");
-    if (documentId) nextDocuments.set(documentId, uri.toString());
+    if (documentId) nextDocuments.set(documentId, uri);
     const metadata = parseMediaFrontMatter(text);
     if (!metadata) return;
     next.set(metadata.id, metadata.url);
@@ -103,6 +104,24 @@ async function refreshMediaTargets(): Promise<void> {
   next.forEach((url, key) => mediaTargets.set(key, url));
   documentTargets.clear();
   nextDocuments.forEach((url, key) => documentTargets.set(key, url));
+}
+
+function resolveDocumentHref(target: string, env?: unknown): string {
+  const mediaTarget = mediaTargets.get(target);
+  if (mediaTarget) return mediaTarget;
+
+  const targetUri = documentTargets.get(target);
+  const currentDocument = (env as { currentDocument?: vscode.Uri } | undefined)?.currentDocument;
+  if (
+    !targetUri ||
+    !currentDocument ||
+    targetUri.scheme !== currentDocument.scheme ||
+    targetUri.authority !== currentDocument.authority
+  ) {
+    return target;
+  }
+
+  return relativeMarkdownHref(currentDocument.fsPath, targetUri.fsPath);
 }
 
 function parseMediaFrontMatter(text: string): { id: string; url: string } | null {

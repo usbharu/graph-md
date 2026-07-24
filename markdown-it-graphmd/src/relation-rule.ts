@@ -96,9 +96,15 @@ export function relationInlineRule(state: any, silent: boolean): boolean {
   return true;
 }
 
-export function renderRelation(tokens: any[], idx: number, md: MarkdownIt, options: { hrefTransform?: (target: string, relType: string) => string }): string {
+export function renderRelation(
+  tokens: any[],
+  idx: number,
+  md: MarkdownIt,
+  options: { hrefTransform?: (target: string, relType: string, env?: unknown) => string },
+  env?: unknown,
+): string {
   const meta = (tokens[idx].meta ?? {}) as RelationTokenMeta;
-  const href = options.hrefTransform ? options.hrefTransform(meta.target, meta.relType) : meta.target;
+  const href = options.hrefTransform ? options.hrefTransform(meta.target, meta.relType, env) : meta.target;
   const esc = md.utils.escapeHtml;
   const attrs = [`href="${esc(href)}"`, `data-link-rel="${esc(meta.relType)}"`];
   if (meta.props) {

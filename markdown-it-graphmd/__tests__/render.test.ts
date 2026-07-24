@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import MarkdownIt from "markdown-it";
 import { graphMdPlugin, type GraphMdOptions } from "../src/index";
 
-function render(input: string, options?: GraphMdOptions): string {
+function render(input: string, options?: GraphMdOptions, env?: unknown): string {
   const md = new MarkdownIt();
   md.use(graphMdPlugin, options);
-  return md.render(input);
+  return md.render(input, env);
 }
 
 /** Extracts and HTML-decodes a props attribute value from rendered HTML. */
@@ -84,6 +84,24 @@ describe("relation link", () => {
   it("applies hrefTransform", () => {
     const html = render("@link{}[Bob](bob friendOf)", { hrefTransform: (t) => `${t}.html` });
     expect(html).toContain('href="bob.html"');
+  });
+
+  it("passes the render environment to hrefTransform", () => {
+    const env = { currentDocument: "/workspace/people/alice.md" };
+    let receivedEnv: unknown;
+    const html = render(
+      "@link{}[Bob](bob friendOf)",
+      {
+        hrefTransform: (_target, _relType, received) => {
+          receivedEnv = received;
+          return "./robert.md";
+        },
+      },
+      env,
+    );
+
+    expect(receivedEnv).toBe(env);
+    expect(html).toContain('href="./robert.md"');
   });
 
   it("renders inline within Japanese text", () => {
