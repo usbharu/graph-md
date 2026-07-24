@@ -1185,10 +1185,10 @@ private class GraphMdWorkspaceIndex {
         Regex("""(?:Node|NodeType|RelType|Timeline) id must be unique: (.+)""").matchEntire(diagnostic.message)?.let {
             return document.yamlScalarRange("id", it.groupValues[1])
         }
-        if (diagnostic.message == "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*") {
-            document.analysis.parsed.document?.id?.let { id ->
-                return document.yamlScalarRange("id", id)
-            }
+        if (diagnostic.message.startsWith("id MUST match ")) {
+            val rawId = frontMatterScalar(document.text, "id")
+                ?: document.analysis.parsed.document?.id
+            rawId?.let { return document.yamlScalarRange("id", it) }
         }
         Regex("""Unknown property ([A-Za-z_][A-Za-z0-9_.:-]*) on .+""").matchEntire(diagnostic.message)?.let {
             return document.propertyAssignmentRange(it.groupValues[1])
