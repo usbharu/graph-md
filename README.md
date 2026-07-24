@@ -16,7 +16,28 @@ This is the suggested way to use Gradle in production projects.
 
 [Learn more about Gradle tasks](https://docs.gradle.org/current/userguide/command_line_interface.html#common_tasks).
 
-The Gradle build consists of the `core` and `lsp` subprojects.
+The Gradle build consists of the `core`, `lsp`, and `cli` subprojects.
+
+## GraphMD CLI
+
+The `graphmd` CLI is implemented in the `cli` multiplatform module.
+
+```sh
+./gradlew :cli:run --args="list ./documents --kind node --type Person"
+./gradlew :cli:run --args="show alice ./documents --json"
+./gradlew :cli:run --args="links alice ./documents --direction incoming"
+./gradlew :cli:run --args="lint ./documents --strict"
+./gradlew :cli:run --args="stats ./documents"
+```
+
+Build the Node.js executable with `./gradlew :cli:jsProductionExecutableCompileSync`.
+Native release executables are available through the corresponding
+`linkReleaseExecutableMacosArm64`, `linkReleaseExecutableMacosX64`,
+`linkReleaseExecutableLinuxX64`, and `linkReleaseExecutableMingwX64` tasks.
+
+When no path is supplied, the CLI searches the current directory recursively.
+Discovered `.md` files are treated as GraphMD only when their first line is
+`---`; explicitly named files are always validated.
 
 This project uses a version catalog (see `gradle/libs.versions.toml`) to declare and version dependencies
 and both a build cache and a configuration cache (see `gradle.properties`).

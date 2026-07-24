@@ -484,7 +484,14 @@ class GraphCompiler(
             val finalFrom = combineConstraint(inheritedFrom, doc.from, nodeTypeById, diagnostics, doc.sourcePath, id, "from")
             val finalTo = combineConstraint(inheritedTo, doc.to, nodeTypeById, diagnostics, doc.sourcePath, id, "to")
             visiting.remove(id)
-            return NormalizedRelType(doc.id, finalFrom, finalTo, inheritedProps, SourceInfo(doc.sourcePath)).also { resolved[id] = it }
+            return NormalizedRelType(
+                id = doc.id,
+                from = finalFrom,
+                to = finalTo,
+                props = inheritedProps,
+                ancestorIds = doc.extends.mapNotNull { resolved[it] }.flatMap { it.ancestorIds + it.id }.toSet(),
+                source = SourceInfo(doc.sourcePath),
+            ).also { resolved[id] = it }
         }
 
         docs.forEach { resolve(it.id) }

@@ -1,0 +1,253 @@
+package dev.usbharu.graphmd.cli
+
+internal enum class CliKind(val wireName: String, val order: Int) {
+    Node("node", 0),
+    Media("media", 1),
+    Link("link", 2),
+    NodeType("node-type", 3),
+    RelType("rel-type", 4),
+    Timeline("timeline", 5);
+
+    companion object {
+        fun parse(value: String): CliKind? {
+            val normalized = value.lowercase().replace("_", "-")
+            return entries.firstOrNull { it.wireName == normalized } ?: when (normalized) {
+                "nodetype" -> NodeType
+                "reltype" -> RelType
+                else -> null
+            }
+        }
+    }
+}
+
+internal enum class LinkDirection {
+    Incoming,
+    Outgoing,
+    Both;
+
+    companion object {
+        fun parse(value: String): LinkDirection? =
+            entries.firstOrNull { it.name.equals(value, ignoreCase = true) }
+    }
+}
+
+internal sealed interface CliCommand {
+    val paths: List<String>
+
+    data class ListItems(
+        override val paths: List<String>,
+        val kinds: Set<CliKind>,
+        val types: Set<String>,
+        val includeDerived: Boolean,
+    ) : CliCommand
+
+    data class Show(
+        val id: String,
+        override val paths: List<String>,
+        val kinds: Set<CliKind>,
+    ) : CliCommand
+
+    data class Props(
+        val id: String,
+        override val paths: List<String>,
+        val kinds: Set<CliKind>,
+    ) : CliCommand
+
+    data class Links(
+        val id: String,
+        override val paths: List<String>,
+        val kinds: Set<CliKind>,
+        val direction: LinkDirection,
+        val types: Set<String>,
+        val includeDerived: Boolean,
+    ) : CliCommand
+
+    data class Lint(
+        override val paths: List<String>,
+        val strict: Boolean,
+    ) : CliCommand
+
+    data class Stats(
+        override val paths: List<String>,
+        val kinds: Set<CliKind>,
+        val types: Set<String>,
+        val includeDerived: Boolean,
+    ) : CliCommand
+}
+
+internal sealed interface ParseResult {
+    data class Run(val command: CliCommand, val json: Boolean) : ParseResult
+    data class Print(val text: String) : ParseResult
+    data class Error(val message: String) : ParseResult
+}
+
+internal object CliArguments {
+    const val version = "0.1.0"
+
+    fun parse(arguments: List<String>): ParseResult {
+        if (arguments.isEmpty()) return ParseResult.Print(rootHelp())
+        val json = "--json" in arguments
+        val help = "--help" in arguments || "-h" in arguments
+        if ("--version" in arguments || "-V" in arguments) {
+            return ParseResult.Print("graphmd $version\n")
+        }
+        val remaining = arguments.filterNot { it == "--json" || it == "--help" || it == "-h" }
+        if (remaining.isEmpty()) return ParseResult.Print(rootHelp())
+        val operation = remaining.first()
+        if (help) return ParseResult.Print(commandHelp(operation))
+        val tokens = remaining.drop(1)
+        return try {
+            ParseResult.Run(parseCommand(operation, tokens), json)
+        } catch (exception: CliUsageException) {
+            ParseResult.Error(exception.message ?: "Invalid arguments")
+        }
+    }
+
+    private fun parseCommand(operation: String, tokens: List<String>): CliCommand {
+        val parsed = parseTokens(tokens)
+        return when (operation) {
+            "list" -> {
+                parsed.reject(setOf("kind", "type", "include-derived"))
+                CliCommand.ListItems(parsed.positionals, parsed.kinds(), parsed.types(), parsed.flag("include-derived"))
+            }
+            "show" -> {
+                parsed.reject(setOf("kind"))
+                val (id, paths) = parsed.idAndPaths("show")
+                val kinds = parsed.kinds()
+                if (CliKind.Link in kinds) usage("show does not support --kind link")
+                CliCommand.Show(id, paths, kinds)
+            }
+            "props" -> {
+                parsed.reject(setOf("kind"))
+                val (id, paths) = parsed.idAndPaths("props")
+                val kinds = parsed.kinds()
+                if (kinds.any { it !in setOf(CliKind.Node, CliKind.Media) }) {
+                    usage("props only supports --kind node or --kind media")
+                }
+                CliCommand.Props(id, paths, kinds)
+            }
+            "links" -> {
+                parsed.reject(setOf("kind", "type", "include-derived", "direction"))
+                val (id, paths) = parsed.idAndPaths("links")
+                val kinds = parsed.kinds()
+                if (kinds.any { it !in setOf(CliKind.Node, CliKind.Media) }) {
+                    usage("links only supports --kind node or --kind media")
+                }
+                val directionValues = parsed.values["direction"].orEmpty()
+                if (directionValues.size > 1) usage("--direction may only be specified once")
+                val direction = directionValues.singleOrNull()?.let {
+                    LinkDirection.parse(it) ?: usage("Unknown direction: $it")
+                } ?: LinkDirection.Both
+                CliCommand.Links(id, paths, kinds, direction, parsed.types(), parsed.flag("include-derived"))
+            }
+            "lint" -> {
+                parsed.reject(setOf("strict"))
+                CliCommand.Lint(parsed.positionals, parsed.flag("strict"))
+            }
+            "stats" -> {
+                parsed.reject(setOf("kind", "type", "include-derived"))
+                CliCommand.Stats(parsed.positionals, parsed.kinds(), parsed.types(), parsed.flag("include-derived"))
+            }
+            else -> usage("Unknown operation: $operation")
+        }
+    }
+
+    private fun parseTokens(tokens: List<String>): ParsedTokens {
+        val values = linkedMapOf<String, MutableList<String>>()
+        val flags = linkedSetOf<String>()
+        val positionals = mutableListOf<String>()
+        var positionalOnly = false
+        var index = 0
+        while (index < tokens.size) {
+            val token = tokens[index]
+            if (positionalOnly) {
+                positionals += token
+                index++
+                continue
+            }
+            if (token == "--") {
+                positionalOnly = true
+                index++
+                continue
+            }
+            if (!token.startsWith("--")) {
+                positionals += token
+                index++
+                continue
+            }
+            val name = token.substringAfter("--").substringBefore("=")
+            val inlineValue = token.substringAfter("=", missingDelimiterValue = "").takeIf { "=" in token }
+            when (name) {
+                "include-derived", "strict" -> {
+                    if (inlineValue != null) usage("--$name does not take a value")
+                    flags += name
+                    index++
+                }
+                "kind", "type", "direction" -> {
+                    val value = inlineValue ?: tokens.getOrNull(index + 1)?.takeUnless { it.startsWith("--") }
+                        ?: usage("--$name requires a value")
+                    values.getOrPut(name) { mutableListOf() } += value
+                    index += if (inlineValue == null) 2 else 1
+                }
+                else -> usage("Unknown option: --$name")
+            }
+        }
+        return ParsedTokens(positionals, values, flags)
+    }
+
+    private fun ParsedTokens.kinds(): Set<CliKind> = values["kind"].orEmpty().mapTo(linkedSetOf()) {
+        CliKind.parse(it) ?: usage("Unknown kind: $it")
+    }
+
+    private fun ParsedTokens.types(): Set<String> = values["type"].orEmpty().toCollection(linkedSetOf())
+
+    private fun ParsedTokens.idAndPaths(operation: String): Pair<String, List<String>> {
+        val id = positionals.firstOrNull() ?: usage("$operation requires an ID")
+        return id to positionals.drop(1)
+    }
+
+    private fun ParsedTokens.flag(name: String): Boolean = name in flags
+
+    private fun ParsedTokens.reject(allowed: Set<String>) {
+        val supplied = values.keys + flags
+        val invalid = supplied.firstOrNull { it !in allowed } ?: return
+        usage("--$invalid is not valid for this operation")
+    }
+
+    private fun usage(message: String): Nothing = throw CliUsageException(message)
+
+    private fun rootHelp(): String = """
+        Usage: graphmd <operation> [options] [paths...]
+
+        Operations:
+          list    List graph entities
+          show    Show an entity by ID
+          props   List all property entries for a Node or Media
+          links   List incoming and outgoing links for a Node or Media
+          lint    Validate GraphMD documents
+          stats   Show graph statistics
+
+        Global options:
+          --json       Emit JSON
+          --help, -h   Show help
+          --version    Show version
+    """.trimIndent() + "\n"
+
+    private fun commandHelp(operation: String): String = when (operation) {
+        "list" -> "Usage: graphmd list [paths...] [--kind KIND]... [--type ID]... [--include-derived] [--json]\n"
+        "show" -> "Usage: graphmd show ID [paths...] [--kind KIND]... [--json]\n"
+        "props" -> "Usage: graphmd props ID [paths...] [--kind node|media] [--json]\n"
+        "links" -> "Usage: graphmd links ID [paths...] [--kind node|media] [--direction incoming|outgoing|both] [--type ID]... [--include-derived] [--json]\n"
+        "lint" -> "Usage: graphmd lint [paths...] [--strict] [--json]\n"
+        "stats" -> "Usage: graphmd stats [paths...] [--kind KIND]... [--type ID]... [--include-derived] [--json]\n"
+        else -> rootHelp()
+    }
+}
+
+private data class ParsedTokens(
+    val positionals: List<String>,
+    val values: Map<String, List<String>>,
+    val flags: Set<String>,
+)
+
+private class CliUsageException(message: String) : RuntimeException(message)

@@ -33,7 +33,7 @@ class GraphDocumentAnalyzerTest {
     }
 
     @Test
-    fun `extracts node definitions, type references and body relation references`() {
+    fun `extracts node definitions and type references and body relation references`() {
         val text = """
             ---
             id: alice
@@ -147,7 +147,7 @@ class GraphDocumentAnalyzerTest {
     }
 
     @Test
-    fun `ignores comments, blank lines and code regions in body`() {
+    fun `ignores comments and blank lines and code regions in body`() {
         val text = """
             ---
             id: alice

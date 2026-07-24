@@ -1,0 +1,325 @@
+package dev.usbharu.graphmd.cli
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+class GraphMdCliTest {
+    @Test
+    fun `list supports repeated kind and type filters`() {
+        val cli = fixtureCli()
+
+        val result = cli.run(
+            listOf(
+                "list",
+                "/workspace",
+                "--kind",
+                "node",
+                "--kind=media",
+                "--type",
+                "Person",
+                "--json",
+            ),
+        )
+
+        assertEquals(0, result.exitCode)
+        assertTrue(result.stdout.contains("\"id\":\"alice\""))
+        assertTrue(result.stdout.contains("\"id\":\"portrait\""))
+        assertFalse(result.stdout.contains("\"kind\":\"node-type\""))
+    }
+
+    @Test
+    fun `include derived matches child node types`() {
+        val cli = fixtureCli()
+
+        val exact = cli.run(listOf("list", "/workspace", "--kind", "node", "--type", "Entity", "--json"))
+        val derived = cli.run(
+            listOf("list", "/workspace", "--kind", "node", "--type", "Entity", "--include-derived", "--json"),
+        )
+
+        assertEquals("[]\n", exact.stdout)
+        assertTrue(derived.stdout.contains("\"id\":\"alice\""))
+    }
+
+    @Test
+    fun `show reports ambiguous IDs and requests kind`() {
+        val fs = FakeFileSystem(
+            files = mapOf(
+                "/workspace/Person.md" to nodeType("Person"),
+                "/workspace/alice-type.md" to nodeType("alice"),
+                "/workspace/alice.md" to node("alice", "Person"),
+            ),
+        )
+        val cli = GraphMdCli(fs)
+
+        val ambiguous = cli.run(listOf("show", "alice", "/workspace", "--json"))
+        val selected = cli.run(listOf("show", "alice", "/workspace", "--kind", "node", "--json"))
+
+        assertEquals(1, ambiguous.exitCode)
+        assertTrue(ambiguous.stderr.contains("ambiguous"))
+        assertTrue(selected.stdout.contains("\"kind\":\"node\""))
+    }
+
+    @Test
+    fun `directory discovery ignores plain markdown but explicit files are linted`() {
+        val fs = FakeFileSystem(
+            files = mapOf(
+                "/workspace/Person.md" to nodeType("Person"),
+                "/workspace/README.md" to "# ordinary markdown",
+            ),
+        )
+        val cli = GraphMdCli(fs)
+
+        val discovered = cli.run(listOf("lint", "/workspace", "--json"))
+        val explicit = cli.run(listOf("lint", "/workspace/README.md", "--json"))
+
+        assertEquals(0, discovered.exitCode)
+        assertEquals("[]\n", discovered.stdout)
+        assertEquals(1, explicit.exitCode)
+        assertTrue(explicit.stdout.contains("Document MUST start with YAML front matter"))
+    }
+
+    @Test
+    fun `directory discovery excludes generated directories and symbolic links`() {
+        val fs = FakeFileSystem(
+            files = mapOf(
+                "/workspace/Person.md" to nodeType("Person"),
+                "/workspace/build/generated.md" to node("generated", "Person"),
+                "/workspace/linked/linked.md" to node("linked", "Person"),
+            ),
+            aliases = mapOf("/workspace/linked" to "/outside"),
+        )
+
+        val result = GraphMdCli(fs).run(listOf("list", "/workspace", "--json"))
+
+        assertTrue(result.stdout.contains("\"id\":\"Person\""))
+        assertFalse(result.stdout.contains("generated"))
+        assertFalse(result.stdout.contains("linked"))
+    }
+
+    @Test
+    fun `query emits partial data on stdout and diagnostics on stderr`() {
+        val fs = FakeFileSystem(
+            files = mapOf(
+                "/workspace/broken.md" to node("broken", "MissingType"),
+            ),
+        )
+
+        val result = GraphMdCli(fs).run(listOf("list", "/workspace", "--json"))
+
+        assertEquals(1, result.exitCode)
+        assertTrue(result.stdout.contains("\"id\":\"broken\""))
+        assertTrue(result.stderr.startsWith("["))
+        assertTrue(result.stderr.contains("Unknown NodeType"))
+    }
+
+    @Test
+    fun `props emits every property entry`() {
+        val fs = FakeFileSystem(
+            files = mapOf(
+                "/workspace/Person.md" to """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    props:
+                      name:
+                        type: string
+                    ---
+                """.trimIndent(),
+                "/workspace/time.md" to """
+                    ---
+                    id: TimelineA
+                    kind: Timeline
+                    ---
+                """.trimIndent(),
+                "/workspace/alice.md" to """
+                    ---
+                    id: alice
+                    kind: Node
+                    type: Person
+                    ---
+                    @props{name = "Alice",name(validTime=TimelineA) = "Alicia"}
+                """.trimIndent(),
+            ),
+        )
+
+        val result = GraphMdCli(fs).run(listOf("props", "alice", "/workspace", "--json"))
+
+        assertEquals(0, result.exitCode)
+        assertEquals(2, "\"name\":\"name\"".toRegex().findAll(result.stdout).count())
+    }
+
+    @Test
+    fun `links filters direction and derived relation type`() {
+        val cli = GraphMdCli(linkFixture())
+
+        val exact = cli.run(
+            listOf("links", "bob", "/workspace", "--direction", "incoming", "--type", "related", "--json"),
+        )
+        val derived = cli.run(
+            listOf(
+                "links",
+                "bob",
+                "/workspace",
+                "--direction",
+                "incoming",
+                "--type",
+                "related",
+                "--include-derived",
+                "--json",
+            ),
+        )
+
+        assertEquals("[]\n", exact.stdout)
+        assertTrue(derived.stdout.contains("\"type\":\"friend\""))
+        assertTrue(derived.stdout.contains("\"from\":\"alice\""))
+    }
+
+    @Test
+    fun `stats counts filtered graph items`() {
+        val result = GraphMdCli(linkFixture()).run(
+            listOf("stats", "/workspace", "--kind", "node", "--kind", "link", "--json"),
+        )
+
+        assertEquals(0, result.exitCode)
+        assertTrue(result.stdout.contains("\"node\":2"))
+        assertTrue(result.stdout.contains("\"link\":1"))
+        assertTrue(result.stdout.contains("\"nodeType\":0"))
+    }
+
+    @Test
+    fun `strict lint promotes unknown property warnings to errors`() {
+        val fs = FakeFileSystem(
+            files = mapOf(
+                "/workspace/Person.md" to nodeType("Person"),
+                "/workspace/alice.md" to """
+                    ---
+                    id: alice
+                    kind: Node
+                    type: Person
+                    props:
+                      unexpected: value
+                    ---
+                """.trimIndent(),
+            ),
+        )
+
+        val regular = GraphMdCli(fs).run(listOf("lint", "/workspace", "--json"))
+        val strict = GraphMdCli(fs).run(listOf("lint", "/workspace", "--strict", "--json"))
+
+        assertEquals(0, regular.exitCode)
+        assertEquals(1, strict.exitCode)
+        assertTrue(strict.stdout.contains("\"severity\":\"error\""))
+    }
+
+    private fun fixtureCli(): GraphMdCli = GraphMdCli(
+        FakeFileSystem(
+            files = mapOf(
+                "/workspace/Entity.md" to nodeType("Entity"),
+                "/workspace/Person.md" to """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    extends: [Entity]
+                    ---
+                """.trimIndent(),
+                "/workspace/alice.md" to node("alice", "Person"),
+                "/workspace/portrait.md" to """
+                    ---
+                    id: portrait
+                    kind: Media
+                    type: Person
+                    url: https://example.com/portrait.png
+                    ---
+                """.trimIndent(),
+            ),
+        ),
+    )
+
+    private fun linkFixture(): FakeFileSystem = FakeFileSystem(
+        files = mapOf(
+            "/workspace/Person.md" to nodeType("Person"),
+            "/workspace/related.md" to """
+                ---
+                id: related
+                kind: RelType
+                ---
+            """.trimIndent(),
+            "/workspace/friend.md" to """
+                ---
+                id: friend
+                kind: RelType
+                extends: [related]
+                from: [Person]
+                to: [Person]
+                ---
+            """.trimIndent(),
+            "/workspace/alice.md" to """
+                ---
+                id: alice
+                kind: Node
+                type: Person
+                ---
+                @link{}[Bob](bob friend)
+            """.trimIndent(),
+            "/workspace/bob.md" to node("bob", "Person"),
+        ),
+    )
+
+    private fun nodeType(id: String): String = """
+        ---
+        id: $id
+        kind: NodeType
+        ---
+    """.trimIndent()
+
+    private fun node(id: String, type: String): String = """
+        ---
+        id: $id
+        kind: Node
+        type: $type
+        ---
+    """.trimIndent()
+}
+
+private class FakeFileSystem(
+    private val files: Map<String, String>,
+    private val aliases: Map<String, String> = emptyMap(),
+) : CliFileSystem {
+    private val directories: Set<String> = buildSet {
+        add("/")
+        files.keys.forEach { file ->
+            var current = file.substringBeforeLast('/', missingDelimiterValue = "/")
+            while (current.isNotEmpty()) {
+                add(current)
+                if (current == "/") break
+                current = current.substringBeforeLast('/', missingDelimiterValue = "/")
+            }
+        }
+    }
+
+    override fun kind(path: String): FileKind? = when (canonical(path)) {
+        in files -> FileKind.File
+        in directories -> FileKind.Directory
+        else -> null
+    }
+
+    override fun canonical(path: String): String {
+        val absolute = when (path) {
+            "." -> "/workspace"
+            else -> path.removeSuffix("/").ifEmpty { "/" }
+        }
+        return aliases[absolute] ?: absolute
+    }
+
+    override fun children(path: String): List<String> {
+        val prefix = canonical(path).let { if (it == "/") "/" else "$it/" }
+        return (files.keys + directories)
+            .filter { it.startsWith(prefix) && it != path }
+            .filter { it.removePrefix(prefix).let { rest -> '/' !in rest } }
+            .distinct()
+    }
+
+    override fun readText(path: String): String = files.getValue(canonical(path))
+}
