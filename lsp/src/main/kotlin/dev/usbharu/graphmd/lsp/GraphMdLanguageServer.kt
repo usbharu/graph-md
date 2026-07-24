@@ -1576,7 +1576,7 @@ internal class FrontMatterCompletionResolver(
             val indent = indentOf(line)
             if (indent >= currentIndent) continue
             if (trimmed.startsWith("-")) return false
-            return trimmed == "validTime:"
+            return Regex("""validTime:(?:[ \t]+#.*)?""").matches(trimmed)
         }
         return false
     }

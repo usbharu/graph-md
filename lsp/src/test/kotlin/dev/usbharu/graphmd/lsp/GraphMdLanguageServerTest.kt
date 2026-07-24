@@ -785,6 +785,27 @@ class GraphMdLanguageServerTest {
 
         val filteredTimelineValues = completionFor("  - timeline: Com").map { it.label }
         assertEquals(listOf("CommonEra"), filteredTimelineValues)
+
+        val commentedParentText = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            validTime: # validity period
+              <cursor>
+            ---
+        """.trimIndent()
+        val marker = "<cursor>"
+        val commentedParentOffset = commentedParentText.indexOf(marker)
+        val commentedParentItems = FrontMatterCompletionResolver(
+            text = commentedParentText.replace(marker, ""),
+            offset = commentedParentOffset,
+            parsedDocument = NodeDocument(id = "alice", type = "Person", sourcePath = "/tmp/alice.md"),
+            nodeTypeIds = listOf("Person"),
+            relTypeIds = emptyList(),
+            timelineIds = listOf("CommonEra"),
+        ).resolve().orEmpty()
+        assertEquals("- timeline: ", commentedParentItems.single { it.label == "timeline" }.insertText)
     }
 
     @Test
