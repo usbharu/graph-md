@@ -41,10 +41,10 @@ class InlinePropsParser(private val input: String) {
                 previous == null -> value
                 annotation.textKey != null && previous is RawObject && value is RawObject ->
                     RawObject(previous.values + value.values)
-                annotation.validTime != null -> when (previous) {
-                    is RawArray -> RawArray(previous.values + value)
-                    else -> RawArray(listOf(previous, value))
-                }
+                annotation.validTime != null ->
+                    mergeTimedAssertion(previous, value as RawObject, annotation.validTime)
+                timedEntries(previous) != null ->
+                    appendFallbackAssertion(key, previous, value)
                 else -> fail("Duplicate key: $key")
             }
             val hadWhitespace = skipHorizontalAndNewlines()
@@ -56,6 +56,50 @@ class InlinePropsParser(private val input: String) {
         }
         return RawObject(result)
     }
+
+    private fun mergeTimedAssertion(previous: RawValue, incoming: RawObject, validTime: RawArray): RawArray {
+        val entries = timedEntries(previous)?.toMutableList()
+            ?: mutableListOf(RawObject(mapOf("value" to previous)))
+        val signature = validTimeSignature(validTime)
+        val existingIndex = entries.indexOfFirst { entry ->
+            (entry.values["validTime"] as? RawArray)?.let(::validTimeSignature) == signature
+        }
+        if (existingIndex >= 0) {
+            entries[existingIndex] = incoming
+        } else {
+            entries += incoming
+        }
+        return RawArray(entries)
+    }
+
+    private fun appendFallbackAssertion(key: String, previous: RawValue, value: RawValue): RawArray {
+        val variants = timedEntries(previous) ?: fail("Duplicate key: $key")
+        if (variants.any { "validTime" !in it.values }) {
+            fail("Duplicate key: $key")
+        }
+        return RawArray(listOf(RawObject(mapOf("value" to value))) + variants)
+    }
+
+    private fun timedEntries(value: RawValue): List<RawObject>? {
+        val values = (value as? RawArray)?.values ?: return null
+        return values.map { entry ->
+            val obj = entry as? RawObject ?: return null
+            if ("value" !in obj.values || obj.values.keys.any { it !in setOf("value", "validTime") }) return null
+            obj
+        }
+    }
+
+    private fun validTimeSignature(validTime: RawArray): String =
+        validTime.values.map { entry ->
+            val time = entry as? RawObject ?: return@map rawValueToJsonString(entry)
+            fun point(name: String): String {
+                val point = time.values[name] as? RawObject ?: return ""
+                return listOf("value", "timecode").joinToString(";") { key ->
+                    point.values[key]?.let(::rawValueToJsonString) ?: ""
+                }
+            }
+            "${(time.values["timeline"] as? RawString)?.value}|${point("from")}|${point("to")}"
+        }.sorted().joinToString("||")
 
     private fun parseKeyAnnotation(): KeyAnnotation {
         expect('(')

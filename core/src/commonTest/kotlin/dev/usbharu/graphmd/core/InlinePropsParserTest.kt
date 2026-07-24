@@ -158,4 +158,53 @@ class InlinePropsParserTest {
         assertEquals("Branch", (branch.values.getValue("timeline") as RawString).value)
         assertEquals(1L, ((branch.values.getValue("from") as RawObject).values.getValue("timecode") as RawInteger).value)
     }
+
+    @Test
+    fun `combines fallback and timed assertions regardless of declaration order`() {
+        val fallbackFirst = InlinePropsParser(
+            """{age=17,age(validTime = TimelineA) = 18}""",
+        ).parseObject()
+        val timedFirst = InlinePropsParser(
+            """{age(validTime = TimelineA) = 18,age=17}""",
+        ).parseObject()
+
+        assertEquals(fallbackFirst, timedFirst)
+        val ages = fallbackFirst.values.getValue("age") as RawArray
+        assertEquals(2, ages.values.size)
+        assertEquals(
+            RawObject(mapOf("value" to RawInteger(17))),
+            ages.values[0],
+        )
+        assertEquals(
+            RawObject(
+                mapOf(
+                    "value" to RawInteger(18),
+                    "validTime" to RawArray(
+                        listOf(RawObject(mapOf("timeline" to RawString("TimelineA")))),
+                    ),
+                ),
+            ),
+            ages.values[1],
+        )
+    }
+
+    @Test
+    fun `overwrites an assertion with identical validTime`() {
+        val parsed = InlinePropsParser(
+            """{age(validTime=[TimelineB,TimelineA])=17,age(validTime=[TimelineA,TimelineB])=18}""",
+        ).parseObject()
+
+        val ages = parsed.values.getValue("age") as RawArray
+        assertEquals(1, ages.values.size)
+        assertEquals(RawInteger(18), (ages.values.single() as RawObject).values.getValue("value"))
+    }
+
+    @Test
+    fun `rejects a second fallback assertion after a timed assertion`() {
+        assertFailsWith<InlinePropsParseException> {
+            InlinePropsParser(
+                """{age(validTime=TimelineA)=17,age=18,age=19}""",
+            ).parseObject()
+        }
+    }
 }

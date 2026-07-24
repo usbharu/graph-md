@@ -539,6 +539,28 @@ class GraphCompilerTest {
     }
 
     @Test
+    fun `body props keep fallback and timed assertions for the same property`() {
+        val result = compiler().compile(
+            listOf(
+                TimelineDocument("TimelineA", sourcePath = "/tmp/timeline-a.md"),
+                NodeTypeDocument("Sample", props = mapOf("age" to PropSchema(PropType.number)), sourcePath = "/tmp/type.md"),
+                NodeDocument(
+                    id = "sample",
+                    type = "Sample",
+                    body = "@props{age=17,age(validTime = TimelineA) = 18}",
+                    sourcePath = "/tmp/node.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.diagnostics.none { it.severity == Severity.Error }, result.diagnostics.joinToString("\n") { it.message })
+        val ages = result.nodes.single().propEntries.getValue("age")
+        assertEquals(listOf(17.0, 18.0), ages.map { (it.value as NumberValue).value })
+        assertTrue(ages[0].validTime.isEmpty())
+        assertEquals("TimelineA", ages[1].validTime.single().timeline)
+    }
+
+    @Test
     fun `normalizes canonical instant and duration time points`() {
         val result = compiler().compileSources(
             listOf(
