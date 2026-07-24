@@ -10,7 +10,7 @@ function render(input: string, options?: GraphMdOptions): string {
 
 /** Extracts and HTML-decodes a props attribute value from rendered HTML. */
 function dataProps(html: string): string | null {
-  const m = html.match(/data-(?:link-)?props="([^"]*)"/);
+  const m = html.match(/data-(?:link-props|props-bind)="([^"]*)"/);
   if (!m) {
     return null;
   }
@@ -23,8 +23,14 @@ function dataProps(html: string): string | null {
 
 describe("relation link", () => {
   it("renders the recommended hyperlink form", () => {
-    const html = render("Hello @link{}[Bob](bob friendOf)");
+    const html = render("Hello @link[Bob](bob friendOf)");
     expect(html).toContain('<a href="bob" data-link-rel="friendOf">Bob</a>');
+  });
+
+  it("renders a property-less link with validTime", () => {
+    const html = render("@link(validTime=CommonEra)[Bob](bob friendOf)");
+    expect(html).toContain('data-link-valid-time="CommonEra"');
+    expect(html).not.toContain("data-link-props");
   });
 
   it("renders canonical properties and validTime", () => {
@@ -87,12 +93,32 @@ describe("relation link", () => {
 });
 
 describe("@props", () => {
-  it("renders a hidden block carrying data-props", () => {
+  it("renders bound properties as visible values", () => {
     const html = render('@props{name = "Alice"}');
     expect(html).toContain('class="graphmd-props"');
-    expect(html).toContain("hidden");
+    expect(html).not.toContain("hidden");
+    expect(html).toContain('data-props-name="name"><span class="graphmd-prop-value">Alice</span><span class="graphmd-prop-annotations"><sub class="graphmd-prop-name">name</sub>');
     expect(html).toContain("&quot;name&quot;:&quot;Alice&quot;");
     expect(dataProps(html)).toBe('{"name":"Alice"}');
+  });
+
+  it("renders every bound property in source order and escapes values", () => {
+    const html = render('@props{name = "<Alice>",age=20}');
+    expect(html.indexOf('data-props-name="name"')).toBeLessThan(html.indexOf('data-props-name="age"'));
+    expect(html).toContain("&lt;Alice&gt;");
+    expect(html).toContain('<span class="graphmd-prop-value">20</span><span class="graphmd-prop-annotations"><sub class="graphmd-prop-name">age</sub>');
+  });
+
+  it("renders a subscript property name immediately before its value in prose", () => {
+    const html = render("年齢は@props{age=25}歳");
+    expect(html).toContain('年齢は<span class="graphmd-props"');
+    expect(html).toContain('<span class="graphmd-prop-value">25</span><span class="graphmd-prop-annotations"><sub class="graphmd-prop-name">age</sub>');
+    expect(html).toContain("歳</p>");
+  });
+
+  it("stacks validTime above the property name and accepts spaces around equals", () => {
+    const html = render("年齢は@props(validTime = CommonEra){age = 25}歳");
+    expect(html).toContain('<span class="graphmd-prop-value">25</span><span class="graphmd-prop-annotations"><sup class="graphmd-prop-valid-time">CommonEra</sup><sub class="graphmd-prop-name">age</sub>');
   });
 
   it("handles a multi-line block", () => {

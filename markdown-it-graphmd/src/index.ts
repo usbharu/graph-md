@@ -15,7 +15,8 @@ export interface GraphMdOptions {
  * markdown-it plugin rendering Graph Markdown body syntax.
  *
  * - `@link(validTime=...){props}[label](target relType)` -> GraphMD relation anchor
- * - `@props{ ... }`                   -> hidden element carrying `data-props`
+ * - `@link[label](target relType)`                         -> property-less relation anchor
+ * - `@props{ ... }`                                       -> visible bound property values
  */
 export function graphMdPlugin(md: MarkdownIt, options: GraphMdOptions = {}): void {
   md.inline.ruler.push("graphmd_relation", relationInlineRule);

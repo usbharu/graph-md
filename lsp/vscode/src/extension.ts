@@ -5,6 +5,7 @@ import { graphMdPlugin } from "markdown-it-graphmd";
 
 let client: LanguageClient | undefined;
 const mediaTargets = new Map<string, string>();
+const documentTargets = new Map<string, string>();
 const semanticLegend = new vscode.SemanticTokensLegend([
   "graphmdRelationOperator",
   "graphmdRelationLabel",
@@ -57,7 +58,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<GraphM
   return {
     extendMarkdownIt(md: any): any {
       md.use(graphMdPlugin, {
-        hrefTransform: (target: string) => mediaTargets.get(target) ?? target,
+        hrefTransform: (target: string) => documentTargets.get(target) ?? target,
       });
       const defaultLinkOpen = md.renderer.rules.link_open ?? ((tokens: any[], idx: number, options: any, _env: any, self: any) => self.renderToken(tokens, idx, options));
       md.renderer.rules.link_open = (tokens: any[], idx: number, options: any, env: any, self: any): string => {
@@ -77,9 +78,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<GraphM
 async function refreshMediaTargets(): Promise<void> {
   const files = await vscode.workspace.findFiles("**/*.md", "**/{node_modules,.git,build,dist}/**");
   const next = new Map<string, string>();
+  const nextDocuments = new Map<string, string>();
   await Promise.all(files.map(async (uri) => {
     const bytes = await vscode.workspace.fs.readFile(uri);
-    const metadata = parseMediaFrontMatter(Buffer.from(bytes).toString("utf8"));
+    const text = Buffer.from(bytes).toString("utf8");
+    const documentId = parseFrontMatterScalar(text, "id");
+    if (documentId) nextDocuments.set(documentId, uri.toString());
+    const metadata = parseMediaFrontMatter(text);
     if (!metadata) return;
     next.set(metadata.id, metadata.url);
     next.set(uri.toString(), metadata.url);
@@ -96,23 +101,26 @@ async function refreshMediaTargets(): Promise<void> {
   }));
   mediaTargets.clear();
   next.forEach((url, key) => mediaTargets.set(key, url));
+  documentTargets.clear();
+  nextDocuments.forEach((url, key) => documentTargets.set(key, url));
 }
 
 function parseMediaFrontMatter(text: string): { id: string; url: string } | null {
+  if (parseFrontMatterScalar(text, "kind") !== "Media") return null;
+  const id = parseFrontMatterScalar(text, "id");
+  const url = parseFrontMatterScalar(text, "url");
+  return id && url ? { id, url } : null;
+}
+
+function parseFrontMatterScalar(text: string, name: string): string | null {
   const normalized = text.replaceAll("\r\n", "\n");
   if (!normalized.startsWith("---\n")) return null;
   const end = normalized.indexOf("\n---", 4);
   if (end < 0) return null;
   const frontMatter = normalized.slice(4, end);
-  const scalar = (name: string): string | null => {
-    const match = new RegExp(`^${name}:\\s*(.+?)\\s*$`, "m").exec(frontMatter);
-    if (!match) return null;
-    return match[1].replace(/^(?:"(.*)"|'(.*)')$/, (_all, doubleQuoted, singleQuoted) => doubleQuoted ?? singleQuoted);
-  };
-  if (scalar("kind") !== "Media") return null;
-  const id = scalar("id");
-  const url = scalar("url");
-  return id && url ? { id, url } : null;
+  const match = new RegExp(`^${name}:\\s*(.+?)\\s*$`, "m").exec(frontMatter);
+  if (!match) return null;
+  return match[1].replace(/^(?:"(.*)"|'(.*)')$/, (_all, doubleQuoted, singleQuoted) => doubleQuoted ?? singleQuoted);
 }
 
 function resolveMediaHref(href: string): string | null {
@@ -217,11 +225,15 @@ function scanRelations(text: string): Array<{
         if (argsEnd == null) continue;
         cursor = argsEnd;
       }
-      if (text[cursor] !== "{") continue;
-      props = scanInlineObjectProperties(text, cursor);
-      const propsEnd = findBalancedEnd(text, cursor, "{", "}");
-      if (propsEnd == null || text[propsEnd] !== "[") continue;
-      labelOpen = propsEnd;
+      if (text[cursor] === "{") {
+        props = scanInlineObjectProperties(text, cursor);
+        const propsEnd = findBalancedEnd(text, cursor, "{", "}");
+        if (propsEnd == null || text[propsEnd] !== "[") continue;
+        labelOpen = propsEnd;
+      } else {
+        if (text[cursor] !== "[") continue;
+        labelOpen = cursor;
+      }
     } else {
       continue;
     }

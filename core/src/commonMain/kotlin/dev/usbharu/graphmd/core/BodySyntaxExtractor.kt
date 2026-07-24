@@ -29,13 +29,15 @@ class BodySyntaxExtractor {
                                 continue
                             }
                             val argumentText = body.substring(objectStart + 1, args.end - 1).trim()
-                            if (!argumentText.startsWith("validTime=")) {
+                            val validTimeArgument = Regex("""^validTime\s*=\s*(.+)$""").matchEntire(argumentText)
+                            if (validTimeArgument == null) {
                                 diagnostics += syntaxDiagnostic("@props only accepts validTime=...", sourcePath, documentId, index, args.end)
                                 index = args.end
                                 continue
                             }
                             defaultValidTime = try {
-                                val dummy = InlinePropsParser("{x(${argumentText})=0}").parseObject().values.getValue("x") as RawArray
+                                val expression = validTimeArgument.groupValues[1]
+                                val dummy = InlinePropsParser("{x(validTime=$expression)=0}").parseObject().values.getValue("x") as RawArray
                                 ((dummy.values.single() as RawObject).values.getValue("validTime") as RawArray)
                             } catch (e: Exception) {
                                 diagnostics += syntaxDiagnostic(e.message ?: "Invalid @props validTime", sourcePath, documentId, index, args.end)
@@ -110,23 +112,24 @@ class BodySyntaxExtractor {
             validTime = parseValidTimeArgument(argumentText, sourcePath, documentId, start, args.end, diagnostics) ?: return null
             cursor = args.end
         }
-        if (masked.getOrNull(cursor) != '{') {
-            diagnostics += syntaxDiagnostic("@link must be followed by a property block", sourcePath, documentId, start, cursor)
-            return null
+        val props = if (masked.getOrNull(cursor) == '{') {
+            val propsRange = readBalanced(masked, cursor, '{', '}') ?: run {
+                diagnostics += syntaxDiagnostic("Unclosed @link property block", sourcePath, documentId, start, original.length)
+                return null
+            }
+            val parsed = try {
+                InlinePropsParser(original.substring(cursor, propsRange.end)).parseObject().values
+            } catch (e: InlinePropsParseException) {
+                diagnostics += syntaxDiagnostic(e.message ?: "Invalid @link properties", sourcePath, documentId, start, propsRange.end)
+                return null
+            }
+            cursor = propsRange.end
+            parsed
+        } else {
+            emptyMap()
         }
-        val propsRange = readBalanced(masked, cursor, '{', '}') ?: run {
-            diagnostics += syntaxDiagnostic("Unclosed @link property block", sourcePath, documentId, start, original.length)
-            return null
-        }
-        val props = try {
-            InlinePropsParser(original.substring(cursor, propsRange.end)).parseObject().values
-        } catch (e: InlinePropsParseException) {
-            diagnostics += syntaxDiagnostic(e.message ?: "Invalid @link properties", sourcePath, documentId, start, propsRange.end)
-            return null
-        }
-        cursor = propsRange.end
         if (masked.getOrNull(cursor) != '[') {
-            diagnostics += syntaxDiagnostic("@link property block must be followed immediately by a link", sourcePath, documentId, start, cursor)
+            diagnostics += syntaxDiagnostic("@link must be followed immediately by a link", sourcePath, documentId, start, cursor)
             return null
         }
         val parsed = parseRelation(masked, original, cursor - 1, sourcePath, documentId, diagnostics) ?: return null
@@ -142,11 +145,12 @@ class BodySyntaxExtractor {
         end: Int,
         diagnostics: MutableList<Diagnostic>,
     ): List<ValidTime>? {
-        if (!text.startsWith("validTime=")) {
+        val argument = Regex("""^validTime\s*=\s*(.+)$""").matchEntire(text)
+        if (argument == null) {
             diagnostics += syntaxDiagnostic("@link only accepts validTime=...", sourcePath, documentId, start, end)
             return null
         }
-        val expression = text.substringAfter('=').trim()
+        val expression = argument.groupValues[1]
         return try {
             val entries = InlinePropsParser("{x(validTime=$expression)=0}").parseObject().values.getValue("x") as RawArray
             val validTime = ((entries.values.single() as RawObject).values.getValue("validTime") as RawArray)

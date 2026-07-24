@@ -45,20 +45,24 @@ export function relationInlineRule(state: any, silent: boolean): boolean {
       const closeArgs = findBalanced(src, cursor, end, LPAREN, RPAREN);
       if (closeArgs < 0) return false;
       const args = src.slice(cursor + 1, closeArgs).trim();
-      if (!args.startsWith("validTime=")) return false;
-      validTime = args.slice("validTime=".length).trim();
+      const validTimeMatch = /^validTime\s*=\s*(.+)$/.exec(args);
+      if (!validTimeMatch) return false;
+      validTime = validTimeMatch[1].trim();
       cursor = closeArgs + 1;
     }
-    if (src.charCodeAt(cursor) !== LBRACE) return false;
-    const closeProps = findBalanced(src, cursor, end);
-    if (closeProps < 0) return false;
-    try {
-      propsJson = parseInlineObjectJson(src.slice(cursor, closeProps + 1));
-      if (propsJson === "{}") propsJson = null;
-    } catch {
-      return false;
+    if (src.charCodeAt(cursor) === LBRACE) {
+      const closeProps = findBalanced(src, cursor, end);
+      if (closeProps < 0) return false;
+      try {
+        propsJson = parseInlineObjectJson(src.slice(cursor, closeProps + 1));
+        if (propsJson === "{}") propsJson = null;
+      } catch {
+        return false;
+      }
+      linkStart = closeProps + 1;
+    } else {
+      linkStart = cursor;
     }
-    linkStart = closeProps + 1;
     if (src.charCodeAt(linkStart) !== LBRACKET) return false;
   } else {
     return false;

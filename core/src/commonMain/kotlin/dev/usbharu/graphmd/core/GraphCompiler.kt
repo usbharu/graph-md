@@ -28,10 +28,10 @@ class GraphCompiler(
         val relTypeDocs = documents.filterIsInstance<RelTypeDocument>()
         val timelineDocs = documents.filterIsInstance<TimelineDocument>()
 
-        diagnostics += checkUniqueIds(nodeDocs.map { it.id }, DocumentKind.Node)
-        diagnostics += checkUniqueIds(nodeTypeDocs.map { it.id }, DocumentKind.NodeType)
-        diagnostics += checkUniqueIds(relTypeDocs.map { it.id }, DocumentKind.RelType)
-        diagnostics += checkUniqueIds(timelineDocs.map { it.id }, DocumentKind.Timeline)
+        diagnostics += checkUniqueIds(nodeDocs, DocumentKind.Node)
+        diagnostics += checkUniqueIds(nodeTypeDocs, DocumentKind.NodeType)
+        diagnostics += checkUniqueIds(relTypeDocs, DocumentKind.RelType)
+        diagnostics += checkUniqueIds(timelineDocs, DocumentKind.Timeline)
 
         val timelines = resolveTimelineMappings(resolveTimelines(timelineDocs, diagnostics), timelineDocs, diagnostics)
         val nodeTypes = resolveNodeTypes(nodeTypeDocs, timelines, diagnostics)
@@ -157,13 +157,16 @@ class GraphCompiler(
         )
     }
 
-    private fun checkUniqueIds(ids: List<String>, kind: DocumentKind): List<Diagnostic> {
-        return ids.groupBy { it }.filterValues { it.size > 1 }.keys.map {
-            Diagnostic(
-                DiagnosticCategory.SchemaError,
-                Severity.Error,
-                "$kind id must be unique: $it",
-            )
+    private fun checkUniqueIds(documents: List<GraphDocument>, kind: DocumentKind): List<Diagnostic> {
+        return documents.groupBy { it.id }.filterValues { it.size > 1 }.flatMap { (id, duplicates) ->
+            duplicates.map { document ->
+                Diagnostic(
+                    DiagnosticCategory.SchemaError,
+                    Severity.Error,
+                    "$kind id must be unique: $id",
+                    SourceInfo(document.sourcePath, document.id),
+                )
+            }
         }
     }
 

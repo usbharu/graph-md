@@ -93,7 +93,7 @@ class GraphDocumentAnalyzer {
                         "type" -> if (document is NodeDocument) {
                             references += SymbolReference(stripYamlScalar(value), ReferenceTargetKind.NodeType, field, range)
                         }
-                        "extends", "from", "to" -> {
+                        "extends", "from", "to", "timeline" -> {
                             listFieldKind(field, document)?.let { kind ->
                                 references += SymbolReference(stripYamlScalar(value), kind, field, range)
                             }
@@ -198,9 +198,10 @@ class GraphDocumentAnalyzer {
     }
 
     private fun inferBodyCompletionKind(text: String, offset: Int): ReferenceTargetKind? {
-        val validTimeMarker = text.lastIndexOf("validTime=", startIndex = offset.coerceAtMost(text.lastIndex))
-        if (validTimeMarker >= 0) {
-            val between = text.substring(validTimeMarker + "validTime=".length, offset.coerceAtMost(text.length))
+        val textBeforeCursor = text.substring(0, offset.coerceIn(0, text.length))
+        val validTimeMarker = Regex("""validTime\s*=\s*""").findAll(textBeforeCursor).lastOrNull()
+        if (validTimeMarker != null) {
+            val between = text.substring(validTimeMarker.range.last + 1, offset.coerceAtMost(text.length))
             if ('\n' !in between && '}' !in between && between.count { it == '(' } >= between.count { it == ')' }) {
                 return ReferenceTargetKind.Timeline
             }
@@ -268,8 +269,9 @@ class GraphDocumentAnalyzer {
         if (text.getOrNull(cursor) == '(') {
             cursor = readBalancedEnd(text, cursor, '(', ')') ?: return null
         }
-        if (text.getOrNull(cursor) != '{') return null
-        cursor = readBalancedEnd(text, cursor, '{', '}') ?: return null
+        if (text.getOrNull(cursor) == '{') {
+            cursor = readBalancedEnd(text, cursor, '{', '}') ?: return null
+        }
         return cursor.takeIf { text.getOrNull(it) == '[' }
     }
 
@@ -428,11 +430,25 @@ class GraphDocumentAnalyzer {
                 )
             }
         }
+        Regex("""\btimeline\s*=\s*([A-Za-z_][A-Za-z0-9_.:-]*)""").findAll(masked).forEach { match ->
+            val token = match.groups[1] ?: return@forEach
+            val tokenStart = match.range.first + match.value.lastIndexOf(token.value)
+            val absoluteStart = baseOffset + tokenStart
+            if (references.none { it.range.start == absoluteStart }) {
+                references += SymbolReference(
+                    token.value,
+                    ReferenceTargetKind.Timeline,
+                    "timeline",
+                    SourceRange(absoluteStart, absoluteStart + token.value.length),
+                )
+            }
+        }
         return references
     }
 
     private fun listFieldKind(field: String, document: GraphDocument?): ReferenceTargetKind? {
         return when (field) {
+            "timeline" -> ReferenceTargetKind.Timeline
             "from", "to" -> if (document is TimelineDocument) ReferenceTargetKind.Timeline else ReferenceTargetKind.NodeType
             "extends" -> when (document) {
             is RelTypeDocument -> ReferenceTargetKind.RelType

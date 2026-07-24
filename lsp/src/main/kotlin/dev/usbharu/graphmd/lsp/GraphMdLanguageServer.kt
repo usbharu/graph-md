@@ -42,6 +42,12 @@ class GraphMdLanguageServer : LanguageServer, LanguageClientAware {
                     definitionProvider = Either.forLeft(true)
                     referencesProvider = Either.forLeft(true)
                     hoverProvider = Either.forLeft(true)
+                    renameProvider = Either.forLeft(true)
+                    codeActionProvider = Either.forRight(
+                        CodeActionOptions(listOf(CodeActionKind.QuickFix)).apply {
+                            resolveProvider = false
+                        },
+                    )
                 },
             ),
         )
@@ -115,6 +121,15 @@ private class GraphMdTextDocumentService(
     override fun hover(params: HoverParams): CompletableFuture<Hover?> {
         return CompletableFuture.completedFuture(index.hover(params.textDocument.uri, params.position))
     }
+
+    override fun rename(params: RenameParams): CompletableFuture<WorkspaceEdit?> {
+        return CompletableFuture.completedFuture(index.rename(params.textDocument.uri, params.position, params.newName))
+    }
+
+    override fun codeAction(params: CodeActionParams): CompletableFuture<List<Either<Command, CodeAction>>> {
+        val actions = index.codeActions(params.textDocument.uri, params.context.diagnostics)
+        return CompletableFuture.completedFuture(actions.map { Either.forRight(it) })
+    }
 }
 
 private class GraphMdWorkspaceService(
@@ -139,6 +154,7 @@ private class GraphMdWorkspaceIndex {
     private val compiler = GraphCompiler()
     private var roots: List<Path> = emptyList()
     private val documents = linkedMapOf<String, IndexedDocument>()
+    private var compiledCache: GraphCompilationResult? = null
 
     fun setWorkspaceRoots(roots: List<Path>) {
         this.roots = roots
@@ -146,6 +162,7 @@ private class GraphMdWorkspaceIndex {
 
     fun loadWorkspace() {
         documents.clear()
+        compiledCache = null
         roots.forEach { root ->
             if (!Files.exists(root)) return@forEach
             Files.walk(root).use { paths ->
@@ -169,12 +186,14 @@ private class GraphMdWorkspaceIndex {
         val path = Paths.get(URI.create(uri))
         val analysis = analyzer.analyze(text, path.toString())
         documents[uri] = IndexedDocument(uri, path, text, analysis)
+        compiledCache = null
     }
 
     fun reload(uri: String) {
         val path = Paths.get(URI.create(uri))
         if (!Files.exists(path)) {
             documents.remove(uri)
+            compiledCache = null
             return
         }
         upsert(uri, path.readText())
@@ -182,6 +201,7 @@ private class GraphMdWorkspaceIndex {
 
     fun remove(uri: String) {
         documents.remove(uri)
+        compiledCache = null
     }
 
     fun completions(uri: String, position: Position): List<CompletionItem> {
@@ -190,12 +210,13 @@ private class GraphMdWorkspaceIndex {
         exactPropsCompletions(document, position)?.let { return it }
         exactRelationPropsCompletions(document, position)?.let { return it }
         val referenceKind = analyzer.inferCompletionKind(document.analysis, document.offsetAt(position)) ?: return emptyList()
-        return completionIds(referenceKind).map { id ->
+        return contextualReferenceIds(document, position, referenceKind).map { id ->
             CompletionItem(id).apply {
                 this.kind = when (referenceKind) {
                     ReferenceTargetKind.Node -> CompletionItemKind.Reference
                     ReferenceTargetKind.NodeType, ReferenceTargetKind.RelType, ReferenceTargetKind.Timeline -> CompletionItemKind.Class
                 }
+                detail = referenceKind.name
             }
         }
     }
@@ -259,9 +280,720 @@ private class GraphMdWorkspaceIndex {
         return Hover(contents)
     }
 
+    fun rename(uri: String, position: Position, newName: String): WorkspaceEdit? {
+        if (newName.isBlank() || newName.any { it.isWhitespace() }) return null
+        val document = documents[uri] ?: return null
+        val offset = document.offsetAt(position)
+        val symbol = analyzer.findReferenceAt(document.analysis, offset)?.let { it.kind to it.targetId }
+            ?: analyzer.findDefinitionAt(document.analysis, offset)?.let { it.kind to it.id }
+            ?: return null
+        val changes = linkedMapOf<String, MutableList<TextEdit>>()
+        documents.values.forEach { indexed ->
+            indexed.analysis.definitions
+                .filter { it.kind == symbol.first && it.id == symbol.second }
+                .forEach { changes.getOrPut(indexed.uri) { mutableListOf() } += TextEdit(indexed.rangeOf(it.range), newName) }
+            indexed.analysis.references
+                .filter { it.kind == symbol.first && it.targetId == symbol.second }
+                .forEach { changes.getOrPut(indexed.uri) { mutableListOf() } += TextEdit(indexed.rangeOf(it.range), newName) }
+        }
+        return WorkspaceEdit(changes)
+    }
+
+    fun codeActions(uri: String, diagnostics: List<org.eclipse.lsp4j.Diagnostic>): List<CodeAction> {
+        val document = documents[uri] ?: return emptyList()
+        return diagnostics
+            .filter { it.source == null || it.source == "graphmd" }
+            .flatMap { diagnostic -> codeActionsForDiagnostic(document, diagnostic) }
+            .distinctBy { action -> action.title to action.edit }
+    }
+
+    private fun codeActionsForDiagnostic(
+        document: IndexedDocument,
+        diagnostic: org.eclipse.lsp4j.Diagnostic,
+    ): List<CodeAction> = buildList {
+        val message = diagnostic.message
+
+        referenceTargetForDiagnostic(message)?.let { target ->
+            val candidates = completionIds(target.kind)
+                .sortedWith(compareBy<String> { levenshtein(it.lowercase(), target.id.lowercase()) }.thenBy { it })
+                .take(8)
+            candidates.forEachIndexed { index, replacement ->
+                add(
+                    quickFix(
+                        title = "Change ${target.kind.displayName()} to '$replacement'",
+                        diagnostic = diagnostic,
+                        edit = WorkspaceEdit(mapOf(document.uri to listOf(TextEdit(diagnostic.range, replacement)))),
+                        preferred = index == 0,
+                    ),
+                )
+            }
+            createDefinitionAction(document, diagnostic, target)?.let(::add)
+            return@buildList
+        }
+
+        when (message) {
+            "Document MUST start with YAML front matter" -> add(
+                quickFix(
+                    "Add GraphMD front matter",
+                    diagnostic,
+                    WorkspaceEdit(
+                        mapOf(
+                            document.uri to listOf(
+                                TextEdit(
+                                    Range(Position(0, 0), Position(0, 0)),
+                                    "---\nid: ${document.defaultId()}\nkind: Node\ntype: \n---\n",
+                                ),
+                            ),
+                        ),
+                    ),
+                    preferred = true,
+                ),
+            )
+            "Unclosed YAML front matter" -> add(insertAtEnd(document, diagnostic, "Close YAML front matter", "\n---\n"))
+            "YAML front matter is empty" -> add(
+                replaceAction(
+                    document,
+                    diagnostic,
+                    "Add required front matter fields",
+                    document.rangeOf(SourceRange(4.coerceAtMost(document.text.length), 4.coerceAtMost(document.text.length))),
+                    "id: ${document.defaultId()}\nkind: Node\ntype: \n",
+                    preferred = true,
+                ),
+            )
+            "id is required" -> addTopLevelFieldActions(document, diagnostic, "id", listOf(document.defaultId()), this)
+            "kind is required" -> addTopLevelFieldActions(
+                document,
+                diagnostic,
+                "kind",
+                listOf("Node", "Media", "NodeType", "RelType", "Timeline"),
+                this,
+            )
+            "type is required" -> {
+                val values = completionIds(ReferenceTargetKind.NodeType).ifEmpty { listOf("NodeType") }
+                addTopLevelFieldActions(document, diagnostic, "type", values, this)
+            }
+            "Media requires url" -> addTopLevelFieldActions(document, diagnostic, "url", listOf("\"\""), this)
+            "Timeline with mappings requires timecode" -> add(
+                insertTopLevelFieldAction(document, diagnostic, "timecode", "\n  type: number", preferred = true),
+            )
+        }
+
+        Regex("""Unknown document kind: (.+)""").matchEntire(message)?.let { match ->
+            val old = match.groupValues[1]
+            val range = document.yamlScalarRange("kind", old) ?: diagnostic.range
+            listOf("Node", "Media", "NodeType", "RelType", "Timeline").forEachIndexed { index, value ->
+                add(replaceAction(document, diagnostic, "Change kind to '$value'", range, value, index == 0))
+            }
+        }
+        Regex("""Unknown prop type: (.+)""").matchEntire(message)?.let { match ->
+            val old = match.groupValues[1]
+            val range = document.yamlScalarRange("type", old) ?: diagnostic.range
+            PropType.entries.forEachIndexed { index, value ->
+                add(replaceAction(document, diagnostic, "Change property type to '${value.name}'", range, value.name, index == 0))
+            }
+        }
+        Regex("""Unknown prop index: (.+)""").matchEntire(message)?.let { match ->
+            val range = document.yamlScalarRange("index", match.groupValues[1]) ?: diagnostic.range
+            PropIndex.entries.forEachIndexed { index, value ->
+                add(replaceAction(document, diagnostic, "Change index to '${value.name}'", range, value.name, index == 0))
+            }
+        }
+        Regex("""Unknown timecode type: (.+)""").matchEntire(message)?.let { match ->
+            val range = document.yamlScalarRange("type", match.groupValues[1]) ?: diagnostic.range
+            add(replaceAction(document, diagnostic, "Use numeric timecodes", range, "number", preferred = true))
+        }
+        Regex("""Unknown mapping kind: (.+)""").matchEntire(message)?.let { match ->
+            val range = document.yamlScalarRange("kind", match.groupValues[1]) ?: diagnostic.range
+            add(replaceAction(document, diagnostic, "Use offset mapping", range, "offset", preferred = true))
+        }
+
+        Regex("""(Node|NodeType|RelType|Timeline) id must be unique: (.+)""").matchEntire(message)?.let { match ->
+            val id = match.groupValues[2]
+            val replacement = nextAvailableId(id, match.groupValues[1])
+            val range = document.yamlScalarRange("id", id) ?: diagnostic.range
+            add(replaceAction(document, diagnostic, "Rename duplicate id to '$replacement'", range, replacement, preferred = true))
+        }
+
+        unknownFieldName(message)?.let { field ->
+            document.yamlFieldRange(field)?.let { range ->
+                add(replaceAction(document, diagnostic, "Remove unknown field '$field'", range, "", preferred = true))
+            }
+        }
+        Regex("""Node MUST NOT define top-level field: (.+)""").matchEntire(message)?.let { match ->
+            val field = match.groupValues[1]
+            document.yamlFieldRange(field)?.let { range ->
+                add(replaceAction(document, diagnostic, "Move or remove reserved field '$field'", range, "", preferred = true))
+            }
+        }
+        Regex("""(.+) has unknown fields: (.+)""").matchEntire(message)?.let { match ->
+            match.groupValues[2].split(',').map(String::trim).filter(String::isNotEmpty).forEach { field ->
+                document.yamlFieldRange(field)?.let { range ->
+                    add(replaceAction(document, diagnostic, "Remove unknown field '$field'", range, "", preferred = size == 0))
+                }
+            }
+        }
+
+        Regex("""Cyclic (?:Timeline|NodeType|RelType) inheritance: .+""").matchEntire(message)?.let {
+            document.yamlFieldRange("extends")?.let { range ->
+                add(replaceAction(document, diagnostic, "Remove cyclic 'extends'", range, "", preferred = true))
+            }
+        }
+        Regex("""Invalid refinement for prop (.+)""").matchEntire(message)?.let { match ->
+            val property = match.groupValues[1]
+            document.yamlFieldRange(property)?.let { range ->
+                add(replaceAction(document, diagnostic, "Remove invalid refinement '$property'", range, "", preferred = true))
+            }
+        }
+        Regex("""(?:Inherited(?: and child)? )?(from|to) constraints have an empty intersection""").matchEntire(message)?.let { match ->
+            val field = match.groupValues[1]
+            document.yamlFieldRange(field)?.let { range ->
+                add(replaceAction(document, diagnostic, "Remove conflicting '$field' constraint", range, "", preferred = true))
+            }
+        }
+        if (message.startsWith("Timeline extends must stay on the same time axis")) {
+            document.yamlFieldRange("extends")?.let { range ->
+                add(replaceAction(document, diagnostic, "Remove incompatible Timeline inheritance", range, "", preferred = true))
+            }
+        }
+        if (message.startsWith("Timeline extends cannot change timecode schema")) {
+            document.yamlFieldRange("timecode")?.let { range ->
+                add(replaceAction(document, diagnostic, "Use inherited timecode schema", range, "", preferred = true))
+            }
+        }
+        if (message == "offset mapping requires exactly one of from or to") {
+            listOf("from", "to").forEach { field ->
+                document.yamlFieldRange(field)?.let { range ->
+                    add(replaceAction(document, diagnostic, "Remove mapping '$field'", range, "", preferred = size == 0))
+                }
+            }
+            if (none { it.title.startsWith("Remove mapping") }) {
+                val timeline = completionIds(ReferenceTargetKind.Timeline).firstOrNull()
+                document.mappingFieldInsertion("to", timeline.orEmpty())?.let { insertion ->
+                    add(replaceAction(document, diagnostic, "Add mapping 'to'", insertion.range, insertion.text, preferred = true))
+                }
+            }
+        }
+        if (message == "mapping.offset MUST be finite") {
+            document.propertyValueRange("offset")?.let { range ->
+                add(replaceAction(document, diagnostic, "Replace offset with 0", range, "0", preferred = true))
+            }
+        }
+        Regex("""Invalid YAML mapping entry: (.+)""").matchEntire(message)?.let { match ->
+            document.mappingColonInsertion(match.groupValues[1])?.let { range ->
+                add(replaceAction(document, diagnostic, "Add ':' to YAML mapping", range, ": ", preferred = true))
+            }
+        }
+        Regex("""(.+) items MUST be (strings|non-empty|unique)""").matchEntire(message)?.let { match ->
+            val field = match.groupValues[1].substringAfterLast('.')
+            document.normalizeStringList(field)?.let { edit ->
+                add(
+                    quickFix(
+                        "Normalize '$field' string list",
+                        diagnostic,
+                        WorkspaceEdit(mapOf(document.uri to listOf(edit))),
+                        preferred = true,
+                    ),
+                )
+            }
+        }
+        Regex("""(.+) selector MUST be \{ id: Identifier, mapped: boolean } or .+""").matchEntire(message)?.let { match ->
+            val field = match.groupValues[1].substringAfterLast('.')
+            val timeline = completionIds(ReferenceTargetKind.Timeline).firstOrNull().orEmpty()
+            document.propertyValueRange(field)?.let { range ->
+                add(
+                    replaceAction(
+                        document,
+                        diagnostic,
+                        "Replace '$field' with a valid Timeline selector",
+                        range,
+                        "{ id: $timeline, mapped: false }",
+                        preferred = true,
+                    ),
+                )
+            }
+        }
+        Regex("""(.+) MUST be a Timeline identifier or legacy selector list entry""").matchEntire(message)?.let { match ->
+            val field = match.groupValues[1].substringAfterLast('.')
+            val range = document.propertyValueRange(field)
+            if (range != null) {
+                completionIds(ReferenceTargetKind.Timeline).take(8).forEachIndexed { index, timeline ->
+                    add(replaceAction(document, diagnostic, "Use Timeline '$timeline'", range, timeline, preferred = index == 0))
+                }
+            }
+        }
+
+        Regex("""Required property missing after normalization: (.+)""").matchEntire(message)?.let { match ->
+            val key = match.groupValues[1]
+            val parsed = document.analysis.parsed.document as? NodeDocument
+            val schema = parsed?.let { nodeTypeSchema(it.type)?.props?.get(key) }
+            add(insertNodePropertyAction(document, diagnostic, key, schema, preferred = true))
+        }
+
+        Regex("""Unknown property ([A-Za-z_][A-Za-z0-9_.:-]*) on (.+)""").matchEntire(message)?.let { match ->
+            val key = match.groupValues[1]
+            declarationActionForUnknownProperty(document, diagnostic, key, match.groupValues[2])?.let(::add)
+            document.propertyAssignmentRange(key)?.let { range ->
+                add(replaceAction(document, diagnostic, "Remove unknown property '$key'", range, "", preferred = false))
+            }
+        }
+
+        typedDefaultFix(document, diagnostic)?.let(::add)
+        genericYamlTypeFix(document, diagnostic)?.let(::add)
+        addAll(constraintFixes(document, diagnostic))
+        syntaxClosingFix(document, diagnostic)?.let(::add)
+        if (isEmpty() && diagnostic.range.start != diagnostic.range.end) {
+            add(
+                replaceAction(
+                    document,
+                    diagnostic,
+                    "Remove invalid construct",
+                    diagnostic.range,
+                    "",
+                    preferred = false,
+                ),
+            )
+        }
+    }
+
+    private fun quickFix(
+        title: String,
+        diagnostic: org.eclipse.lsp4j.Diagnostic,
+        edit: WorkspaceEdit,
+        preferred: Boolean = false,
+    ): CodeAction = CodeAction(title).apply {
+        kind = CodeActionKind.QuickFix
+        diagnostics = listOf(diagnostic)
+        this.edit = edit
+        isPreferred = preferred
+    }
+
+    private fun replaceAction(
+        document: IndexedDocument,
+        diagnostic: org.eclipse.lsp4j.Diagnostic,
+        title: String,
+        range: Range,
+        newText: String,
+        preferred: Boolean = false,
+    ): CodeAction = quickFix(
+        title,
+        diagnostic,
+        WorkspaceEdit(mapOf(document.uri to listOf(TextEdit(range, newText)))),
+        preferred,
+    )
+
+    private fun insertAtEnd(
+        document: IndexedDocument,
+        diagnostic: org.eclipse.lsp4j.Diagnostic,
+        title: String,
+        text: String,
+    ): CodeAction = replaceAction(document, diagnostic, title, document.endRange(), text, preferred = true)
+
+    private fun addTopLevelFieldActions(
+        document: IndexedDocument,
+        diagnostic: org.eclipse.lsp4j.Diagnostic,
+        field: String,
+        values: List<String>,
+        actions: MutableList<CodeAction>,
+    ) {
+        values.distinct().take(8).forEachIndexed { index, value ->
+            actions += insertTopLevelFieldAction(document, diagnostic, field, value, preferred = index == 0)
+        }
+    }
+
+    private fun insertTopLevelFieldAction(
+        document: IndexedDocument,
+        diagnostic: org.eclipse.lsp4j.Diagnostic,
+        field: String,
+        value: String,
+        preferred: Boolean,
+    ): CodeAction {
+        val insertion = document.frontMatterClosingOffset() ?: document.text.length
+        val text = "$field: $value\n"
+        return replaceAction(
+            document,
+            diagnostic,
+            "Add '$field${if (value.isNotEmpty()) ": $value" else ""}'",
+            document.rangeOf(SourceRange(insertion, insertion)),
+            text,
+            preferred,
+        )
+    }
+
+    private fun insertNodePropertyAction(
+        document: IndexedDocument,
+        diagnostic: org.eclipse.lsp4j.Diagnostic,
+        key: String,
+        schema: ResolvedPropSchema?,
+        preferred: Boolean,
+    ): CodeAction {
+        val insertion = document.propsInsertion(key, defaultValue(schema))
+        return replaceAction(
+            document,
+            diagnostic,
+            "Add required property '$key'",
+            insertion.range,
+            insertion.text,
+            preferred,
+        )
+    }
+
+    private fun defaultValue(schema: ResolvedPropSchema?): String = when (schema?.type) {
+        PropType.string, PropType.text, null -> "\"\""
+        PropType.number, PropType.instant -> "0"
+        PropType.duration -> "{ from: 0 }"
+        PropType.array -> "[]"
+    }
+
+    private fun typedDefaultFix(
+        document: IndexedDocument,
+        diagnostic: org.eclipse.lsp4j.Diagnostic,
+    ): CodeAction? {
+        val match = Regex("""^([A-Za-z_][A-Za-z0-9_.:-]*)(?:\.[A-Za-z0-9_.:-]+)? must be (string|text|number|array|duration object)$""")
+            .matchEntire(diagnostic.message) ?: return null
+        val key = match.groupValues[1]
+        val replacement = when (match.groupValues[2]) {
+            "string", "text" -> "\"\""
+            "number" -> "0"
+            "array" -> "[]"
+            "duration object" -> "{ from: 0 }"
+            else -> return null
+        }
+        val range = document.propertyValueRange(key) ?: return null
+        return replaceAction(document, diagnostic, "Replace '$key' with a valid ${match.groupValues[2]}", range, replacement, preferred = true)
+    }
+
+    private fun genericYamlTypeFix(
+        document: IndexedDocument,
+        diagnostic: org.eclipse.lsp4j.Diagnostic,
+    ): CodeAction? {
+        if (diagnostic.message == "id MUST be non-empty") {
+            val range = document.propertyValueRange("id") ?: return null
+            return replaceAction(document, diagnostic, "Use filename as id", range, document.defaultId(), preferred = true)
+        }
+        if (diagnostic.message == "validTime.timeline MUST be non-empty") {
+            val timeline = completionIds(ReferenceTargetKind.Timeline).firstOrNull() ?: return null
+            val range = document.propertyValueRange("timeline") ?: return null
+            return replaceAction(document, diagnostic, "Use Timeline '$timeline'", range, timeline, preferred = true)
+        }
+        val scalar = Regex("""^(.+) MUST be (?:a |an )?(string|boolean|number|integer|mapping)$""")
+            .matchEntire(diagnostic.message)
+        if (scalar != null) {
+            val field = scalar.groupValues[1].substringAfterLast('.')
+            val replacement = when (scalar.groupValues[2]) {
+                "string" -> "\"\""
+                "boolean" -> "false"
+                "number", "integer" -> "0"
+                "mapping" -> "{}"
+                else -> return null
+            }
+            val range = document.propertyValueRange(field) ?: return null
+            return replaceAction(document, diagnostic, "Replace '$field' with a valid ${scalar.groupValues[2]}", range, replacement, preferred = true)
+        }
+        val list = Regex("""^(.+?)(?: items)? MUST be (?:a )?(?:non-empty )?list(?: of strings)?$""")
+            .matchEntire(diagnostic.message)
+        if (list != null) {
+            val field = list.groupValues[1].substringAfterLast('.')
+            val range = document.propertyValueRange(field) ?: return null
+            val replacement = if ("non-empty" in diagnostic.message || "of strings" in diagnostic.message || "items" in diagnostic.message) "[value]" else "[]"
+            return replaceAction(document, diagnostic, "Replace '$field' with a list", range, replacement, preferred = true)
+        }
+        return null
+    }
+
+    private fun constraintFixes(
+        document: IndexedDocument,
+        diagnostic: org.eclipse.lsp4j.Diagnostic,
+    ): List<CodeAction> = buildList {
+        Regex("""validTime\.from is after validTime\.to on (.+)""").matchEntire(diagnostic.message)?.let {
+            val edits = document.swapValidTimeBounds(it.groupValues[1])
+            if (edits != null) {
+                add(
+                    quickFix(
+                        "Swap validTime from/to",
+                        diagnostic,
+                        WorkspaceEdit(mapOf(document.uri to edits)),
+                        preferred = true,
+                    ),
+                )
+            }
+        }
+        Regex("""([A-Za-z_][A-Za-z0-9_.:-]*) timeline ([A-Za-z_][A-Za-z0-9_.:-]*) is not allowed""")
+            .matchEntire(diagnostic.message)?.let { match ->
+                val property = match.groupValues[1]
+                val current = match.groupValues[2]
+                val parsed = document.analysis.parsed.document as? NodeDocument
+                val schema = parsed?.let { nodeTypeSchema(it.type)?.props?.get(property) }
+                val allowed = (listOfNotNull(schema?.timeline) + schema?.timelines.orEmpty())
+                    .map {
+                        when (it) {
+                            is TimelineSelector.Id -> it.id
+                            is TimelineSelector.Mapped -> it.to
+                        }
+                    }
+                    .distinct()
+                val range = document.tokenRange(current)
+                if (range != null) {
+                    allowed.forEachIndexed { index, replacement ->
+                        add(replaceAction(document, diagnostic, "Use allowed Timeline '$replacement'", range, replacement, index == 0))
+                    }
+                }
+            }
+        Regex("""([A-Za-z_][A-Za-z0-9_.:-]*) duration must define from or to""")
+            .matchEntire(diagnostic.message)?.let { match ->
+                document.durationBoundInsertion(match.groupValues[1])?.let { insertion ->
+                    add(
+                        replaceAction(
+                            document,
+                            diagnostic,
+                            "Add duration 'from' bound",
+                            insertion.range,
+                            insertion.text,
+                            preferred = true,
+                        ),
+                    )
+                }
+            }
+        Regex("""Relation (?:source|target) type .+ is not allowed for (.+)""")
+            .matchEntire(diagnostic.message)?.let { match ->
+                val currentRelType = match.groupValues[1]
+                val relReference = document.analysis.references.firstOrNull {
+                    it.kind == ReferenceTargetKind.RelType && it.targetId == currentRelType
+                }
+                if (relReference != null) {
+                    val sourceType = (document.analysis.parsed.document as? NodeDocument)?.type
+                    val targetId = document.analysis.references.firstOrNull {
+                        it.kind == ReferenceTargetKind.Node && it.range.start <= relReference.range.start
+                    }?.targetId
+                    val compiled = compiledWorkspace()
+                    val targetType = compiled.nodes.firstOrNull { it.id == targetId }?.type
+                    compiled.relTypes.filter { rel ->
+                        val from = rel.from
+                        val to = rel.to
+                        (sourceType == null || from == null || from.any { nodeTypeMatches(sourceType, it, compiled.nodeTypes) }) &&
+                            (targetType == null || to == null || to.any { nodeTypeMatches(targetType, it, compiled.nodeTypes) })
+                    }.filterNot { it.id == currentRelType }.forEachIndexed { index, rel ->
+                        add(
+                            replaceAction(
+                                document,
+                                diagnostic,
+                                "Change relation type to '${rel.id}'",
+                                document.rangeOf(relReference.range),
+                                rel.id,
+                                preferred = index == 0,
+                            ),
+                        )
+                    }
+                }
+            }
+    }
+
+    private fun syntaxClosingFix(
+        document: IndexedDocument,
+        diagnostic: org.eclipse.lsp4j.Diagnostic,
+    ): CodeAction? {
+        val message = diagnostic.message
+        if (message in setOf("@props only accepts validTime=...", "@link only accepts validTime=...")) {
+            val marker = if (message.startsWith("@props")) "@props(" else "@link("
+            val start = document.text.lastIndexOf(marker)
+            val end = if (start >= 0) document.text.indexOf(')', start + marker.length) else -1
+            if (start >= 0 && end >= 0) {
+                val timeline = completionIds(ReferenceTargetKind.Timeline).firstOrNull().orEmpty()
+                return replaceAction(
+                    document,
+                    diagnostic,
+                    "Replace arguments with validTime",
+                    document.rangeOf(SourceRange(start + marker.length, end)),
+                    "validTime=$timeline",
+                    preferred = true,
+                )
+            }
+        }
+        if (message == "@link must be followed immediately by a link") {
+            document.linkWhitespaceRange()?.let { range ->
+                return replaceAction(document, diagnostic, "Remove whitespace after @link", range, "", preferred = true)
+            }
+        }
+        if (message == "Relation must be followed by (...)") {
+            val closeLabel = document.text.lastIndexOf(']')
+            if (closeLabel >= 0) {
+                val target = completionIds(ReferenceTargetKind.Node).firstOrNull() ?: "target"
+                val relType = completionIds(ReferenceTargetKind.RelType).firstOrNull() ?: "relationType"
+                return replaceAction(
+                    document,
+                    diagnostic,
+                    "Add relation target and type",
+                    document.rangeOf(SourceRange(closeLabel + 1, closeLabel + 1)),
+                    "($target $relType)",
+                    preferred = true,
+                )
+            }
+        }
+        if (message == "Relation target and type must be separated by horizontal spaces") {
+            document.lastRelationInnerRange()?.let { (range, inner) ->
+                val tokens = Regex("""[A-Za-z_][A-Za-z0-9_.:-]*""").findAll(inner).map { it.value }.toList()
+                if (tokens.size >= 2) {
+                    return replaceAction(
+                        document,
+                        diagnostic,
+                        "Separate relation target and type with a space",
+                        range,
+                        "${tokens[0]} ${tokens[1]}",
+                        preferred = true,
+                    )
+                }
+            }
+        }
+        val (title, marker, closing, before) = when (message) {
+            "Unclosed @props arguments" -> SyntaxFix("Close @props arguments", "@props(", ")", "{")
+            "Unclosed @props block" -> SyntaxFix("Close @props block", "@props", "}", null)
+            "Unclosed @link arguments" -> SyntaxFix("Close @link arguments", "@link(", ")", "{")
+            "Unclosed @link property block" -> SyntaxFix("Close @link property block", "@link", "}", "[")
+            "Unclosed relation label" -> SyntaxFix("Close relation label", "[", "]", null)
+            "Unclosed relation target" -> SyntaxFix("Close relation target", "](", ")", null)
+            else -> return null
+        }
+        val start = document.text.lastIndexOf(marker)
+        if (start < 0) return null
+        val insertion = before?.let { document.text.indexOf(it, start + marker.length).takeIf { found -> found >= 0 } }
+            ?: document.text.length
+        return replaceAction(
+            document,
+            diagnostic,
+            title,
+            document.rangeOf(SourceRange(insertion, insertion)),
+            closing,
+            preferred = true,
+        )
+    }
+
+    private fun nextAvailableId(id: String, kindName: String): String {
+        val kind = when (kindName) {
+            "Node" -> ReferenceTargetKind.Node
+            "NodeType" -> ReferenceTargetKind.NodeType
+            "RelType" -> ReferenceTargetKind.RelType
+            "Timeline" -> ReferenceTargetKind.Timeline
+            else -> return "${id}2"
+        }
+        val used = completionIds(kind).toSet()
+        var suffix = 2
+        while ("$id$suffix" in used) suffix++
+        return "$id$suffix"
+    }
+
+    private fun createDefinitionAction(
+        document: IndexedDocument,
+        diagnostic: org.eclipse.lsp4j.Diagnostic,
+        target: DiagnosticReferenceTarget,
+    ): CodeAction? {
+        if (!target.id.matches(Regex("""[A-Za-z_][A-Za-z0-9_.:-]*"""))) return null
+        val folder = when (target.kind) {
+            ReferenceTargetKind.NodeType, ReferenceTargetKind.RelType -> "types"
+            ReferenceTargetKind.Timeline -> "timelines"
+            ReferenceTargetKind.Node -> "nodes"
+        }
+        val base = roots.firstOrNull { document.path.startsWith(it) }
+            ?: document.path.parent?.takeUnless { it.fileName?.toString() in setOf("types", "timelines", "nodes") }
+            ?: document.path.parent?.parent
+            ?: return null
+        val preferredDirectory = base.resolve(folder)
+        val definitionDirectory = preferredDirectory.takeIf { Files.isDirectory(it) } ?: base
+        val newPath = definitionDirectory.resolve("${target.id}.md")
+        val newUri = newPath.toUri().toString()
+        if (newUri in documents || Files.exists(newPath)) return null
+        val sourceType = (document.analysis.parsed.document as? NodeDocument)?.type
+            ?: completionIds(ReferenceTargetKind.NodeType).firstOrNull()
+            ?: "NodeType"
+        val content = when (target.kind) {
+            ReferenceTargetKind.NodeType -> "---\nid: ${target.id}\nkind: NodeType\nprops:\n---\n"
+            ReferenceTargetKind.RelType -> "---\nid: ${target.id}\nkind: RelType\n---\n"
+            ReferenceTargetKind.Timeline -> "---\nid: ${target.id}\nkind: Timeline\ntimecode:\n  type: number\n---\n"
+            ReferenceTargetKind.Node -> "---\nid: ${target.id}\nkind: Node\ntype: $sourceType\n---\n"
+        }
+        val changes = listOf<Either<TextDocumentEdit, ResourceOperation>>(
+            Either.forRight(CreateFile(newUri, CreateFileOptions(false, true))),
+            Either.forLeft(
+                TextDocumentEdit(
+                    VersionedTextDocumentIdentifier(newUri, null),
+                    listOf(TextEdit(Range(Position(0, 0), Position(0, 0)), content)),
+                ),
+            ),
+        )
+        return quickFix(
+            "Create ${target.kind.displayName()} '${target.id}'",
+            diagnostic,
+            WorkspaceEdit(changes),
+            preferred = completionIds(target.kind).isEmpty(),
+        )
+    }
+
+    private fun declarationActionForUnknownProperty(
+        document: IndexedDocument,
+        diagnostic: org.eclipse.lsp4j.Diagnostic,
+        key: String,
+        owner: String,
+    ): CodeAction? {
+        val normalized = compiledWorkspace()
+        val targetSource = when {
+            owner.startsWith("Node ") -> {
+                val type = (document.analysis.parsed.document as? NodeDocument)?.type ?: return null
+                normalized.nodeTypes.firstOrNull { it.id == type }?.source?.path
+            }
+            owner.startsWith("Relation ") -> {
+                val relType = owner.substringAfterLast(':')
+                normalized.relTypes.firstOrNull { it.id == relType }?.source?.path
+            }
+            else -> null
+        } ?: return null
+        val schemaDocument = documents.values.firstOrNull { it.path.toString() == targetSource } ?: return null
+        val insertion = schemaDocument.propSchemaInsertion(key)
+        return quickFix(
+            "Declare '$key' in ${schemaDocument.analysis.parsed.document?.id ?: "schema"}",
+            diagnostic,
+            WorkspaceEdit(mapOf(schemaDocument.uri to listOf(TextEdit(insertion.range, insertion.text)))),
+            preferred = true,
+        )
+    }
+
+    private fun unknownFieldName(message: String): String? {
+        val patterns = listOf(
+            Regex("""Unknown top-level field: (.+)"""),
+            Regex("""Unknown validTime field: (.+)"""),
+            Regex("""Unknown validTime\.(?:from|to) field: (.+)"""),
+            Regex("""Unknown mapping field: (.+)"""),
+            Regex("""Unknown timecode field: (.+)"""),
+            Regex("""Unknown property schema field: .+\.([^.]+)"""),
+        )
+        return patterns.firstNotNullOfOrNull { it.matchEntire(message)?.groupValues?.get(1) }
+    }
+
+    private fun ReferenceTargetKind.displayName(): String = when (this) {
+        ReferenceTargetKind.Node -> "Node"
+        ReferenceTargetKind.NodeType -> "NodeType"
+        ReferenceTargetKind.RelType -> "RelType"
+        ReferenceTargetKind.Timeline -> "Timeline"
+    }
+
+    private fun levenshtein(left: String, right: String): Int {
+        if (left.isEmpty()) return right.length
+        if (right.isEmpty()) return left.length
+        var previous = IntArray(right.length + 1) { it }
+        left.forEachIndexed { leftIndex, leftChar ->
+            val current = IntArray(right.length + 1)
+            current[0] = leftIndex + 1
+            right.forEachIndexed { rightIndex, rightChar ->
+                current[rightIndex + 1] = minOf(
+                    current[rightIndex] + 1,
+                    previous[rightIndex + 1] + 1,
+                    previous[rightIndex] + if (leftChar == rightChar) 0 else 1,
+                )
+            }
+            previous = current
+        }
+        return previous.last()
+    }
+
     fun diagnosticsByUri(): Map<String, MutableList<org.eclipse.lsp4j.Diagnostic>> {
-        val graphDocuments = documents.values.filter { it.isGraphDocumentCandidate() }
-        val compiled = compiler.compileSources(graphDocuments.map { SourceDocument(it.text, it.path.toString()) })
+        val compiled = compiledWorkspace()
         val diagnostics = linkedMapOf<String, MutableList<org.eclipse.lsp4j.Diagnostic>>()
         compiled.diagnostics.forEach { diagnostic ->
             val sourcePath = diagnostic.source?.path ?: return@forEach
@@ -274,11 +1006,9 @@ private class GraphMdWorkspaceIndex {
                 }
                 message = diagnostic.message
                 source = "graphmd"
-                range = document.rangeOf(
-                    inferredDiagnosticRange(document, diagnostic)
-                        ?: diagnostic.source?.range
-                        ?: SourceRange(0, 0),
-                )
+                code = Either.forLeft(diagnostic.category.name)
+                range = inferredDiagnosticLspRange(document, diagnostic)
+                    ?: document.rangeOf(diagnostic.source?.range ?: SourceRange(0, 0))
             }
         }
         documents.keys.forEach { uri -> diagnostics.putIfAbsent(uri, mutableListOf()) }
@@ -293,29 +1023,21 @@ private class GraphMdWorkspaceIndex {
             nodeTypeIds = completionIds(ReferenceTargetKind.NodeType),
             relTypeIds = completionIds(ReferenceTargetKind.RelType),
             timelineIds = completionIds(ReferenceTargetKind.Timeline),
-            nodePropsSchema = (document.analysis.parsed.document as? NodeDocument)?.let { nodeTypeSchema(it.type)?.props }.orEmpty(),
+            nodePropsSchema = ((document.analysis.parsed.document as? NodeDocument)?.type
+                ?: frontMatterScalar(document.text, "type"))?.let { nodeTypeSchema(it)?.props }.orEmpty(),
         )
         return resolver.resolve()?.map { entry ->
-            CompletionItem(entry.label).apply {
-                kind = entry.kind
-                insertText = entry.insertText
-                detail = entry.detail
-            }
+            entry.toCompletionItem()
         }
     }
 
     private fun exactPropsCompletions(document: IndexedDocument, position: Position): List<CompletionItem>? {
-        val parsed = document.analysis.parsed.document as? NodeDocument ?: return null
+        val parsed = document.analysis.parsed.document as? NodeDocument
         val offset = document.offsetAt(position)
-        val schema = nodeTypeSchema(parsed.type)?.props ?: return null
+        val nodeType = parsed?.type ?: frontMatterScalar(document.text, "type") ?: return null
+        val schema = nodeTypeSchema(nodeType)?.props ?: return null
         val context = PropsCompletionContextResolver(document.text, offset, schema, timelineIds()).resolve() ?: return null
-        return context.items.map { entry ->
-            CompletionItem(entry.label).apply {
-                kind = entry.kind
-                insertText = entry.insertText
-                detail = entry.detail
-            }
-        }
+        return context.items.map { it.toCompletionItem() }
     }
 
     private fun exactRelationPropsCompletions(document: IndexedDocument, position: Position): List<CompletionItem>? {
@@ -329,13 +1051,77 @@ private class GraphMdWorkspaceIndex {
             timelineIds = timelineIds(),
             explicitBraceStart = relationContext.braceStart,
         ).resolve() ?: return null
-        return context.items.map { entry ->
-            CompletionItem(entry.label).apply {
-                kind = entry.kind
-                insertText = entry.insertText
-                detail = entry.detail
+        return context.items.map { it.toCompletionItem() }
+    }
+
+    private fun contextualReferenceIds(
+        document: IndexedDocument,
+        position: Position,
+        kind: ReferenceTargetKind,
+    ): List<String> {
+        val context = relationCompletionContext(document.text, document.offsetAt(position))
+        if (context == null) return completionIds(kind)
+        val compiled = compiledWorkspace()
+        val sourceType = (document.analysis.parsed.document as? NodeDocument)?.type
+            ?: frontMatterScalar(document.text, "type")
+        val targetType = context.targetId?.let { target -> compiled.nodes.firstOrNull { it.id == target }?.type }
+        return when (kind) {
+            ReferenceTargetKind.Node -> {
+                val allowedTargets = context.relType?.let { rel -> compiled.relTypes.firstOrNull { it.id == rel }?.to }
+                compiled.nodes
+                    .filter { node -> allowedTargets == null || allowedTargets.any { nodeTypeMatches(node.type, it, compiled.nodeTypes) } }
+                    .map { it.id }
+                    .distinct()
+                    .sorted()
             }
+            ReferenceTargetKind.RelType -> compiled.relTypes
+                .filter { rel ->
+                    val allowedFrom = rel.from
+                    val allowedTo = rel.to
+                    (sourceType == null || allowedFrom == null || allowedFrom.any { nodeTypeMatches(sourceType, it, compiled.nodeTypes) }) &&
+                        (targetType == null || allowedTo == null || allowedTo.any { nodeTypeMatches(targetType, it, compiled.nodeTypes) })
+                }
+                .map { it.id }
+                .distinct()
+                .sorted()
+            else -> completionIds(kind)
         }
+    }
+
+    private fun nodeTypeMatches(actual: String, allowed: String, nodeTypes: List<NormalizedNodeType>): Boolean {
+        if (actual == allowed) return true
+        return nodeTypes.firstOrNull { it.id == actual }?.ancestorIds?.contains(allowed) == true
+    }
+
+    private fun relationCompletionContext(text: String, offset: Int): RelationReferenceCompletionContext? {
+        val openParen = text.lastIndexOf('(', offset.coerceAtMost(text.lastIndex))
+        if (openParen < 0) return null
+        val closeParen = text.indexOf(')', openParen + 1)
+        if (closeParen < 0 || offset > closeParen) return null
+        val labelClose = text.lastIndexOf(']', openParen)
+        if (labelClose < 0 || labelClose + 1 != openParen) return null
+        val before = text.substring(openParen + 1, closeParen)
+        val tokens = before.trim().split(Regex("""\s+""")).filter { it.isNotBlank() }
+        val firstWhitespace = before.indexOfFirst { it.isWhitespace() }
+        val editingTarget = firstWhitespace < 0 || offset - openParen - 1 <= firstWhitespace
+        return RelationReferenceCompletionContext(
+            targetId = tokens.firstOrNull()?.trim('"')?.takeIf { !editingTarget || firstWhitespace >= 0 },
+            relType = tokens.getOrNull(1)?.trim('"'),
+        )
+    }
+
+    private fun compiledWorkspace(): GraphCompilationResult {
+        compiledCache?.let { return it }
+        val graphDocuments = documents.values.filter { it.isGraphDocumentCandidate() }
+        return compiler.compileSources(graphDocuments.map { SourceDocument(it.text, it.path.toString()) })
+            .also { compiledCache = it }
+    }
+
+    private fun frontMatterScalar(text: String, key: String): String? {
+        val frontMatterEnd = text.indexOf("\n---", startIndex = 3).takeIf { it >= 0 } ?: text.length
+        return Regex("""(?m)^${Regex.escape(key)}\s*:\s*([^#\r\n]+)""")
+            .find(text.substring(0, frontMatterEnd))
+            ?.groupValues?.get(1)?.trim()?.trim('"', '\'')?.takeIf { it.isNotEmpty() }
     }
 
     private fun completionIds(kind: ReferenceTargetKind): List<String> {
@@ -351,18 +1137,15 @@ private class GraphMdWorkspaceIndex {
     }
 
     private fun nodeTypeSchema(id: String): NormalizedNodeType? {
-        val graphDocuments = documents.values.filter { it.isGraphDocumentCandidate() }
-        return compiler.compileSources(graphDocuments.map { SourceDocument(it.text, it.path.toString()) }).nodeTypes.firstOrNull { it.id == id }
+        return compiledWorkspace().nodeTypes.firstOrNull { it.id == id }
     }
 
     private fun relTypeSchema(id: String): NormalizedRelType? {
-        val graphDocuments = documents.values.filter { it.isGraphDocumentCandidate() }
-        return compiler.compileSources(graphDocuments.map { SourceDocument(it.text, it.path.toString()) }).relTypes.firstOrNull { it.id == id }
+        return compiledWorkspace().relTypes.firstOrNull { it.id == id }
     }
 
     private fun timelineIds(): List<String> {
-        val graphDocuments = documents.values.filter { it.isGraphDocumentCandidate() }
-        return compiler.compileSources(graphDocuments.map { SourceDocument(it.text, it.path.toString()) }).timelines.map { it.id }.sorted()
+        return compiledWorkspace().timelines.map { it.id }.sorted()
     }
 
     private fun definitionsOf(kind: ReferenceTargetKind): List<IndexedDefinition> {
@@ -373,14 +1156,47 @@ private class GraphMdWorkspaceIndex {
         }
     }
 
-    private fun inferredDiagnosticRange(document: IndexedDocument, diagnostic: Diagnostic): SourceRange? {
-        if (diagnostic.category != DiagnosticCategory.ReferenceError) return null
-        val reference = referenceTargetForDiagnostic(diagnostic.message) ?: return null
-        return document.analysis.references.firstOrNull { ref ->
-            ref.kind == reference.kind &&
-                ref.targetId == reference.id &&
-                (reference.field == null || ref.field == reference.field)
-        }?.range
+    private fun inferredDiagnosticLspRange(document: IndexedDocument, diagnostic: Diagnostic): Range? {
+        if (diagnostic.category == DiagnosticCategory.ReferenceError) {
+            val reference = referenceTargetForDiagnostic(diagnostic.message)
+            val sourceRange = reference?.let { target ->
+                document.analysis.references.firstOrNull { ref ->
+                    ref.kind == target.kind &&
+                        ref.targetId == target.id &&
+                        (target.field == null || ref.field == target.field)
+                }?.range
+            }
+            if (sourceRange != null) return document.rangeOf(sourceRange)
+        }
+        unknownFieldName(diagnostic.message)?.let { field -> document.yamlFieldKeyRange(field)?.let { return it } }
+        Regex("""Unknown document kind: (.+)""").matchEntire(diagnostic.message)?.let {
+            return document.yamlScalarRange("kind", it.groupValues[1])
+        }
+        Regex("""Unknown prop type: (.+)""").matchEntire(diagnostic.message)?.let {
+            return document.yamlScalarRange("type", it.groupValues[1])
+        }
+        Regex("""Unknown prop index: (.+)""").matchEntire(diagnostic.message)?.let {
+            return document.yamlScalarRange("index", it.groupValues[1])
+        }
+        Regex("""Unknown (?:timecode type|mapping kind): (.+)""").matchEntire(diagnostic.message)?.let {
+            val field = if (diagnostic.message.startsWith("Unknown timecode")) "type" else "kind"
+            return document.yamlScalarRange(field, it.groupValues[1])
+        }
+        Regex("""(?:Node|NodeType|RelType|Timeline) id must be unique: (.+)""").matchEntire(diagnostic.message)?.let {
+            return document.yamlScalarRange("id", it.groupValues[1])
+        }
+        Regex("""Unknown property ([A-Za-z_][A-Za-z0-9_.:-]*) on .+""").matchEntire(diagnostic.message)?.let {
+            return document.propertyAssignmentRange(it.groupValues[1])
+        }
+        Regex("""Required property missing after normalization: (.+)""").matchEntire(diagnostic.message)?.let {
+            return document.propsInsertion(it.groupValues[1], "").range
+        }
+        if (diagnostic.message.endsWith(" is required") || diagnostic.message == "Media requires url") {
+            val offset = document.frontMatterClosingOffset() ?: 0
+            return document.rangeOf(SourceRange(offset, offset))
+        }
+        document.syntaxMarkerRange(diagnostic.message)?.let { return it }
+        return null
     }
 
     private fun referenceTargetForDiagnostic(message: String): DiagnosticReferenceTarget? {
@@ -417,6 +1233,24 @@ internal data class CompletionEntry(
     val kind: CompletionItemKind,
     val insertText: String = label,
     val detail: String? = null,
+    val insertTextFormat: InsertTextFormat = InsertTextFormat.PlainText,
+)
+
+private fun CompletionEntry.toCompletionItem(): CompletionItem = CompletionItem(label).also { item ->
+    item.kind = kind
+    item.insertText = insertText
+    item.detail = detail
+    item.insertTextFormat = insertTextFormat
+    item.sortText = when (kind) {
+        CompletionItemKind.Property, CompletionItemKind.Field -> "0-$label"
+        CompletionItemKind.Reference -> "1-$label"
+        else -> "2-$label"
+    }
+}
+
+private data class RelationReferenceCompletionContext(
+    val targetId: String?,
+    val relType: String?,
 )
 
 internal class FrontMatterCompletionResolver(
@@ -443,6 +1277,7 @@ internal class FrontMatterCompletionResolver(
         val cursorInLine = offset - lineStarts[lineIndex]
         val beforeCursor = line.take(cursorInLine.coerceIn(0, line.length))
         val currentKeyPrefix = trimmed.takeWhile { it != ':' && !it.isWhitespace() }
+        val usedTopLevelKeys = siblingKeysAtIndent(lines, lineIndex, 0)
 
         if (trimmed.startsWith("-")) {
             return listValueCompletions(lines, lineIndex, parsedDocument)
@@ -452,14 +1287,14 @@ internal class FrontMatterCompletionResolver(
         val keyCandidate = keyMatch.groupValues[1]
         val hasColon = ':' in trimmed
         if (!hasColon && indent == 0) {
-            return topLevelKeyCompletions(keyCandidate)
+            return topLevelKeyCompletions(keyCandidate, usedTopLevelKeys)
         }
 
         val path = contextPath(lines, lineIndex, indent, hasColon)
         val valuePrefix = if (hasColon) beforeCursor.substringAfter(':', "").trimStart() else ""
         nodePropsYamlCompletions(lines, lineIndex, indent, path, hasColon, currentKeyPrefix, valuePrefix)?.let { return it }
         return when {
-            indent == 0 && keyCandidate.isNotEmpty() && !hasColon -> topLevelKeyCompletions(keyCandidate)
+            indent == 0 && keyCandidate.isNotEmpty() && !hasColon -> topLevelKeyCompletions(keyCandidate, usedTopLevelKeys)
             hasColon && path == listOf("kind") -> enumCompletions(valuePrefix, listOf("Node", "Media", "NodeType", "RelType", "Timeline"), "kind")
             hasColon && path == listOf("type") && parsedDocument is NodeDocument -> idCompletions(valuePrefix, nodeTypeIds, "NodeType")
             hasColon && path == listOf("extends") && parsedDocument is NodeTypeDocument -> idCompletions(valuePrefix, nodeTypeIds, "NodeType")
@@ -479,16 +1314,16 @@ internal class FrontMatterCompletionResolver(
             hasColon && path.lastOrNull() == "timeline" ->
                 timelineSelectorCompletions(valuePrefix)
             hasColon && valuePrefix.isEmpty() -> nestedKeyCompletions(path, "", lines, lineIndex)
-            indent == 0 -> topLevelKeyCompletions(keyCandidate)
+            indent == 0 -> topLevelKeyCompletions(keyCandidate, usedTopLevelKeys)
             else -> nestedKeyCompletions(path, currentKeyPrefix, lines, lineIndex)
         }
     }
 
-    private fun topLevelKeyCompletions(prefix: String): List<CompletionEntry> {
-        val kind = parsedDocument?.kind
+    private fun topLevelKeyCompletions(prefix: String, usedKeys: Set<String>): List<CompletionEntry> {
+        val kind = parsedDocument?.kind ?: inferredDocumentKind()
         val keys = mutableListOf("id", "kind")
         when (kind) {
-            DocumentKind.Node -> keys += listOf("type", "url", "validTime", "props")
+            DocumentKind.Node -> keys += listOf("type", "validTime", "props")
             DocumentKind.Media -> keys += listOf("type", "url", "validTime", "props")
             DocumentKind.NodeType -> keys += listOf("extends", "props")
             DocumentKind.RelType -> keys += listOf("extends", "from", "to", "props")
@@ -496,7 +1331,7 @@ internal class FrontMatterCompletionResolver(
             null -> keys += listOf("type", "url", "validTime", "extends", "from", "to", "props", "timecode", "mappings")
         }
         val filteredKeys = keys.distinct().filter { key ->
-            key.startsWith(prefix)
+            key.startsWith(prefix) && (key !in usedKeys || key == prefix)
         }
         return filteredKeys.map {
             CompletionEntry(it, CompletionItemKind.Field, "$it: ")
@@ -512,7 +1347,8 @@ internal class FrontMatterCompletionResolver(
         keyPrefix: String,
         valuePrefix: String,
     ): List<CompletionEntry>? {
-        if (parsedDocument !is NodeDocument || nodePropsSchema.isEmpty()) return null
+        if (parsedDocument !is NodeDocument && inferredDocumentKind() !in setOf(DocumentKind.Node, DocumentKind.Media)) return null
+        if (nodePropsSchema.isEmpty()) return null
         if (path.firstOrNull() != "props") return null
 
         val rawPath = path.drop(1)
@@ -521,13 +1357,11 @@ internal class FrontMatterCompletionResolver(
             return yamlObjectKeyCompletions(nodePropsSchema, emptyList(), lines, lineIndex, indent, keyPrefix)
         }
 
-        val currentKey = rawPath.last()
-        val parentContainer = nodePropsContainer(rawPath.dropLast(1)) ?: return null
-
         if (!hasColon) {
+            val currentContainer = nodePropsContainer(rawPath) ?: return null
             return yamlObjectKeyCompletions(
-                parentContainer.properties,
-                parentContainer.specialKeys,
+                currentContainer.properties,
+                currentContainer.specialKeys,
                 lines,
                 lineIndex,
                 indent,
@@ -535,12 +1369,13 @@ internal class FrontMatterCompletionResolver(
             )
         }
 
+        val currentKey = rawPath.last()
+        val parentContainer = nodePropsContainer(rawPath.dropLast(1)) ?: return null
         val schema = parentContainer.properties[currentKey]
         return when {
+            schema != null -> typedValueCompletions(schema, valuePrefix, yaml = true)
             currentKey == "timeline" ->
-                idCompletions(valuePrefix, timelineIds, "Timeline")
-            valuePrefix.isEmpty() && (schema?.type == PropType.instant || schema?.type == PropType.duration) ->
-                listOf(CompletionEntry("{", CompletionItemKind.Operator, "{ }", "object"))
+                idCompletions(valuePrefix, allowedTimelineIds(parentContainer.ownerSchema), "Timeline")
             else -> null
         }
     }
@@ -580,7 +1415,11 @@ internal class FrontMatterCompletionResolver(
             path.lastOrNull() == "validTime" -> listOf("timeline", "from", "to")
             path.takeLast(2).let { it == listOf("validTime", "from") || it == listOf("validTime", "to") } ->
                 listOf("value", "timecode")
-            isInsidePropSchema(path) -> listOf("type", "required", "index", "timeline", "items")
+            isInsidePropSchema(path) -> when (siblingScalarValue(lines, lineIndex, "type")) {
+                "instant", "duration" -> listOf("type", "required", "index", "timeline")
+                "array" -> listOf("type", "required", "index", "items")
+                else -> listOf("type", "required", "index")
+            }
             path == listOf("timecode") -> listOf("type")
             path == listOf("mappings") -> when (siblingScalarValue(lines, lineIndex, "kind")) {
                 "offset" -> listOf("kind", "from", "to", "offset")
@@ -588,7 +1427,10 @@ internal class FrontMatterCompletionResolver(
             }
             else -> return null
         }
-        return keys.filter { it.startsWith(prefix) }.map { CompletionEntry(it, CompletionItemKind.Field, "$it: ") }
+        val usedKeys = siblingKeysAtIndent(lines, lineIndex, indentOf(lines[lineIndex]))
+        return keys
+            .filter { it.startsWith(prefix) && (it !in usedKeys || it == prefix) }
+            .map { CompletionEntry(it, CompletionItemKind.Field, "$it: ") }
     }
 
     private fun enumCompletions(prefix: String, values: List<String>, detail: String): List<CompletionEntry> =
@@ -603,17 +1445,47 @@ internal class FrontMatterCompletionResolver(
         return entries
     }
 
+    private fun typedValueCompletions(schema: ResolvedPropSchema, prefix: String, yaml: Boolean): List<CompletionEntry>? {
+        if (prefix.isNotEmpty()) return null
+        val separator = if (yaml) ": " else " = "
+        val entries = when (schema.type) {
+            PropType.string -> listOf(CompletionEntry("string", CompletionItemKind.Value, "\"\${1:value}\"", "string", InsertTextFormat.Snippet))
+            PropType.text -> listOf(
+                CompletionEntry("text", CompletionItemKind.Value, "\"\${1:text}\"", "text (default)", InsertTextFormat.Snippet),
+                CompletionEntry("localized text", CompletionItemKind.Struct, "{ default$separator\"\${1:text}\" }", "localized text", InsertTextFormat.Snippet),
+            )
+            PropType.number -> listOf(CompletionEntry("0", CompletionItemKind.Value, "0", "number"))
+            PropType.instant -> listOf(
+                CompletionEntry("0", CompletionItemKind.Value, "0", "instant timecode"),
+                CompletionEntry("instant", CompletionItemKind.Struct, "{ timeline$separator\${1:${allowedTimelineIds(schema).firstOrNull().orEmpty()}}, timecode$separator\${2:0} }", "instant", InsertTextFormat.Snippet),
+            )
+            PropType.duration -> listOf(
+                CompletionEntry("duration", CompletionItemKind.Struct, "{ timeline$separator\${1:${allowedTimelineIds(schema).firstOrNull().orEmpty()}}, from$separator\${2:0}, to$separator\${3:0} }", "duration", InsertTextFormat.Snippet),
+            )
+            PropType.array -> {
+                val element = when (schema.items?.type) {
+                    PropType.string, PropType.text -> "\"\${1:value}\""
+                    PropType.number, PropType.instant -> "\${1:0}"
+                    else -> "\${1:value}"
+                }
+                listOf(CompletionEntry("array", CompletionItemKind.Struct, "[ $element ]", schema.items?.let { "array<${it.type.name}>" } ?: "array", InsertTextFormat.Snippet))
+            }
+        }
+        return entries
+    }
+
     private fun listValueCompletions(lines: List<String>, lineIndex: Int, parsedDocument: GraphDocument?): List<CompletionEntry>? {
         val parentKey = enclosingListKey(lines, lineIndex) ?: return null
         val prefix = lines[lineIndex].substringAfter('-').trim()
+        val documentKind = parsedDocument?.kind ?: inferredDocumentKind()
         return when (parentKey) {
-            "extends" -> when (parsedDocument) {
-                is NodeTypeDocument -> idCompletions(prefix, nodeTypeIds, "NodeType")
-                is RelTypeDocument -> idCompletions(prefix, relTypeIds, "RelType")
-                is TimelineDocument -> idCompletions(prefix, timelineIds, "Timeline")
+            "extends" -> when (documentKind) {
+                DocumentKind.NodeType -> idCompletions(prefix, nodeTypeIds, "NodeType")
+                DocumentKind.RelType -> idCompletions(prefix, relTypeIds, "RelType")
+                DocumentKind.Timeline -> idCompletions(prefix, timelineIds, "Timeline")
                 else -> null
             }
-            "from", "to" -> idCompletions(prefix, if (parsedDocument is TimelineDocument) timelineIds else nodeTypeIds, if (parsedDocument is TimelineDocument) "Timeline" else "NodeType")
+            "from", "to" -> idCompletions(prefix, if (documentKind == DocumentKind.Timeline) timelineIds else nodeTypeIds, if (documentKind == DocumentKind.Timeline) "Timeline" else "NodeType")
             "timeline" -> timelineSelectorCompletions(prefix)
             "validTime" -> listOf(CompletionEntry("timeline", CompletionItemKind.Field, "timeline: ", "validTime"))
             "mappings" -> listOf(CompletionEntry("kind", CompletionItemKind.Field, "kind: offset", "offset mapping"))
@@ -714,15 +1586,22 @@ internal class FrontMatterCompletionResolver(
         return propsIndex >= 0 || propertiesIndex >= 0
     }
 
+    private fun inferredDocumentKind(): DocumentKind? {
+        val raw = Regex("""(?m)^kind\s*:\s*([A-Za-z]+)""").find(text)?.groupValues?.get(1)
+        return DocumentKind.entries.firstOrNull { it.name == raw }
+    }
+
     private fun nodePropsContainer(path: List<String>): NodePropsContainer? {
         var currentProperties = nodePropsSchema
         var currentSpecialKeys = emptyList<String>()
+        var ownerSchema: ResolvedPropSchema? = null
         for (segment in path) {
             val schema = currentProperties[segment] ?: return null
+            ownerSchema = schema
             currentProperties = nestedProperties(schema)
             currentSpecialKeys = specialKeys(schema)
         }
-        return NodePropsContainer(currentProperties, currentSpecialKeys)
+        return NodePropsContainer(currentProperties, currentSpecialKeys, ownerSchema)
     }
 
     private fun nestedProperties(schema: ResolvedPropSchema): Map<String, ResolvedPropSchema> = emptyMap()
@@ -735,9 +1614,17 @@ internal class FrontMatterCompletionResolver(
         }
     }
 
+    private fun allowedTimelineIds(schema: ResolvedPropSchema?): List<String> {
+        val selectors = listOfNotNull(schema?.timeline) + schema?.timelines.orEmpty()
+        if (selectors.isEmpty()) return timelineIds
+        val explicit = selectors.filterIsInstance<TimelineSelector.Id>().map { it.id }.toSet()
+        return timelineIds.filter { it in explicit }
+    }
+
     private data class NodePropsContainer(
         val properties: Map<String, ResolvedPropSchema>,
         val specialKeys: List<String>,
+        val ownerSchema: ResolvedPropSchema? = null,
     )
 }
 
@@ -866,11 +1753,25 @@ internal class PropsPrefixScanner(
             if (cursor >= prefix.length) {
                 return keyCompletion(token)
             }
+            val schema = frames.lastOrNull()?.properties?.get(token)
+            if (prefix[cursor] == '(') {
+                val annotationEnd = findAnnotationEnd(prefix, cursor)
+                if (annotationEnd == null) {
+                    return annotationCompletion(prefix.substring(cursor + 1), schema)
+                }
+                cursor = annotationEnd
+                while (cursor < prefix.length && prefix[cursor].isWhitespace()) cursor++
+                if (cursor >= prefix.length) {
+                    return PropsCompletionResult(
+                        listOf(CompletionEntry("=", CompletionItemKind.Operator, "= ", "property value")),
+                    )
+                }
+            }
             if (prefix[cursor] != '=') {
                 return keyCompletion(token)
             }
             currentKey = token
-            currentSchema = frames.lastOrNull()?.properties?.get(token)
+            currentSchema = schema
             frames.lastOrNull()?.usedKeys?.add(token)
             expectingValue = true
             index = cursor + 1
@@ -886,7 +1787,7 @@ internal class PropsPrefixScanner(
         val char = prefix[index]
         if (char == '{') {
             val schema = currentSchema
-            frames.addLast(Frame(nestedProperties(schema), specialKeys(schema)))
+            frames.addLast(Frame(nestedProperties(schema), specialKeys(schema), ownerSchema = schema))
             expectingValue = false
             expectingDelimiter = false
             currentKey = null
@@ -942,16 +1843,14 @@ internal class PropsPrefixScanner(
         val key = currentKey ?: return null
         val schema = currentSchema
         val entries = when {
-            key == "timeline" -> timelineIds
+            schema != null -> typedValueCompletions(schema, prefix)
+            key == "timeline" -> allowedTimelineIds(frames.lastOrNull()?.ownerSchema)
                 .filter { it.startsWith(prefix) }
                 .map { CompletionEntry(it, CompletionItemKind.Value, it, "timeline") }
-            schema?.type == PropType.instant ->
-                listOf(
-                    CompletionEntry("0", CompletionItemKind.Value, "0", "instant timecode"),
-                    CompletionEntry("{", CompletionItemKind.Operator, "{  }", "instant object"),
-                ).filter { it.label.startsWith(prefix) || prefix.isEmpty() }
-            schema?.type == PropType.duration ->
-                listOf(CompletionEntry("{", CompletionItemKind.Operator, "{  }", "object"))
+            key in setOf("timecode", "from", "to") ->
+                listOf(CompletionEntry("0", CompletionItemKind.Value, "0", "number")).filter { it.label.startsWith(prefix) }
+            key == "value" ->
+                listOf(CompletionEntry("string", CompletionItemKind.Value, "\"\${1:value}\"", "display value", InsertTextFormat.Snippet))
             else -> emptyList()
         }
         return if (entries.isEmpty()) null else PropsCompletionResult(entries)
@@ -959,12 +1858,113 @@ internal class PropsPrefixScanner(
 
     private fun nestedProperties(schema: ResolvedPropSchema?): Map<String, ResolvedPropSchema> = emptyMap()
 
+    private fun typedValueCompletions(schema: ResolvedPropSchema, prefix: String): List<CompletionEntry> {
+        if (prefix.isNotEmpty() && schema.type !in setOf(PropType.number, PropType.instant)) return emptyList()
+        return when (schema.type) {
+            PropType.string -> listOf(CompletionEntry("string", CompletionItemKind.Value, "\"\${1:value}\"", "string", InsertTextFormat.Snippet))
+            PropType.text -> listOf(
+                CompletionEntry("text", CompletionItemKind.Value, "\"\${1:text}\"", "text (default)", InsertTextFormat.Snippet),
+                CompletionEntry("localized text", CompletionItemKind.Struct, "{ default = \"\${1:text}\" }", "localized text", InsertTextFormat.Snippet),
+            )
+            PropType.number -> listOf(CompletionEntry("0", CompletionItemKind.Value, "0", "number")).filter { it.label.startsWith(prefix) }
+            PropType.instant -> listOf(
+                CompletionEntry("0", CompletionItemKind.Value, "0", "instant timecode"),
+                CompletionEntry("{", CompletionItemKind.Struct, "{ timeline = \${1:${allowedTimelineIds(schema).firstOrNull().orEmpty()}}, timecode = \${2:0} }", "instant", InsertTextFormat.Snippet),
+            ).filter { prefix.isEmpty() || it.label.startsWith(prefix) }
+            PropType.duration -> listOf(
+                CompletionEntry("duration", CompletionItemKind.Struct, "{ timeline = \${1:${allowedTimelineIds(schema).firstOrNull().orEmpty()}}, from = \${2:0}, to = \${3:0} }", "duration", InsertTextFormat.Snippet),
+            )
+            PropType.array -> {
+                val element = when (schema.items?.type) {
+                    PropType.string, PropType.text -> "\"\${1:value}\""
+                    PropType.number, PropType.instant -> "\${1:0}"
+                    else -> "\${1:value}"
+                }
+                listOf(CompletionEntry("array", CompletionItemKind.Struct, "[ $element ]", schema.items?.let { "array<${it.type.name}>" } ?: "array", InsertTextFormat.Snippet))
+            }
+        }
+    }
+
+    private fun annotationCompletion(prefix: String, schema: ResolvedPropSchema?): PropsCompletionResult? {
+        val current = prefix.substringAfterLast(',').trimStart()
+        val entries = when {
+            '=' !in current -> {
+                val used = Regex("""(?:^|,)\s*([A-Za-z][A-Za-z0-9_-]*)\s*=""")
+                    .findAll(prefix).map { it.groupValues[1] }.toSet()
+                buildList {
+                    if ("validTime" !in used && "validTime".startsWith(current)) {
+                        add(CompletionEntry("validTime", CompletionItemKind.Property, "validTime=", "property validity"))
+                    }
+                    if (schema?.type == PropType.text && "key" !in used && "key".startsWith(current)) {
+                        add(CompletionEntry("key", CompletionItemKind.Property, "key=\"\${1:locale}\"", "text key", InsertTextFormat.Snippet))
+                    }
+                }
+            }
+            current.substringBefore('=').trim() == "key" ->
+                listOf(CompletionEntry("text key", CompletionItemKind.Value, "\"\${1:locale}\"", "text key", InsertTextFormat.Snippet))
+            current.substringBefore('=').trim() == "validTime" -> {
+                val valuePrefix = current.substringAfter('=').trimStart()
+                val openBounds = valuePrefix.lastIndexOf('(')
+                    .takeIf { it > valuePrefix.lastIndexOf(')') }
+                if (openBounds != null) {
+                    val boundsPrefix = valuePrefix.substring(openBounds + 1)
+                    val currentBound = boundsPrefix.substringAfterLast(',').trimStart()
+                    if ('=' in currentBound) {
+                        listOf(CompletionEntry("0", CompletionItemKind.Value, "0", "timecode"))
+                    } else {
+                        val usedBounds = Regex("""(?:^|,)\s*(from|to)\s*=""")
+                            .findAll(boundsPrefix).map { it.groupValues[1] }.toSet()
+                        listOf("from", "to")
+                            .filter { it !in usedBounds && it.startsWith(currentBound) }
+                            .map { CompletionEntry(it, CompletionItemKind.Property, "$it=", "validTime bound") }
+                    }
+                } else {
+                    val timelinePrefix = valuePrefix.substringAfterLast('[').substringAfterLast(',').trimStart()
+                    allowedTimelineIds(schema).filter { it.startsWith(timelinePrefix) }
+                        .map { CompletionEntry(it, CompletionItemKind.Reference, it, "Timeline") }
+                }
+            }
+            else -> emptyList()
+        }
+        return entries.takeIf { it.isNotEmpty() }?.let(::PropsCompletionResult)
+    }
+
+    private fun findAnnotationEnd(text: String, start: Int): Int? {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (index in start until text.length) {
+            val char = text[index]
+            if (inString) {
+                when {
+                    escaped -> escaped = false
+                    char == '\\' -> escaped = true
+                    char == '"' -> inString = false
+                }
+            } else {
+                when (char) {
+                    '"' -> inString = true
+                    '(' -> depth++
+                    ')' -> if (--depth == 0) return index + 1
+                }
+            }
+        }
+        return null
+    }
+
     private fun specialKeys(schema: ResolvedPropSchema?): List<String> {
         return when (schema?.type) {
             PropType.instant -> listOf("timeline", "value", "timecode")
             PropType.duration -> listOf("timeline", "from", "to")
             else -> emptyList()
         }
+    }
+
+    private fun allowedTimelineIds(schema: ResolvedPropSchema?): List<String> {
+        val selectors = listOfNotNull(schema?.timeline) + schema?.timelines.orEmpty()
+        if (selectors.isEmpty()) return timelineIds
+        val explicit = selectors.filterIsInstance<TimelineSelector.Id>().map { it.id }.toSet()
+        return timelineIds.filter { it in explicit }
     }
 
     private fun readIdentifier(text: String, start: Int): Int {
@@ -1004,6 +2004,7 @@ internal class PropsPrefixScanner(
     private data class Frame(
         val properties: Map<String, ResolvedPropSchema>,
         val specialKeys: List<String> = emptyList(),
+        val ownerSchema: ResolvedPropSchema? = null,
         val usedKeys: MutableSet<String> = linkedSetOf(),
     )
 
@@ -1185,11 +2186,243 @@ private data class IndexedDocument(
         return Range(positionAt(sourceRange.start), positionAt(sourceRange.end))
     }
 
+    fun endRange(): Range = rangeOf(SourceRange(text.length, text.length))
+
+    fun defaultId(): String = path.fileName.toString().substringBeforeLast('.').ifBlank { "node" }
+
+    fun frontMatterClosingOffset(): Int? {
+        if (!text.startsWith("---")) return null
+        return Regex("""(?m)^(---|\.\.\.)\s*$""")
+            .findAll(text)
+            .drop(1)
+            .firstOrNull()
+            ?.range?.first
+    }
+
+    fun yamlScalarRange(field: String, value: String): Range? {
+        val pattern = Regex(
+            """(?m)^\s*${Regex.escape(field)}\s*:\s*["']?(${Regex.escape(value)})["']?\s*(?:#.*)?$""",
+        )
+        val group = pattern.find(text)?.groups?.get(1) ?: return null
+        return rangeOf(SourceRange(group.range.first, group.range.last + 1))
+    }
+
+    fun yamlFieldRange(field: String): Range? {
+        val lines = sourceLines()
+        val index = lines.indexOfFirst { it.content.matches(Regex("""\s*${Regex.escape(field)}\s*:.*""")) }
+        if (index < 0) return null
+        val indent = lines[index].content.indexOfFirst { !it.isWhitespace() }.let { if (it < 0) 0 else it }
+        var endIndex = index + 1
+        while (endIndex < lines.size) {
+            val content = lines[endIndex].content
+            if (content.trim() in setOf("---", "...")) break
+            if (content.isNotBlank()) {
+                val nextIndent = content.indexOfFirst { !it.isWhitespace() }.let { if (it < 0) 0 else it }
+                if (nextIndent <= indent) break
+            }
+            endIndex++
+        }
+        val end = lines.getOrNull(endIndex)?.start ?: text.length
+        return rangeOf(SourceRange(lines[index].start, end))
+    }
+
+    fun yamlFieldKeyRange(field: String): Range? {
+        val match = Regex("""(?m)^\s*(${Regex.escape(field)})\s*:""").find(text) ?: return null
+        val group = match.groups[1] ?: return null
+        return rangeOf(SourceRange(group.range.first, group.range.last + 1))
+    }
+
+    fun propsInsertion(key: String, value: String): YamlInsertion {
+        val lines = sourceLines()
+        val propsIndex = lines.indexOfFirst { it.content.matches(Regex("""props\s*:\s*""")) }
+        if (propsIndex < 0) {
+            val offset = frontMatterClosingOffset() ?: text.length
+            return YamlInsertion(rangeOf(SourceRange(offset, offset)), "props:\n  $key: $value\n")
+        }
+        val end = blockEndOffset(lines, propsIndex, indent = 0)
+        return YamlInsertion(rangeOf(SourceRange(end, end)), "  $key: $value\n")
+    }
+
+    fun propSchemaInsertion(key: String): YamlInsertion {
+        val lines = sourceLines()
+        val propsIndex = lines.indexOfFirst { it.content.matches(Regex("""props\s*:\s*""")) }
+        if (propsIndex < 0) {
+            val offset = frontMatterClosingOffset() ?: text.length
+            return YamlInsertion(rangeOf(SourceRange(offset, offset)), "props:\n  $key:\n    type: string\n")
+        }
+        val end = blockEndOffset(lines, propsIndex, indent = 0)
+        return YamlInsertion(rangeOf(SourceRange(end, end)), "  $key:\n    type: string\n")
+    }
+
+    fun propertyAssignmentRange(key: String): Range? {
+        yamlFieldRange(key)?.let { return it }
+        val match = Regex("""\b${Regex.escape(key)}(?:\s*\([^)]*\))?\s*=""").find(text) ?: return null
+        val valueStart = match.range.last + 1
+        var end = inlineValueEnd(valueStart)
+        var start = match.range.first
+        while (end < text.length && text[end].isWhitespace()) end++
+        if (text.getOrNull(end) == ',') {
+            end++
+        } else {
+            var cursor = start - 1
+            while (cursor >= 0 && text[cursor].isWhitespace()) cursor--
+            if (text.getOrNull(cursor) == ',') start = cursor
+        }
+        return rangeOf(SourceRange(start, end))
+    }
+
+    fun propertyValueRange(key: String): Range? {
+        val yaml = Regex("""(?m)^\s*${Regex.escape(key)}\s*:\s*(\S.*)$""").find(text)
+        yaml?.groups?.get(1)?.let { group ->
+            val value = group.value.substringBefore('#').trimEnd()
+            return rangeOf(SourceRange(group.range.first, group.range.first + value.length))
+        }
+        val inline = Regex("""\b${Regex.escape(key)}(?:\s*\([^)]*\))?\s*=\s*""").find(text) ?: return null
+        val start = inline.range.last + 1
+        return rangeOf(SourceRange(start, inlineValueEnd(start)))
+    }
+
+    fun linkWhitespaceRange(): Range? {
+        val match = Regex("""@link(?:\([^)]*\))?(?:\{[^}]*\})?(\s+)(?=\[)""").findAll(text).lastOrNull()
+            ?: return null
+        val whitespace = match.groups[1] ?: return null
+        return rangeOf(SourceRange(whitespace.range.first, whitespace.range.last + 1))
+    }
+
+    fun lastRelationInnerRange(): Pair<Range, String>? {
+        val match = Regex("""\]\(([^)\n]*)\)""").findAll(text).lastOrNull() ?: return null
+        val inner = match.groups[1] ?: return null
+        return rangeOf(SourceRange(inner.range.first, inner.range.last + 1)) to inner.value
+    }
+
+    fun syntaxMarkerRange(message: String): Range? {
+        val marker = when {
+            message.startsWith("Unclosed @props") || message.startsWith("Invalid @props") || message.startsWith("@props ") -> "@props"
+            message.startsWith("Unclosed @link") || message.startsWith("Invalid @link") || message.startsWith("@link ") -> "@link"
+            message.startsWith("Relation ") || message.startsWith("Unclosed relation") -> "@link"
+            else -> return null
+        }
+        val start = text.lastIndexOf(marker)
+        if (start < 0) return null
+        val end = text.indexOf('\n', start).takeIf { it >= 0 } ?: text.length
+        return rangeOf(SourceRange(start, end))
+    }
+
+    fun tokenRange(token: String): Range? {
+        val match = Regex("""(?<![A-Za-z0-9_.:-])${Regex.escape(token)}(?![A-Za-z0-9_.:-])""")
+            .findAll(text).lastOrNull() ?: return null
+        return rangeOf(SourceRange(match.range.first, match.range.last + 1))
+    }
+
+    fun swapValidTimeBounds(timeline: String): List<TextEdit>? {
+        val inline = Regex(
+            """${Regex.escape(timeline)}\s*\(\s*from\s*=\s*(-?[0-9]+(?:\.[0-9]+)?)\s*,\s*to\s*=\s*(-?[0-9]+(?:\.[0-9]+)?)""",
+        ).find(text)
+        if (inline != null) {
+            val from = inline.groups[1] ?: return null
+            val to = inline.groups[2] ?: return null
+            return listOf(
+                TextEdit(rangeOf(SourceRange(from.range.first, from.range.last + 1)), to.value),
+                TextEdit(rangeOf(SourceRange(to.range.first, to.range.last + 1)), from.value),
+            )
+        }
+        val yaml = Regex(
+            """(?ms)timeline\s*:\s*${Regex.escape(timeline)}\s*$.*?from\s*:\s*(?:\n\s*timecode\s*:\s*)?(-?[0-9]+(?:\.[0-9]+)?).*?to\s*:\s*(?:\n\s*timecode\s*:\s*)?(-?[0-9]+(?:\.[0-9]+)?)""",
+        ).find(text) ?: return null
+        val from = yaml.groups[1] ?: return null
+        val to = yaml.groups[2] ?: return null
+        return listOf(
+            TextEdit(rangeOf(SourceRange(from.range.first, from.range.last + 1)), to.value),
+            TextEdit(rangeOf(SourceRange(to.range.first, to.range.last + 1)), from.value),
+        )
+    }
+
+    fun durationBoundInsertion(key: String): YamlInsertion? {
+        val inline = Regex("""\b${Regex.escape(key)}\s*=\s*\{\s*""").find(text)
+        if (inline != null) {
+            val offset = inline.range.last + 1
+            val suffix = if (text.getOrNull(offset) == '}') "from = 0" else "from = 0, "
+            return YamlInsertion(rangeOf(SourceRange(offset, offset)), suffix)
+        }
+        val lines = sourceLines()
+        val index = lines.indexOfFirst { it.content.matches(Regex("""\s*${Regex.escape(key)}\s*:\s*(?:\{\s*\})?\s*""")) }
+        if (index < 0) return null
+        val line = lines[index]
+        if ('{' in line.content) {
+            val valueRange = propertyValueRange(key) ?: return null
+            return YamlInsertion(valueRange, "{ from: 0 }")
+        }
+        val indent = line.content.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0) + 2
+        val offset = line.start + line.content.length + 1
+        return YamlInsertion(rangeOf(SourceRange(offset, offset)), " ".repeat(indent) + "from: 0\n")
+    }
+
+    fun mappingFieldInsertion(field: String, value: String): YamlInsertion? {
+        val lines = sourceLines()
+        val index = lines.indexOfLast { it.content.matches(Regex("""\s*-\s*kind\s*:\s*offset\s*""")) }
+        if (index < 0) return null
+        val line = lines[index]
+        val indent = line.content.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0) + 2
+        val offset = line.start + line.content.length + 1
+        return YamlInsertion(rangeOf(SourceRange(offset, offset)), " ".repeat(indent) + "$field: $value\n")
+    }
+
+    fun mappingColonInsertion(content: String): Range? {
+        val line = sourceLines().firstOrNull { it.content.trim() == content.trim() } ?: return null
+        val offset = line.start + line.content.length
+        return rangeOf(SourceRange(offset, offset))
+    }
+
+    fun normalizeStringList(field: String): TextEdit? {
+        val flow = Regex("""(?m)^(\s*)${Regex.escape(field)}\s*:\s*\[([^]]*)]\s*$""").find(text)
+        if (flow != null) {
+            val values = flow.groups[2]?.value.orEmpty().split(',')
+                .map { it.trim().trim('"', '\'') }
+                .filter(String::isNotEmpty)
+                .distinct()
+            val replacement = values.joinToString(prefix = "[", postfix = "]", separator = ", ")
+            val valueGroup = flow.groups[2] ?: return null
+            return TextEdit(
+                rangeOf(SourceRange(valueGroup.range.first - 1, valueGroup.range.last + 2)),
+                replacement,
+            )
+        }
+        val lines = sourceLines()
+        val index = lines.indexOfFirst { it.content.matches(Regex("""\s*${Regex.escape(field)}\s*:\s*""")) }
+        if (index < 0) return null
+        val fieldIndent = lines[index].content.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
+        val values = mutableListOf<String>()
+        var cursor = index + 1
+        while (cursor < lines.size) {
+            val content = lines[cursor].content
+            if (content.isBlank()) {
+                cursor++
+                continue
+            }
+            val indent = content.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
+            if (indent <= fieldIndent) break
+            Regex("""\s*-\s*(.*)""").matchEntire(content)?.groupValues?.get(1)
+                ?.trim()?.trim('"', '\'')?.takeIf(String::isNotEmpty)?.let(values::add)
+            cursor++
+        }
+        val distinct = values.distinct()
+        if (distinct.isEmpty()) return null
+        val end = lines.getOrNull(cursor)?.start ?: text.length
+        val replacement = buildString {
+            append(" ".repeat(fieldIndent)).append(field).append(":\n")
+            distinct.forEach { append(" ".repeat(fieldIndent + 2)).append("- ").append(it).append('\n') }
+        }
+        return TextEdit(rangeOf(SourceRange(lines[index].start, end)), replacement)
+    }
+
     fun isGraphDocumentCandidate(): Boolean {
-        if (!text.startsWith("---")) return false
-        val frontMatterEnd = text.indexOf("\n---", startIndex = 3).takeIf { it >= 0 } ?: return false
+        val hasGraphSyntax = "@props" in text || "@link" in text
+        if (!text.startsWith("---")) return hasGraphSyntax
+        val frontMatterEnd = text.indexOf("\n---", startIndex = 3).takeIf { it >= 0 } ?: text.length
         val frontMatter = text.substring(3, frontMatterEnd)
-        return Regex("""(?m)^kind:\s*["']?(Node|Media|NodeType|RelType|Timeline)["']?\s*$""").containsMatchIn(frontMatter)
+        val hasId = Regex("""(?m)^id\s*:""").containsMatchIn(frontMatter)
+        val kind = Regex("""(?m)^kind\s*:\s*["']?([^\s"']+)""").find(frontMatter)?.groupValues?.get(1)
+        return hasGraphSyntax || kind in setOf("Node", "Media", "NodeType", "RelType", "Timeline") || (hasId && kind != null)
     }
 
     private fun positionAt(offset: Int): Position {
@@ -1197,7 +2430,77 @@ private data class IndexedDocument(
         val line = lineStarts.indexOfLast { it <= safeOffset }.coerceAtLeast(0)
         return Position(line, safeOffset - lineStarts[line])
     }
+
+    private fun sourceLines(): List<SourceLine> = buildList {
+        var start = 0
+        text.split('\n').forEach { line ->
+            add(SourceLine(start, line))
+            start += line.length + 1
+        }
+    }
+
+    private fun blockEndOffset(lines: List<SourceLine>, startIndex: Int, indent: Int): Int {
+        for (index in startIndex + 1 until lines.size) {
+            val content = lines[index].content
+            if (content.trim() in setOf("---", "...")) return lines[index].start
+            if (content.isBlank()) continue
+            val nextIndent = content.indexOfFirst { !it.isWhitespace() }.let { if (it < 0) 0 else it }
+            if (nextIndent <= indent) return lines[index].start
+        }
+        return text.length
+    }
+
+    private fun inlineValueEnd(start: Int): Int {
+        var index = start
+        while (index < text.length && text[index].isWhitespace()) index++
+        val valueStart = index
+        if (text.getOrNull(index) == '"') {
+            index++
+            var escaped = false
+            while (index < text.length) {
+                val char = text[index++]
+                when {
+                    escaped -> escaped = false
+                    char == '\\' -> escaped = true
+                    char == '"' -> return index
+                }
+            }
+            return text.length
+        }
+        val open = text.getOrNull(index)
+        if (open == '{' || open == '[') {
+            val close = if (open == '{') '}' else ']'
+            var depth = 0
+            var inString = false
+            var escaped = false
+            while (index < text.length) {
+                val char = text[index++]
+                if (inString) {
+                    when {
+                        escaped -> escaped = false
+                        char == '\\' -> escaped = true
+                        char == '"' -> inString = false
+                    }
+                } else {
+                    when (char) {
+                        '"' -> inString = true
+                        open -> depth++
+                        close -> if (--depth == 0) return index
+                    }
+                }
+            }
+            return text.length
+        }
+        while (index < text.length && text[index] !in setOf(',', '}', '\n')) index++
+        return index.coerceAtLeast(valueStart)
+    }
 }
+
+private data class SourceLine(val start: Int, val content: String)
+
+private data class YamlInsertion(val range: Range, val text: String)
+
+private data class SyntaxFix(val title: String, val marker: String, val closing: String, val before: String?)
 
 private data class IndexedDefinition(
     val uri: String,

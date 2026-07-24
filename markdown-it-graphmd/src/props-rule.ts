@@ -113,12 +113,64 @@ export function propsInlineRule(state: any, silent: boolean): boolean {
 
 export function renderPropsBlock(tokens: any[], idx: number): string {
   const meta = (tokens[idx].meta ?? {}) as PropsTokenMeta;
-  const props = meta.props ? ` data-props="${escapeAttr(meta.props)}"` : "";
-  return `<div class="graphmd-props"${props} hidden></div>`;
+  return renderBoundProps("div", meta.props);
 }
 
 export function renderPropsInline(tokens: any[], idx: number): string {
   const meta = (tokens[idx].meta ?? {}) as PropsTokenMeta;
-  const props = meta.props ? ` data-props="${escapeAttr(meta.props)}"` : "";
-  return `<span class="graphmd-props"${props} hidden></span>`;
+  return renderBoundProps("span", meta.props);
+}
+
+function renderBoundProps(tag: "div" | "span", propsJson: string | null): string {
+  if (!propsJson) return `<${tag} class="graphmd-props"></${tag}>`;
+  let props: Record<string, unknown>;
+  try {
+    props = JSON.parse(propsJson) as Record<string, unknown>;
+  } catch {
+    return `<${tag} class="graphmd-props"></${tag}>`;
+  }
+  const values = Object.entries(props).map(([name, value]) => {
+    const timelines = displayTimelines(value);
+    const superscript = timelines.length > 0
+      ? `<sup class="graphmd-prop-valid-time">${escapeText(timelines.join(","))}</sup>`
+      : "";
+    return `<span data-props-name="${escapeAttr(name)}"><span class="graphmd-prop-value">${escapeText(displayValue(value))}</span><span class="graphmd-prop-annotations">${superscript}<sub class="graphmd-prop-name">${escapeText(name)}</sub></span></span>`;
+  }).join("");
+  return `<${tag} class="graphmd-props" data-props-bind="${escapeAttr(propsJson)}">${values}</${tag}>`;
+}
+
+function displayValue(value: unknown): string {
+  if (Array.isArray(value) && value.every((entry) => isRecord(entry) && "value" in entry)) {
+    const values = value.map((entry) => (entry as Record<string, unknown>).value);
+    return values.length === 1 ? displayValue(values[0]) : JSON.stringify(values);
+  }
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (isRecord(value) && typeof value.default === "string") {
+    return value.default;
+  }
+  return JSON.stringify(value);
+}
+
+function displayTimelines(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const timelines: string[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry) || !Array.isArray(entry.validTime)) continue;
+    for (const validTime of entry.validTime) {
+      if (isRecord(validTime) && typeof validTime.timeline === "string" && !timelines.includes(validTime.timeline)) {
+        timelines.push(validTime.timeline);
+      }
+    }
+  }
+  return timelines;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function escapeText(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }

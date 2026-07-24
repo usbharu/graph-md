@@ -936,19 +936,25 @@ Aliceの名前は@props{name = "Alice"}です。
 <h1 id="alice">Alice</h1>
 <p>Aliceの名前は<span
         data-props-bind="{&quot;name&quot;:&quot;Alice&quot;}"><span
-        data-props-name="name">Alice</span></span></p>
+        data-props-name="name"><span class="graphmd-prop-value">Alice</span><span
+        class="graphmd-prop-annotations"><sub
+        class="graphmd-prop-name">name</sub></span></span></span></p>
 ```
 
-`@props`はメタデータの宣言だけではなく、文中へbindしたPropertyの値を出力する記法である。プレビューでは、`@props`に記述された各Propertyについて`data-props-name`を持つ要素を生成し、その要素のテキストとしてPropertyの値を出力しなければならない。複数のPropertyを指定した場合は記述順にすべて出力する。文字列と数値はその文字列表現を出力し、textは表示対象として選択されたキーの値、その他の構造化された値はJSON表現を出力する。値を安全なテキストとしてエスケープし、値をHTMLとして解釈してはならない。外側の`data-props-bind`には、bindしたすべてのPropertyをJSONとして保持する。
+`@props`はメタデータの宣言だけではなく、文中へbindしたProperty名、値およびvalidTimeを出力する記法である。プレビューでは、`@props`に記述された各Propertyについて`data-props-name`を持つ要素を生成し、最初にPropertyの値を出力する。値の直後には注釈領域を設け、validTimeのTimeline IDを上付き文字、Property名を下付き文字として、同じ水平位置の上下に同時表示する。validTimeがない場合は上付き文字を省略する。複数のvalidTimeがある場合は記述順を保ち、重複を除いて`,`で結合する。値と注釈の間に空白や区切り文字を自動挿入しない。複数のPropertyを指定した場合は記述順にすべて出力する。文字列と数値はその文字列表現を出力し、textは表示対象として選択されたキーの値、その他の構造化された値はJSON表現を出力する。Property名、値およびTimeline IDを安全なテキストとしてエスケープし、HTMLとして解釈してはならない。外側の`data-props-bind`には、bindしたすべてのPropertyをJSONとして保持する。
 
-例えば次の記述では、プレビュー上に`Alice`と`20`の両方をこの順序で出力する。
+例えば`年齢は@props(validTime = CommonEra){age = 25}歳`は、プレビュー上で「年齢は25<sup>CommonEra</sup><sub>age</sub>歳」と表示する。`CommonEra`と`age`は値の直後の同じ水平位置に、それぞれ上下へ積み重ねる。説明上のテキスト表記では`年齢は25^CommonEra^_age_歳`と表す。
+
+`validTime`引数では`validTime=CommonEra`と`validTime = CommonEra`の両方を許容する。`validTime`と`=`の間、および`=`と値の間には任意個の空白を記述できる。この空白規則は`@props`と`@link`のvalidTime引数の両方に適用する。
+
+例えば次の記述では、プレビュー上に`Alice`、下付き文字の`name`、`20`、下付き文字の`age`をこの順序で出力する。
 
 ```markdown
 @props{name="Alice",age=20}
 ```
 
 ```html
-<span data-props-bind="{&quot;name&quot;:&quot;Alice&quot;,&quot;age&quot;:20}"><span data-props-name="name">Alice</span><span data-props-name="age">20</span></span>
+<span data-props-bind="{&quot;name&quot;:&quot;Alice&quot;,&quot;age&quot;:20}"><span data-props-name="name"><span class="graphmd-prop-value">Alice</span><span class="graphmd-prop-annotations"><sub class="graphmd-prop-name">name</sub></span></span><span data-props-name="age"><span class="graphmd-prop-value">20</span><span class="graphmd-prop-annotations"><sub class="graphmd-prop-name">age</sub></span></span></span>
 ```
 
 ##### @propsのvalidTimeの主張

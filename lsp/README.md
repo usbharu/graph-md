@@ -8,6 +8,16 @@
 - ワークスペース内どこにあっても `kind: Node` 文書を索引
 - `type`, `extends`, `from`, `to` の補完・定義ジャンプ
 - `@link(validTime=...){props}[label](target relType)` の `target` / `relType` 補完・定義ジャンプ
+- NodeType / RelType の Property 定義に従うキー・値型・Timeline の補完と入力スニペット
+- RelType の `from` / `to` 制約に従った Link 対象 Node・RelType の絞り込み
+- 入力途中の front matter でも `kind` / `type` を推論し、既入力キーを除外した文脈補完
+- 診断から利用できる VS Code Quick Fix
+  - 未定義の Node / NodeType / RelType / Timeline を既存定義へ置換、または定義ファイルを作成
+  - front matter の追加・閉じ、必須フィールド、未知フィールド、不正な kind / Property type / index の修正
+  - 必須 Property の追加、未知 Property の削除または NodeType / RelType への宣言
+  - 重複 ID、YAML 値型・リスト、Timeline selector、継承・from/to 制約の修正
+  - `@props` / `@link` / relation の引数・空白・閉じ括弧・target/type 形式の修正
+  - validTime の逆転、許可されない Timeline、duration 境界、relation endpoint 制約の修正
 - `@props(validTime=...){...}` と `@link(validTime=...){...}[label](target relType)` のシンタックスハイライト
 - `core` の `GraphCompiler` による未定義参照や制約違反の診断
 - Hover と references

@@ -143,13 +143,16 @@ class BodySyntaxExtractorTest {
     @Test
     fun `supports relation without props and ignores props without brace`() {
         val body = """
-            @link{}[Bob](bob friendOf)
+            @link[Bob](bob friendOf)
+            @link(validTime=CommonEra)[Carol](carol friendOf)
             @props name = "ignored"
         """.trimIndent()
 
         val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
 
-        assertEquals(1, extracted.relations.size)
+        assertEquals(2, extracted.relations.size)
+        assertTrue(extracted.relations.all { it.props.isEmpty() })
+        assertEquals("CommonEra", extracted.relations[1].validTime.single().timeline)
         assertEquals(0, extracted.propsBlocks.size)
     }
 
@@ -224,5 +227,20 @@ class BodySyntaxExtractorTest {
         val nameEntry = ((props.getValue("name") as RawArray).values.single() as RawObject)
         val nameTime = (nameEntry.values.getValue("validTime") as RawArray).values.single() as RawObject
         assertEquals("Branch", (nameTime.values.getValue("timeline") as RawString).value)
+    }
+
+    @Test
+    fun `allows spaces around validTime equals in directive arguments`() {
+        val extracted = extractor.extract(
+            """@props(validTime = CommonEra){age=25} @link(validTime = CommonEra)[Bob](bob friendOf)""",
+            "/tmp/alice.md",
+            "alice",
+        )
+
+        assertTrue(extracted.diagnostics.isEmpty(), extracted.diagnostics.joinToString("\n") { it.message })
+        val ageEntry = ((extracted.propsBlocks.single().props.getValue("age") as RawArray).values.single() as RawObject)
+        val ageTime = (ageEntry.values.getValue("validTime") as RawArray).values.single() as RawObject
+        assertEquals("CommonEra", (ageTime.values.getValue("timeline") as RawString).value)
+        assertEquals("CommonEra", extracted.relations.single().validTime.single().timeline)
     }
 }
