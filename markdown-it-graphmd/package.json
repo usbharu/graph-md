@@ -19,11 +19,11 @@
   ],
   "scripts": {
     "sync-vendor": "bash sync-vendor.sh",
-    "prebuild": "npm run sync-vendor",
+    "prebuild": "pnpm run sync-vendor",
     "build": "tsup",
-    "pretypecheck": "npm run sync-vendor",
+    "pretypecheck": "pnpm run sync-vendor",
     "typecheck": "tsc --noEmit",
-    "pretest": "npm run sync-vendor",
+    "pretest": "pnpm run sync-vendor",
     "test": "vitest run"
   },
   "peerDependencies": {

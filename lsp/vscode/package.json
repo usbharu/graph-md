@@ -75,9 +75,9 @@
   "scripts": {
     "typecheck": "tsc -p ./tsconfig.json --noEmit",
     "sync-server": "bash sync-server.sh",
-    "vscode:prepublish": "npm run sync-server && node esbuild.mjs --production",
-    "package": "vsce package",
-    "build": "npm run sync-server && node esbuild.mjs",
+    "vscode:prepublish": "pnpm run sync-server && node esbuild.mjs --production",
+    "package": "pnpm dlx @vscode/vsce@3.9.2 package",
+    "build": "pnpm run sync-server && node esbuild.mjs",
     "compile": "tsc -p ./tsconfig.json"
   },
   "dependencies": {},

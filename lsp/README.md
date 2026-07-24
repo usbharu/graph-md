@@ -25,12 +25,11 @@
 ## セットアップ
 
 ```bash
-cd lsp/vscode
-npm install
-npm run build      # Kotlin LSP と core/JS をビルドして server/ に同梱し、拡張を esbuild でバンドル
+pnpm install
+pnpm --dir lsp/vscode build  # Kotlin LSP と core/JS をビルドして server/ に同梱し、拡張を esbuild でバンドル
 ```
 
-`npm run build` は内部で `./gradlew :lsp:installDist` を実行して LSP 配布物を `lsp/vscode/server/` にコピーし、`src/extension.ts` を `dist/extension.js` にバンドルします。Markdown プレビュー用プラグイン（`markdown-it-graphmd`）もバンドル済みです。
+`pnpm --dir lsp/vscode build` は内部で `./gradlew :lsp:installDist` を実行して LSP 配布物を `lsp/vscode/server/` にコピーし、`src/extension.ts` を `dist/extension.js` にバンドルします。Markdown プレビュー用プラグイン（`markdown-it-graphmd`）もバンドル済みです。
 
 ## 配置ルール
 
@@ -40,7 +39,7 @@ npm run build      # Kotlin LSP と core/JS をビルドして server/ に同梱
 
 ## 使い方
 
-1. `lsp/vscode` で `npm install` と `npm run build` を実行する
+1. リポジトリルートで `pnpm install` と `pnpm --dir lsp/vscode build` を実行する
 2. VSCode で `lsp/vscode` を開く
 3. `F5` を押して Extension Development Host を起動する
 4. 起動した Extension Host で GraphMD のワークスペースを開く
@@ -50,9 +49,8 @@ npm run build      # Kotlin LSP と core/JS をビルドして server/ に同梱
 ## 配布 (vsix)
 
 ```bash
-cd lsp/vscode
-npm install
-npx @vscode/vsce package     # vscode:prepublish が server 同梱 + esbuild バンドルを実行
+pnpm install
+pnpm --dir lsp/vscode package  # vscode:prepublish が server 同梱 + esbuild バンドルを実行
 ```
 
 `dist/` と `server/` がパッケージに含まれ、`node_modules` と `src/` は除外されます（依存は `dist/extension.js` にバンドル済み）。

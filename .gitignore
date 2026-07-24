@@ -45,6 +45,8 @@ bin/
 .DS_Store
 
 ### LSP ###
+node_modules/
+.pnpm-store/
 lsp/node_modules/
 lsp/dist/
 lsp/*.vsix

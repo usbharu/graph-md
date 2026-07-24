@@ -1,0 +1,5 @@
+packages:
+  - markdown-it-graphmd
+  - lsp/vscode
+allowBuilds:
+  esbuild: true

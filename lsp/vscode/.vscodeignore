@@ -5,4 +5,3 @@ src/**
 esbuild.mjs
 sync-server.sh
 tsconfig.json
-package-lock.json
