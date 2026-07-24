@@ -22,12 +22,33 @@ data class SymbolReference(
     val range: SourceRange,
 )
 
+enum class PropertyOwnerKind {
+    NodeType,
+    RelType,
+}
+
+data class PropertyDefinition(
+    val name: String,
+    val ownerId: String,
+    val ownerKind: PropertyOwnerKind,
+    val range: SourceRange,
+)
+
+data class PropertyReference(
+    val name: String,
+    val ownerId: String,
+    val ownerKind: PropertyOwnerKind,
+    val range: SourceRange,
+)
+
 data class GraphDocumentAnalysis(
     val text: String,
     val parsed: ParsedGraphDocumentResult,
     val frontMatterEndOffset: Int,
     val definitions: List<SymbolDefinition>,
     val references: List<SymbolReference>,
+    val propertyDefinitions: List<PropertyDefinition> = emptyList(),
+    val propertyReferences: List<PropertyReference> = emptyList(),
 )
 
 class GraphDocumentAnalyzer {
@@ -39,15 +60,17 @@ class GraphDocumentAnalyzer {
         val document = parsed.document
         val lines = normalized.split('\n')
         if (lines.firstOrNull() != "---") {
-            return GraphDocumentAnalysis(normalized, parsed, 0, emptyList(), emptyList())
+            return GraphDocumentAnalysis(normalized, parsed, 0, emptyList(), emptyList(), emptyList(), emptyList())
         }
         val endLine = lines.drop(1).indexOfFirst { it == "---" || it == "..." }.let { if (it >= 0) it + 1 else -1 }
         if (endLine < 0) {
-            return GraphDocumentAnalysis(normalized, parsed, 0, emptyList(), emptyList())
+            return GraphDocumentAnalysis(normalized, parsed, 0, emptyList(), emptyList(), emptyList(), emptyList())
         }
         val lineStarts = computeLineStarts(normalized)
         val definitions = mutableListOf<SymbolDefinition>()
         val references = mutableListOf<SymbolReference>()
+        val propertyDefinitions = mutableListOf<PropertyDefinition>()
+        val propertyReferences = mutableListOf<PropertyReference>()
         var currentListField: String? = null
 
         for (lineIndex in 1 until endLine) {
@@ -124,15 +147,52 @@ class GraphDocumentAnalyzer {
         }
 
         collectTimelineReferences(lines, lineStarts, endLine, document, references)
+        val yamlPropertyKeys = extractYamlPropertyKeys(lines, lineStarts, endLine)
+        when (document) {
+            is NodeDocument -> yamlPropertyKeys.forEach { key ->
+                propertyReferences += PropertyReference(
+                    key.name,
+                    document.type,
+                    PropertyOwnerKind.NodeType,
+                    key.range,
+                )
+            }
+            is NodeTypeDocument -> yamlPropertyKeys.forEach { key ->
+                propertyDefinitions += PropertyDefinition(
+                    key.name,
+                    document.id,
+                    PropertyOwnerKind.NodeType,
+                    key.range,
+                )
+            }
+            is RelTypeDocument -> yamlPropertyKeys.forEach { key ->
+                propertyDefinitions += PropertyDefinition(
+                    key.name,
+                    document.id,
+                    PropertyOwnerKind.RelType,
+                    key.range,
+                )
+            }
+            else -> Unit
+        }
 
         if (document is NodeDocument) {
             val bodyOffset = lineStarts[endLine] + lines[endLine].length + 1
             references += extractBodyReferences(document.body, bodyOffset)
             references += extractInlineTimelineReferences(document.body, bodyOffset)
+            propertyReferences += extractBodyPropertyReferences(document.body, bodyOffset, document.type)
         }
 
         val frontMatterEndOffset = lineStarts[endLine] + lines[endLine].length + 1
-        return GraphDocumentAnalysis(normalized, parsed, frontMatterEndOffset, definitions, references)
+        return GraphDocumentAnalysis(
+            normalized,
+            parsed,
+            frontMatterEndOffset,
+            definitions,
+            references,
+            propertyDefinitions,
+            propertyReferences,
+        )
     }
 
     fun findReferenceAt(analysis: GraphDocumentAnalysis, offset: Int): SymbolReference? {
@@ -141,6 +201,14 @@ class GraphDocumentAnalyzer {
 
     fun findDefinitionAt(analysis: GraphDocumentAnalysis, offset: Int): SymbolDefinition? {
         return analysis.definitions.firstOrNull { offset in it.range.start..it.range.end }
+    }
+
+    fun findPropertyReferenceAt(analysis: GraphDocumentAnalysis, offset: Int): PropertyReference? {
+        return analysis.propertyReferences.firstOrNull { offset in it.range.start..it.range.end }
+    }
+
+    fun findPropertyDefinitionAt(analysis: GraphDocumentAnalysis, offset: Int): PropertyDefinition? {
+        return analysis.propertyDefinitions.firstOrNull { offset in it.range.start..it.range.end }
     }
 
     fun inferCompletionKind(analysis: GraphDocumentAnalysis, offset: Int): ReferenceTargetKind? {
@@ -446,6 +514,227 @@ class GraphDocumentAnalyzer {
         return references
     }
 
+    private fun extractYamlPropertyKeys(
+        lines: List<String>,
+        lineStarts: List<Int>,
+        endLine: Int,
+    ): List<PropertyKey> {
+        val propsLine = (1 until endLine).firstOrNull { lineIndex ->
+            lines[lineIndex].matches(Regex("""^props\s*:\s*(?:#.*)?$"""))
+        } ?: return emptyList()
+        val candidates = mutableListOf<YamlPropertyKey>()
+        for (lineIndex in propsLine + 1 until endLine) {
+            val line = lines[lineIndex]
+            if (line.isBlank() || line.trimStart().startsWith("#")) continue
+            val indent = line.indexOfFirst { !it.isWhitespace() }.let { if (it < 0) line.length else it }
+            if (indent == 0) break
+            val content = line.drop(indent)
+            val colonIndex = content.indexOf(':')
+            if (colonIndex <= 0) continue
+            val rawKey = content.substring(0, colonIndex)
+            val key = rawKey.trim()
+            if (key.isEmpty()) continue
+            val keyStart = indent + rawKey.indexOf(key)
+            candidates += YamlPropertyKey(
+                indent,
+                PropertyKey(
+                    key,
+                    SourceRange(
+                        lineStarts[lineIndex] + keyStart,
+                        lineStarts[lineIndex] + keyStart + key.length,
+                    ),
+                ),
+            )
+        }
+        val propertyIndent = candidates.minOfOrNull { it.indent } ?: return emptyList()
+        return candidates.filter { it.indent == propertyIndent }.map { it.key }
+    }
+
+    private fun extractBodyPropertyReferences(
+        body: String,
+        baseOffset: Int,
+        nodeTypeId: String,
+    ): List<PropertyReference> {
+        val references = mutableListOf<PropertyReference>()
+        val masked = maskCodeRegions(body)
+        var index = 0
+        while (index < masked.length) {
+            when {
+                masked.startsWith("@props", index) &&
+                    !isEscaped(masked, index) &&
+                    !isIdentifierPart(masked.getOrNull(index + "@props".length)) -> {
+                    var cursor = index + "@props".length
+                    if (masked.getOrNull(cursor) == '(') {
+                        val argumentsEnd = readBalancedEnd(masked, cursor, '(', ')')
+                        if (argumentsEnd == null) {
+                            index += 1
+                            continue
+                        }
+                        cursor = argumentsEnd
+                    }
+                    if (masked.getOrNull(cursor) == '{') {
+                        inlineObjectKeys(body, cursor).forEach { key ->
+                            references += PropertyReference(
+                                key.name,
+                                nodeTypeId,
+                                PropertyOwnerKind.NodeType,
+                                key.range.shiftedBy(baseOffset),
+                            )
+                        }
+                        index = readBalancedEnd(masked, cursor, '{', '}') ?: masked.length
+                    } else {
+                        index += 1
+                    }
+                }
+                masked.startsWith("@link", index) &&
+                    !isEscaped(masked, index) &&
+                    !isIdentifierPart(masked.getOrNull(index + "@link".length)) -> {
+                    val extracted = extractRelationPropertyReferences(body, masked, index, baseOffset)
+                    references += extracted.references
+                    index = extracted.nextIndex
+                }
+                else -> index += 1
+            }
+        }
+        return references
+    }
+
+    private fun extractRelationPropertyReferences(
+        body: String,
+        masked: String,
+        start: Int,
+        baseOffset: Int,
+    ): ExtractedPropertyReferences {
+        var cursor = start + "@link".length
+        if (masked.getOrNull(cursor) == '(') {
+            cursor = readBalancedEnd(masked, cursor, '(', ')')
+                ?: return ExtractedPropertyReferences(emptyList(), start + 1)
+        }
+        if (masked.getOrNull(cursor) != '{') {
+            return ExtractedPropertyReferences(emptyList(), start + 1)
+        }
+        val braceStart = cursor
+        val braceEnd = readBalancedEnd(masked, braceStart, '{', '}')
+            ?: return ExtractedPropertyReferences(emptyList(), masked.length)
+        if (masked.getOrNull(braceEnd) != '[') {
+            return ExtractedPropertyReferences(emptyList(), braceEnd)
+        }
+        val closeLabel = findUnescaped(masked, ']', braceEnd + 1)
+            ?: return ExtractedPropertyReferences(emptyList(), braceEnd)
+        if (masked.getOrNull(closeLabel + 1) != '(') {
+            return ExtractedPropertyReferences(emptyList(), closeLabel + 1)
+        }
+        val closeParen = findUnescaped(masked, ')', closeLabel + 2)
+            ?: return ExtractedPropertyReferences(emptyList(), closeLabel + 1)
+        val relType = RelationTargetParser.parse(body.substring(closeLabel + 2, closeParen))?.second
+            ?: return ExtractedPropertyReferences(emptyList(), closeParen + 1)
+        val references = inlineObjectKeys(body, braceStart).map { key ->
+            PropertyReference(
+                key.name,
+                relType,
+                PropertyOwnerKind.RelType,
+                key.range.shiftedBy(baseOffset),
+            )
+        }
+        return ExtractedPropertyReferences(references, closeParen + 1)
+    }
+
+    private fun inlineObjectKeys(text: String, braceStart: Int): List<PropertyKey> {
+        val keys = mutableListOf<PropertyKey>()
+        var index = braceStart + 1
+        while (index < text.length) {
+            while (index < text.length && (text[index].isWhitespace() || text[index] == ',')) index++
+            if (text.getOrNull(index) == '}' || index >= text.length) break
+            if (!isIdentifierStart(text[index])) {
+                index++
+                continue
+            }
+            val keyStart = index
+            val keyEnd = readIdentifierEnd(text, keyStart)
+            var cursor = skipWhitespace(text, keyEnd)
+            if (text.getOrNull(cursor) == '(') {
+                cursor = readBalancedEnd(text, cursor, '(', ')') ?: break
+                cursor = skipWhitespace(text, cursor)
+            }
+            if (text.getOrNull(cursor) != '=') {
+                index = keyEnd
+                continue
+            }
+            keys += PropertyKey(text.substring(keyStart, keyEnd), SourceRange(keyStart, keyEnd))
+            index = skipInlinePropertyValue(text, cursor + 1)
+        }
+        return keys
+    }
+
+    private fun skipInlinePropertyValue(text: String, start: Int): Int {
+        var index = skipWhitespace(text, start)
+        while (index < text.length) {
+            when (text[index]) {
+                '"' -> index = readQuotedEnd(text, index)
+                '{' -> index = readBalancedEnd(text, index, '{', '}') ?: return text.length
+                '[' -> index = readBalancedEnd(text, index, '[', ']') ?: return text.length
+                '(' -> index = readBalancedEnd(text, index, '(', ')') ?: return text.length
+                ',' -> return index + 1
+                '}' -> return index
+                else -> {
+                    if (text[index].isWhitespace()) {
+                        val candidate = skipWhitespace(text, index)
+                        if (looksLikeInlineProperty(text, candidate)) return candidate
+                        index = candidate
+                    } else {
+                        index++
+                    }
+                }
+            }
+        }
+        return index
+    }
+
+    private fun looksLikeInlineProperty(text: String, start: Int): Boolean {
+        if (!isIdentifierStart(text.getOrNull(start))) return false
+        var cursor = skipWhitespace(text, readIdentifierEnd(text, start))
+        if (text.getOrNull(cursor) == '(') {
+            cursor = readBalancedEnd(text, cursor, '(', ')') ?: return false
+            cursor = skipWhitespace(text, cursor)
+        }
+        return text.getOrNull(cursor) == '='
+    }
+
+    private fun readIdentifierEnd(text: String, start: Int): Int {
+        var index = start + 1
+        while (isIdentifierPart(text.getOrNull(index))) index++
+        return index
+    }
+
+    private fun readQuotedEnd(text: String, start: Int): Int {
+        var index = start + 1
+        var escaped = false
+        while (index < text.length) {
+            when {
+                escaped -> escaped = false
+                text[index] == '\\' -> escaped = true
+                text[index] == '"' -> return index + 1
+            }
+            index++
+        }
+        return text.length
+    }
+
+    private fun skipWhitespace(text: String, start: Int): Int {
+        var index = start
+        while (index < text.length && text[index].isWhitespace()) index++
+        return index
+    }
+
+    private fun isIdentifierStart(char: Char?): Boolean =
+        char != null && (char.isLetter() || char == '_')
+
+    private fun isIdentifierPart(char: Char?): Boolean =
+        char != null && (char.isLetterOrDigit() || char in setOf('_', '.', ':', '-'))
+
+    private fun SourceRange.shiftedBy(offset: Int): SourceRange =
+        SourceRange(start + offset, end + offset)
+
     private fun listFieldKind(field: String, document: GraphDocument?): ReferenceTargetKind? {
         return when (field) {
             "timeline" -> ReferenceTargetKind.Timeline
@@ -477,4 +766,19 @@ class GraphDocumentAnalyzer {
             else -> trimmed
         }
     }
+
+    private data class PropertyKey(
+        val name: String,
+        val range: SourceRange,
+    )
+
+    private data class YamlPropertyKey(
+        val indent: Int,
+        val key: PropertyKey,
+    )
+
+    private data class ExtractedPropertyReferences(
+        val references: List<PropertyReference>,
+        val nextIndex: Int,
+    )
 }

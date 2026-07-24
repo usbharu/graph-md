@@ -390,4 +390,140 @@ class GraphDocumentAnalyzerTest {
         assertEquals("alice", analysis.definitions.single().id)
         assertEquals("Person", analysis.references.single { it.field == "type" }.targetId)
     }
+
+    @Test
+    fun `extracts property definitions and yaml node property references`() {
+        val typeText = """
+            ---
+            id: Person
+            kind: NodeType
+            props:
+              name:
+                type: string
+              age:
+                type: number
+            ---
+        """.trimIndent()
+        val typeAnalysis = analyzer.analyze(typeText, "/tmp/Person.md")
+
+        assertEquals(listOf("name", "age"), typeAnalysis.propertyDefinitions.map { it.name })
+        assertTrue(typeAnalysis.propertyDefinitions.all { it.ownerId == "Person" })
+        assertTrue(typeAnalysis.propertyDefinitions.all { it.ownerKind == PropertyOwnerKind.NodeType })
+        assertEquals(
+            "name",
+            typeText.substring(
+                typeAnalysis.propertyDefinitions.first().range.start,
+                typeAnalysis.propertyDefinitions.first().range.end,
+            ),
+        )
+
+        val nodeText = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            props:
+                name: Alice
+                age:
+                  value: 20
+                  validTime: []
+            ---
+        """.trimIndent()
+        val nodeAnalysis = analyzer.analyze(nodeText, "/tmp/alice.md")
+
+        assertEquals(listOf("name", "age"), nodeAnalysis.propertyReferences.map { it.name })
+        assertTrue(nodeAnalysis.propertyReferences.all { it.ownerId == "Person" })
+        assertTrue(nodeAnalysis.propertyReferences.none { it.name in setOf("value", "validTime") })
+    }
+
+    @Test
+    fun `extracts unicode and non identifier yaml property keys`() {
+        val typeText = """
+            ---
+            id: Person
+            kind: NodeType
+            props:
+              名前:
+                type: string
+              1st value:
+                type: number
+            ---
+        """.trimIndent()
+        val typeAnalysis = analyzer.analyze(typeText, "/tmp/Person.md")
+
+        assertEquals(listOf("名前", "1st value"), typeAnalysis.propertyDefinitions.map { it.name })
+        typeAnalysis.propertyDefinitions.forEach { definition ->
+            assertEquals(
+                definition.name,
+                typeText.substring(definition.range.start, definition.range.end),
+            )
+        }
+
+        val nodeText = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            props:
+              名前: Alice
+              1st value: 1
+            ---
+        """.trimIndent()
+        val nodeAnalysis = analyzer.analyze(nodeText, "/tmp/alice.md")
+
+        assertEquals(listOf("名前", "1st value"), nodeAnalysis.propertyReferences.map { it.name })
+    }
+
+    @Test
+    fun `extracts top level props and relation keys from body`() {
+        val text = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            ---
+            @props{
+              name = "Alice"
+              age(validTime=CommonEra) = 20,
+              born = { timeline = CommonEra, timecode = 1 }
+              name = "A"
+            }
+            @link{weight = 0.2, metadata = { value = "x" }}[Bob](bob friendOf)
+        """.trimIndent()
+        val analysis = analyzer.analyze(text, "/tmp/alice.md")
+
+        val nodeProperties = analysis.propertyReferences.filter { it.ownerKind == PropertyOwnerKind.NodeType }
+        assertEquals(listOf("name", "age", "born", "name"), nodeProperties.map { it.name })
+        assertTrue(nodeProperties.all { it.ownerId == "Person" })
+        assertTrue(nodeProperties.none { it.name in setOf("timeline", "timecode") })
+
+        val relationProperties = analysis.propertyReferences.filter { it.ownerKind == PropertyOwnerKind.RelType }
+        assertEquals(listOf("weight", "metadata"), relationProperties.map { it.name })
+        assertTrue(relationProperties.all { it.ownerId == "friendOf" })
+        assertTrue(relationProperties.none { it.name == "value" })
+
+        val age = nodeProperties.first { it.name == "age" }
+        assertEquals("age", text.substring(age.range.start, age.range.end))
+        assertEquals(age, analyzer.findPropertyReferenceAt(analysis, age.range.start + 1))
+    }
+
+    @Test
+    fun `ignores property bindings in code regions`() {
+        val text = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            ---
+            `@props{inline = 1}`
+            ```
+            @props{fenced = 1}
+            @link{weight = 1}[Bob](bob friendOf)
+            ```
+            @props{visible = 1}
+        """.trimIndent()
+        val analysis = analyzer.analyze(text, "/tmp/alice.md")
+
+        assertEquals(listOf("visible"), analysis.propertyReferences.map { it.name })
+    }
 }

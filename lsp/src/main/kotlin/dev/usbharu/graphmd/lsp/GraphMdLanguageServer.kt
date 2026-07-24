@@ -255,9 +255,20 @@ private class GraphMdWorkspaceIndex {
 
     fun definitions(uri: String, position: Position): List<Location> {
         val document = documents[normalizeUri(uri)] ?: return emptyList()
-        val reference = analyzer.findReferenceAt(document.analysis, document.offsetAt(position)) ?: return emptyList()
-        return resolve(reference.kind, reference.targetId).map { resolved ->
-            Location(resolved.uri, resolved.range())
+        val offset = document.offsetAt(position)
+        val reference = analyzer.findReferenceAt(document.analysis, offset)
+        if (reference != null) {
+            return resolve(reference.kind, reference.targetId).map { resolved ->
+                Location(resolved.uri, resolved.range())
+            }
+        }
+        val propertyReference = analyzer.findPropertyReferenceAt(document.analysis, offset)
+            ?: analyzer.findPropertyDefinitionAt(document.analysis, offset)?.let {
+                PropertyReference(it.name, it.ownerId, it.ownerKind, it.range)
+            }
+            ?: return emptyList()
+        return resolveProperty(propertyReference).map { resolved ->
+            Location(resolved.document.uri, resolved.document.rangeOf(resolved.definition.range))
         }
     }
 
@@ -1185,6 +1196,52 @@ private class GraphMdWorkspaceIndex {
 
     private fun resolve(kind: ReferenceTargetKind, id: String): List<IndexedDefinition> {
         return definitionsOf(kind).filter { it.id == id }
+    }
+
+    private fun resolveProperty(reference: PropertyReference): List<IndexedPropertyDefinition> {
+        fun resolveOwner(
+            ownerId: String,
+            visited: Set<String>,
+        ): List<IndexedPropertyDefinition> {
+            if (ownerId in visited) return emptyList()
+            val ownerDocuments = documents.values.filter { indexed ->
+                val parsed = indexed.analysis.parsed.document
+                when (reference.ownerKind) {
+                    PropertyOwnerKind.NodeType -> parsed is NodeTypeDocument && parsed.id == ownerId
+                    PropertyOwnerKind.RelType -> parsed is RelTypeDocument && parsed.id == ownerId
+                }
+            }
+            val localDefinitions = ownerDocuments.flatMap { indexed ->
+                indexed.analysis.propertyDefinitions
+                    .filter {
+                        it.ownerKind == reference.ownerKind &&
+                            it.ownerId == ownerId &&
+                            it.name == reference.name
+                    }
+                    .map { IndexedPropertyDefinition(indexed, it) }
+            }
+            if (localDefinitions.isNotEmpty()) return localDefinitions
+
+            val parentIds = ownerDocuments.flatMap { indexed ->
+                when (val parsed = indexed.analysis.parsed.document) {
+                    is NodeTypeDocument -> parsed.extends.takeIf { reference.ownerKind == PropertyOwnerKind.NodeType }.orEmpty()
+                    is RelTypeDocument -> parsed.extends.takeIf { reference.ownerKind == PropertyOwnerKind.RelType }.orEmpty()
+                    else -> emptyList()
+                }
+            }.distinct()
+            return parentIds.flatMap { parentId ->
+                resolveOwner(parentId, visited + ownerId)
+            }
+        }
+
+        return resolveOwner(reference.ownerId, emptySet())
+            .distinctBy {
+                Triple(
+                    it.document.uri,
+                    it.definition.range.start,
+                    it.definition.range.end,
+                )
+            }
     }
 
     private fun nodeTypeSchema(id: String): NormalizedNodeType? {
@@ -2650,4 +2707,9 @@ private data class DiagnosticReferenceTarget(
     val kind: ReferenceTargetKind,
     val id: String,
     val field: String? = null,
+)
+
+private data class IndexedPropertyDefinition(
+    val document: IndexedDocument,
+    val definition: PropertyDefinition,
 )
