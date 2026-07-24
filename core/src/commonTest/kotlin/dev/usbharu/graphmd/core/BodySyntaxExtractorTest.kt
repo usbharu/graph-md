@@ -75,6 +75,23 @@ class BodySyntaxExtractorTest {
     }
 
     @Test
+    fun `reports duplicate props at the second key`() {
+        val body = """
+            Intro
+            @props{
+              name = "Alice",
+              name = "Bob"
+            }
+        """.trimIndent()
+
+        val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
+
+        val diagnostic = extracted.diagnostics.single { it.message.startsWith("Duplicate key: name") }
+        val duplicateStart = body.lastIndexOf("name")
+        assertEquals(SourceRange(duplicateStart, duplicateStart + "name".length), diagnostic.source?.range)
+    }
+
+    @Test
     fun `ignores indented code blocks`() {
         val body = """
                 @props{name = "Ignored"}

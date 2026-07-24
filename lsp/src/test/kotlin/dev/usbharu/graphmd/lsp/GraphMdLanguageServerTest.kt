@@ -133,6 +133,33 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `duplicate inline props diagnostic points to the second key`() {
+        val uri = "file:///workspace/alice.md"
+        val fixture = serverFixture(
+            mapOf(
+                uri to """
+                    ---
+                    id: alice
+                    kind: Node
+                    type: Person
+                    props:
+                      name: Front matter value
+                    ---
+                    @props{
+                      name = "Alice",
+                      name = "Bob"
+                    }
+                """.trimIndent(),
+            ),
+        )
+
+        val diagnostic = fixture.diagnostics.getValue(uri)
+            .single { it.message.startsWith("Duplicate key: name at index") }
+
+        assertEquals(Range(Position(9, 2), Position(9, 6)), diagnostic.range)
+    }
+
+    @Test
     fun `quick fixes normalize inline arguments and relation layout`() {
         val argumentsUri = "file:///workspace/arguments.md"
         val whitespaceUri = "file:///workspace/whitespace.md"
