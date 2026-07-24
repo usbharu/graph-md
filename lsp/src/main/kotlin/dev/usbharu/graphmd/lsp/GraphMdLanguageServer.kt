@@ -1008,11 +1008,20 @@ private class GraphMdWorkspaceIndex {
                 source = "graphmd"
                 code = Either.forLeft(diagnostic.category.name)
                 range = inferredDiagnosticLspRange(document, diagnostic)
-                    ?: document.rangeOf(diagnostic.source?.range ?: SourceRange(0, 0))
+                    ?: document.rangeOf(diagnosticSourceRange(document, diagnostic) ?: SourceRange(0, 0))
             }
         }
         documents.keys.forEach { uri -> diagnostics.putIfAbsent(uri, mutableListOf()) }
         return diagnostics
+    }
+
+    private fun diagnosticSourceRange(document: IndexedDocument, diagnostic: Diagnostic): SourceRange? {
+        val range = diagnostic.source?.range ?: return null
+        if (diagnostic.category != DiagnosticCategory.SyntaxError) return range
+        return SourceRange(
+            start = document.analysis.frontMatterEndOffset + range.start,
+            end = document.analysis.frontMatterEndOffset + range.end,
+        )
     }
 
     private fun yamlFrontMatterCompletions(document: IndexedDocument, position: Position): List<CompletionItem>? {
