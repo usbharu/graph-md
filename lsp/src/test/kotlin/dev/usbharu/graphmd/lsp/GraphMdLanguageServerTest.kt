@@ -122,6 +122,54 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `required property diagnostics highlight props unless inline props satisfy the schema`() {
+        val typeUri = "file:///workspace/types/Person.md"
+        val missingUri = "file:///workspace/missing.md"
+        val inlineUri = "file:///workspace/inline.md"
+        val fixture = serverFixture(
+            mapOf(
+                typeUri to """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    props:
+                      name:
+                        type: string
+                        required: true
+                    ---
+                """.trimIndent(),
+                missingUri to """
+                    ---
+                    id: missing
+                    kind: Node
+                    type: Person
+                    props:
+                      nickname: Missing name
+                    ---
+                """.trimIndent(),
+                inlineUri to """
+                    ---
+                    id: inline
+                    kind: Node
+                    type: Person
+                    props:
+                      nickname: Bound in body
+                    ---
+                    @props{name = "Inline name"}
+                """.trimIndent(),
+            ),
+        )
+
+        val missing = fixture.diagnostics.getValue(missingUri)
+            .single { it.message == "Required property missing after normalization: name" }
+        assertEquals(Range(Position(4, 0), Position(4, 5)), missing.range)
+        assertTrue(
+            fixture.diagnostics.getValue(inlineUri)
+                .none { it.message == "Required property missing after normalization: name" },
+        )
+    }
+
+    @Test
     fun `quick fixes close incomplete inline syntax`() {
         val uri = "file:///workspace/alice.md"
         val fixture = serverFixture(

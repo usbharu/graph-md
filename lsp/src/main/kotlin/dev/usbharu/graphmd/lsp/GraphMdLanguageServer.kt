@@ -1189,7 +1189,8 @@ private class GraphMdWorkspaceIndex {
             return document.propertyAssignmentRange(it.groupValues[1])
         }
         Regex("""Required property missing after normalization: (.+)""").matchEntire(diagnostic.message)?.let {
-            return document.propsInsertion(it.groupValues[1], "").range
+            return document.yamlFieldKeyRange("props")
+                ?: document.propsInsertion(it.groupValues[1], "").range
         }
         if (diagnostic.message.endsWith(" is required") || diagnostic.message == "Media requires url") {
             val offset = document.frontMatterClosingOffset() ?: 0
