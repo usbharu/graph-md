@@ -1197,8 +1197,10 @@ private class GraphMdWorkspaceIndex {
         Regex("""Unknown property ([A-Za-z_][A-Za-z0-9_.:-]*) on .+""").matchEntire(diagnostic.message)?.let {
             return document.propertyAssignmentRange(it.groupValues[1])
         }
-        Regex("""Required property missing after normalization: (.+)""").matchEntire(diagnostic.message)?.let {
-            return document.propsInsertion(it.groupValues[1], "").range
+        if (Regex("""Required property missing after normalization: .+""").matches(diagnostic.message)) {
+            document.yamlTopLevelFieldKeyRange("props")?.let { return it }
+            val offset = document.frontMatterClosingOffset() ?: 0
+            return document.rangeOf(SourceRange(offset, offset))
         }
         if (diagnostic.message.endsWith(" is required") || diagnostic.message == "Media requires url") {
             val offset = document.frontMatterClosingOffset() ?: 0
@@ -2302,6 +2304,14 @@ private data class IndexedDocument(
 
     fun yamlFieldKeyRange(field: String): Range? {
         val match = Regex("""(?m)^\s*(${Regex.escape(field)})\s*:""").find(text) ?: return null
+        val group = match.groups[1] ?: return null
+        return rangeOf(SourceRange(group.range.first, group.range.last + 1))
+    }
+
+    fun yamlTopLevelFieldKeyRange(field: String): Range? {
+        val frontMatterEnd = frontMatterClosingOffset() ?: return null
+        val match = Regex("""(?m)^(${Regex.escape(field)})\s*:""")
+            .find(text.substring(0, frontMatterEnd)) ?: return null
         val group = match.groups[1] ?: return null
         return rangeOf(SourceRange(group.range.first, group.range.last + 1))
     }
