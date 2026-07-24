@@ -1280,7 +1280,7 @@ internal class FrontMatterCompletionResolver(
         val usedTopLevelKeys = siblingKeysAtIndent(lines, lineIndex, 0)
 
         if (trimmed.startsWith("-")) {
-            return listValueCompletions(lines, lineIndex, parsedDocument)
+            return listValueCompletions(lines, lineIndex, beforeCursor, parsedDocument)
         }
 
         val keyMatch = Regex("""^([A-Za-z][A-Za-z0-9_-]*)?\s*:?(.*)$""").matchEntire(trimmed) ?: return null
@@ -1411,6 +1411,13 @@ internal class FrontMatterCompletionResolver(
         lines: List<String>,
         lineIndex: Int,
     ): List<CompletionEntry>? {
+        if (
+            path.lastOrNull() == "validTime" &&
+            lines[lineIndex].isBlank() &&
+            isDirectListItemPosition(lines, lineIndex)
+        ) {
+            return listOf(CompletionEntry("timeline", CompletionItemKind.Field, "- timeline: ", "validTime"))
+        }
         val keys = when {
             path.lastOrNull() == "validTime" -> listOf("timeline", "from", "to")
             path.takeLast(2).let { it == listOf("validTime", "from") || it == listOf("validTime", "to") } ->
@@ -1474,9 +1481,16 @@ internal class FrontMatterCompletionResolver(
         return entries
     }
 
-    private fun listValueCompletions(lines: List<String>, lineIndex: Int, parsedDocument: GraphDocument?): List<CompletionEntry>? {
+    private fun listValueCompletions(
+        lines: List<String>,
+        lineIndex: Int,
+        beforeCursor: String,
+        parsedDocument: GraphDocument?,
+    ): List<CompletionEntry>? {
         val parentKey = enclosingListKey(lines, lineIndex) ?: return null
-        val prefix = lines[lineIndex].substringAfter('-').trim()
+        val afterDash = beforeCursor.substringAfter('-', "")
+        val hasSpaceAfterDash = afterDash.firstOrNull()?.isWhitespace() == true
+        val prefix = afterDash.trimStart()
         val documentKind = parsedDocument?.kind ?: inferredDocumentKind()
         return when (parentKey) {
             "extends" -> when (documentKind) {
@@ -1487,7 +1501,23 @@ internal class FrontMatterCompletionResolver(
             }
             "from", "to" -> idCompletions(prefix, if (documentKind == DocumentKind.Timeline) timelineIds else nodeTypeIds, if (documentKind == DocumentKind.Timeline) "Timeline" else "NodeType")
             "timeline" -> timelineSelectorCompletions(prefix)
-            "validTime" -> listOf(CompletionEntry("timeline", CompletionItemKind.Field, "timeline: ", "validTime"))
+            "validTime" -> {
+                val key = prefix.substringBefore(':').trim()
+                if (':' in prefix && key == "timeline") {
+                    timelineSelectorCompletions(prefix.substringAfter(':').trimStart())
+                } else {
+                    listOf("timeline")
+                        .filter { it.startsWith(key) }
+                        .map {
+                            CompletionEntry(
+                                it,
+                                CompletionItemKind.Field,
+                                (if (hasSpaceAfterDash) "" else " ") + "$it: ",
+                                "validTime",
+                            )
+                        }
+                }
+            }
             "mappings" -> listOf(CompletionEntry("kind", CompletionItemKind.Field, "kind: offset", "offset mapping"))
             else -> null
         }
@@ -1532,6 +1562,20 @@ internal class FrontMatterCompletionResolver(
             }
         }
         return null
+    }
+
+    private fun isDirectListItemPosition(lines: List<String>, lineIndex: Int): Boolean {
+        val currentIndent = indentOf(lines[lineIndex])
+        for (index in lineIndex - 1 downTo 1) {
+            val line = lines[index]
+            val trimmed = line.trim()
+            if (trimmed.isBlank() || trimmed.startsWith("#")) continue
+            val indent = indentOf(line)
+            if (indent >= currentIndent) continue
+            if (trimmed.startsWith("-")) return false
+            return trimmed == "validTime:"
+        }
+        return false
     }
 
     private fun siblingKeysAtIndent(lines: List<String>, lineIndex: Int, indent: Int): Set<String> {
