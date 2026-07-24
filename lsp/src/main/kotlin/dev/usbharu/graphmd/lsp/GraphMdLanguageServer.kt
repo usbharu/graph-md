@@ -1434,7 +1434,10 @@ internal class FrontMatterCompletionResolver(
             }
             else -> return null
         }
-        val usedKeys = siblingKeysAtIndent(lines, lineIndex, indentOf(lines[lineIndex]))
+        val usedKeys = siblingKeysAtIndent(lines, lineIndex, indentOf(lines[lineIndex])).toMutableSet()
+        if (path.lastOrNull() == "validTime") {
+            enclosingListItemKey(lines, lineIndex)?.let(usedKeys::add)
+        }
         return keys
             .filter { it.startsWith(prefix) && (it !in usedKeys || it == prefix) }
             .map { CompletionEntry(it, CompletionItemKind.Field, "$it: ") }
@@ -1576,6 +1579,24 @@ internal class FrontMatterCompletionResolver(
             return trimmed == "validTime:"
         }
         return false
+    }
+
+    private fun enclosingListItemKey(lines: List<String>, lineIndex: Int): String? {
+        val currentIndent = indentOf(lines[lineIndex])
+        for (index in lineIndex - 1 downTo 1) {
+            val line = lines[index]
+            val trimmed = line.trim()
+            if (trimmed.isBlank() || trimmed.startsWith("#")) continue
+            val indent = indentOf(line)
+            if (indent >= currentIndent) continue
+            if (!trimmed.startsWith("-")) return null
+            val item = trimmed.removePrefix("-").trimStart()
+            if (':' !in item) return null
+            return item.substringBefore(':').trim().takeIf {
+                Regex("""[A-Za-z][A-Za-z0-9_-]*""").matches(it)
+            }
+        }
+        return null
     }
 
     private fun siblingKeysAtIndent(lines: List<String>, lineIndex: Int, indent: Int): Set<String> {

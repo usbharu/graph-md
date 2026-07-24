@@ -788,6 +788,67 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `validTime mapping completion excludes keys already used in the current list item`() {
+        fun completionAt(markedText: String): List<String> {
+            val marker = "<cursor>"
+            val offset = markedText.indexOf(marker)
+            val text = markedText.replace(marker, "")
+            return FrontMatterCompletionResolver(
+                text = text,
+                offset = offset,
+                parsedDocument = NodeDocument(id = "alice", type = "Person", sourcePath = "/tmp/alice.md"),
+                nodeTypeIds = listOf("Person"),
+                relTypeIds = emptyList(),
+                timelineIds = listOf("TimelineA"),
+            ).resolve().orEmpty().map { it.label }
+        }
+
+        val afterTimeline = completionAt(
+            """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            validTime:
+              - timeline: TimelineA
+                <cursor>
+            ---
+            """.trimIndent(),
+        )
+        assertEquals(listOf("from", "to"), afterTimeline)
+
+        val afterTimelineAndFrom = completionAt(
+            """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            validTime:
+              - timeline: TimelineA
+                from:
+                  timecode: 1
+                <cursor>
+            ---
+            """.trimIndent(),
+        )
+        assertEquals(listOf("to"), afterTimelineAndFrom)
+
+        val nextListItem = completionAt(
+            """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            validTime:
+              - timeline: TimelineA
+              - <cursor>
+            ---
+            """.trimIndent(),
+        )
+        assertEquals(listOf("timeline"), nextListItem)
+    }
+
+    @Test
     fun `front matter completion offers canonical timeline selector ids`() {
         val timelineText = """
             ---
