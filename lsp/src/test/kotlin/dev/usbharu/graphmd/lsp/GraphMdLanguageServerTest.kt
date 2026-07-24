@@ -126,6 +126,7 @@ class GraphMdLanguageServerTest {
         val typeUri = "file:///workspace/types/Person.md"
         val missingUri = "file:///workspace/missing.md"
         val inlineUri = "file:///workspace/inline.md"
+        val bodyPropsUri = "file:///workspace/body-props.md"
         val fixture = serverFixture(
             mapOf(
                 typeUri to """
@@ -157,6 +158,14 @@ class GraphMdLanguageServerTest {
                     ---
                     @props{name = "Inline name"}
                 """.trimIndent(),
+                bodyPropsUri to """
+                    ---
+                    id: body-props
+                    kind: Node
+                    type: Person
+                    ---
+                    props:
+                """.trimIndent(),
             ),
         )
 
@@ -167,6 +176,9 @@ class GraphMdLanguageServerTest {
             fixture.diagnostics.getValue(inlineUri)
                 .none { it.message == "Required property missing after normalization: name" },
         )
+        val bodyProps = fixture.diagnostics.getValue(bodyPropsUri)
+            .single { it.message == "Required property missing after normalization: name" }
+        assertEquals(Range(Position(4, 0), Position(4, 0)), bodyProps.range)
     }
 
     @Test
