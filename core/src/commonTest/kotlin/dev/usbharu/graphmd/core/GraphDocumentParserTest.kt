@@ -937,4 +937,48 @@ class GraphDocumentParserTest {
         )
         assertTrue(invalidExtends.diagnostics.any { "extends items MUST be unique" in it.message })
     }
+
+    @Test
+    fun `accepts ids matching the identifier grammar`() {
+        listOf("alice", "_private", "org:example.test-1", "A0").forEach { id ->
+            val result = compiler.parseDocument(
+                """
+                    ---
+                    id: $id
+                    kind: NodeType
+                    ---
+                """.trimIndent(),
+                "/tmp/$id.md",
+            )
+
+            assertNotNull(result.document)
+            assertTrue(
+                result.diagnostics.none { it.message == "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*" },
+                "Expected '$id' to be a valid id",
+            )
+        }
+    }
+
+    @Test
+    fun `warns for ids outside the identifier grammar without rejecting the document`() {
+        listOf("1alice", "alice smith", "alice/bob", "アリス").forEachIndexed { index, id ->
+            val result = compiler.parseDocument(
+                """
+                    ---
+                    id: "$id"
+                    kind: NodeType
+                    ---
+                """.trimIndent(),
+                "/tmp/invalid-$index.md",
+            )
+
+            assertNotNull(result.document)
+            val diagnostic = result.diagnostics.single {
+                it.message == "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*"
+            }
+            assertEquals(DiagnosticCategory.SchemaError, diagnostic.category)
+            assertEquals(Severity.Warning, diagnostic.severity)
+            assertEquals(id, diagnostic.source?.documentId)
+        }
+    }
 }

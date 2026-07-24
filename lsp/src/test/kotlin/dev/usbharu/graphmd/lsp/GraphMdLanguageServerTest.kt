@@ -17,6 +17,7 @@ import org.eclipse.lsp4j.CodeAction
 import org.eclipse.lsp4j.CodeActionKind
 import org.eclipse.lsp4j.CodeActionParams
 import org.eclipse.lsp4j.DidOpenTextDocumentParams
+import org.eclipse.lsp4j.DiagnosticSeverity
 import org.eclipse.lsp4j.InitializeParams
 import org.eclipse.lsp4j.InsertTextFormat
 import org.eclipse.lsp4j.MessageActionItem
@@ -667,6 +668,28 @@ class GraphMdLanguageServerTest {
         assertEquals(5, unknownRel.range.start.line)
         assertEquals(23, unknownRel.range.start.character)
         assertEquals(33, unknownRel.range.end.character)
+    }
+
+    @Test
+    fun `invalid id warning highlights only the id value`() {
+        val uri = "file:///workspace/invalid-id.md"
+        val fixture = serverFixture(
+            mapOf(
+                uri to """
+                    ---
+                    id: "bad/id"
+                    kind: NodeType
+                    ---
+                """.trimIndent(),
+            ),
+        )
+
+        val diagnostic = fixture.diagnostics.getValue(uri).single {
+            it.message == "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*"
+        }
+        assertEquals(DiagnosticSeverity.Warning, diagnostic.severity)
+        assertEquals(Position(1, 5), diagnostic.range.start)
+        assertEquals(Position(1, 11), diagnostic.range.end)
     }
 
     @Test
