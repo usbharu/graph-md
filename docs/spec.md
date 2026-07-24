@@ -62,7 +62,15 @@ Markdownのみではナレッジグラフとして使いにくいため、マル
 
 frontmatterで定義する`id`は`[A-Za-z_][A-Za-z0-9_.:-]*`に一致しなければならない。
 先頭にはASCII英字または`_`を使用し、2文字目以降にはASCII英数字、`_`、`.`、`:`、`-`を使用できる。
-空の`id`はエラーとし、それ以外の規則に一致しない`id`は警告として報告する。
+空の`id`はエラーとし、それ以外の規則に一致しない`id`は定義側で警告として報告する。非正規IDであっても、警告後は参照解決の対象として保持する。ただし、RelTypeの`id`に空白を含めてはならず、これはエラーとする。
+
+ID参照は、構文から文字列として復元できる限り破棄せず、デコード後の文字列を正規化せずに定義IDと完全一致で解決する。参照値が上記の正規表現に一致しないことだけを理由に参照側で重ねて警告してはならない。解決先が存在しない場合は通常の未解決参照として診断する。YAML frontmatterの参照フィールドは任意の非空文字列を保持でき、本文中の参照は各Markdown拡張構文でパース可能な範囲で保持する。
+
+### 検証モード
+
+標準実装は`Default`と`Strict`の検証モードを提供する。
+`Default`では未知のNodeトップレベルフィールドおよびNodeTypeまたはRelTypeで定義されていないPropertyを警告として報告する。
+`Strict`ではこれらの未知フィールドおよび未知Propertyをエラーとして報告する。構文エラー、必須フィールドの欠落、型違反、参照エラーおよび制約違反の重大度は検証モードによって緩和しない。
 
 ### 型
 
@@ -77,7 +85,7 @@ Propertyで使える型
 | duration | 特定のTimeline中の期間                                           |
 | array    | 配列。各要素は個別にvalidTimeを指定できる                              |
 
-時点のtimecodeは数値（小数を含む）である。
+時点のtimecodeは有限の数値（小数を含む）である。`NaN`および正負の無限大は使用できない。
 
 全てのPropertyの値はvalidTimeを持つことができ、validTimeは主張するTimelineと期間を指定することができる。
 
@@ -99,14 +107,24 @@ props:
 PropSchemaが`string`である場合、値は文字列のままでありtext値にはならない。その他のtext以外の型でも、文字列をtext値として解釈してはならない。
 
 arrayの`items`は任意であり、省略した場合は任意の型の要素を許容する。arrayの要素にvalidTimeを指定する場合、要素は`value`と`validTime`を持つエントリとして表現する。itemsで指定した型は、そのエントリの`value`に適用する。
+`items`はPropSchemaの共通フィールドとして記述でき、`items`自体は通常のPropSchemaとして検証するが、Property値への適用は`type: array`のときだけ行う。それ以外の型に指定された`items`は、Property値の検証、継承互換性、および正規化結果へ影響しない。
+
+PropSchemaに検索用の`index`設定は存在しない。`index`フィールドを記述した場合は未知のProperty Schemaフィールドとして診断する。検索インデックスの構築方法はGraphMD文書モデルの範囲外とする。
+
+空配列`[]`の意味は解決済みPropSchemaによって決まる。`type: array`では、`[]`は要素を持たない有効なarray値であり、一つのProperty主張として扱う。それ以外の型、または利用可能なPropSchemaがない場合は、`[]`をPropertyの時系列バリエーションが0件であるものとして扱い、そのProperty自体が指定されなかった場合と同じ正規化結果にする。したがって、そのPropertyが`required`なら必須Property欠落として診断する。
 
 利用可能なPropSchemaがないため、値の配列を「Property自体の時系列バリエーション」と「validTimeを持つarray要素」のどちらとして解釈するか判別できない場合、既定では前者として解釈する。実装はこの曖昧な解釈について警告を出すべきである。
 
 validTimeが複数指定された場合、各validTimeはORとして扱う。fromとtoの端点はともに含む。fromまたはtoが指定されない場合、その方向の境界は確定していない。fromとtoの両方が指定され、比較可能であってfromがtoより後の場合、実装は警告を出すべきである。
 
+Propertyの時系列バリエーションを配列で表現する場合、`validTime`を持たないエントリはフォールバック値を表し、一つのPropertyにつき最大一つだけ指定できる。
+YAMLのPropertyと本文中のPropertyをマージするとき、「完全に同じvalidTime」はvalidTimeをOR集合として比較する。したがって、記述順だけが異なる同じvalidTime集合は同一とみなし、本文中の値で上書きする。異なるvalidTimeの主張とフォールバック値は保持する。
+
 ### データモデルおよびモデルの継承
 
-以下は概念であり、実際の構文ではない
+以下は概念であり、実際の構文ではない。
+掲載するJSON Schemaは文書の構造を検証する。Propertyの値がPropSchemaの`type`、`items`、`timeline`、`required`および継承後の制約に適合するかどうかは、参照先の型定義を解決した後の意味検証で判定する。
+IDの字句規則も意味検証で判定する。`id`の欠落、文字列以外、および空文字列は構造エラーとする一方、空ではあるが`[A-Za-z_][A-Za-z0-9_.:-]*`に一致しない`id`は警告として文書を継続して扱う。この重大度の違いを保持するため、掲載するJSON Schemaは原則として`id`を文字列かつ1文字以上であることだけ検証する。RelTypeの`id`だけは例外として、空白を禁止する`pattern`も構造検証する。
 validTimeはNodeを根として継承される。スコープの順序は`Node > (NodeのProperty = Link) > 各Propertyの内部要素`であり、Propertyのobjectおよびarrayの内部要素にも再帰的に同じ規則を適用する。上位のvalidTimeは、下位でvalidTimeが指定されなかった場合のフォールバックとして用いる。下位で指定されたvalidTimeはその要素と配下の要素にだけ適用し、上位のvalidTimeを変更・結合しない。
 
 #### Node
@@ -120,7 +138,8 @@ validTimeはNodeを根として継承される。スコープの順序は`Node >
   "description": "Node",
   "properties": {
     "id": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1
     },
     "kind": {
       "type": "string",
@@ -147,18 +166,10 @@ validTimeはNodeを根として継承される。スコープの順序は`Node >
     "props": {
       "type": "object",
       "description": "NodeTYpeで定義されているproperty",
-      "additionalProperties": {
-        "oneOf": [
-          {
-            "$ref": "#/$defs/propEntries"
-          },
-          {
-            "$ref": "#/$defs/shorthandValue"
-          }
-        ]
-      }
+      "additionalProperties": true
     }
   },
+  "additionalProperties": false,
   "required": [
     "type",
     "id",
@@ -239,15 +250,16 @@ validTimeはNodeを根として継承される。スコープの順序は`Node >
       "required": [ "timecode" ],
       "additionalProperties": false
     },
-    "shorthandValue": {
-      "not": { "$ref": "#/$defs/propEntries" }
-    },
     "timecodeValue": {
       "type": "number"
     }
   }
 }
 ```
+
+NodeおよびMediaのトップレベルには、上記の`id`、`kind`、`type`、`url`、`validTime`、`props`だけを指定できる。
+Propertyとして扱う`name`、`aliases`、`tags`、`lang`、`meta`をトップレベルへ記述してはならず、NodeTypeの`props`で定義したうえでNodeの`props`へ記述する。
+未知のトップレベルフィールドおよび未知のPropertyは通常の検証では警告し、strict検証ではエラーとして報告する。予約済みトップレベルフィールドの使用は検証モードにかかわらずエラーとする。
 
 #### NodeType
 
@@ -302,13 +314,11 @@ validTimeはNodeを根として継承される。スコープの順序は`Node >
         "required": {
           "type": "boolean"
         },
-        "index": {
-          "$ref": "#/$defs/indexType"
-        },
         "timeline": {
           "$ref": "#/$defs/timelineSelector"
         },
         "items": {
+          "description": "通常のPropSchemaとして検証するが、Property値へはtypeがarrayの場合だけ適用する",
           "oneOf": [
             { "$ref": "#/$defs/propertyDefinition" },
             { "$ref": "#/$defs/propertyType" }
@@ -364,12 +374,6 @@ validTimeはNodeを根として継承される。スコープの順序は`Node >
         }
       },
       "additionalProperties": false
-    },
-    "indexType": {
-      "enum": [
-        "fulltext",
-        "range"
-      ]
     }
   }
 }
@@ -397,7 +401,8 @@ Property Schemaのtimeline selectorで指定したTimelineは、そのTimeline�
   "properties": {
     "id": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^\\S+$"
     },
     "kind": {
       "const": "RelType"
@@ -431,9 +436,9 @@ Property Schemaのtimeline selectorで指定したTimelineは、そのTimeline�
           "enum": [ "number", "string", "text", "instant", "duration", "array" ]
         },
         "required": { "type": "boolean" },
-        "index": { "$ref": "#/$defs/indexType" },
         "timeline": { "$ref": "#/$defs/timelineSelector" },
         "items": {
+          "description": "通常のPropSchemaとして検証するが、Property値へはtypeがarrayの場合だけ適用する",
           "oneOf": [
             { "$ref": "#/$defs/propertySchema" },
             { "enum": [ "number", "string", "text", "instant", "duration", "array" ] }
@@ -495,12 +500,6 @@ Property Schemaのtimeline selectorで指定したTimelineは、そのTimeline�
         }
       },
       "additionalProperties": false
-    },
-    "indexType": {
-      "enum": [
-        "fulltext",
-        "range"
-      ]
     }
   }
 }
@@ -532,7 +531,8 @@ RelTypeで定義されたリンク
     },
     "type": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^\\S+$"
     },
     "validTime": {
       "type": "array",
@@ -541,12 +541,7 @@ RelTypeで定義されたリンク
     },
     "props": {
       "type": "object",
-      "additionalProperties": {
-        "oneOf": [
-          { "$ref": "#/$defs/propEntries" },
-          { "not": { "$ref": "#/$defs/propEntries" } }
-        ]
-      }
+      "additionalProperties": true
     }
   },
   "additionalProperties": false,
@@ -728,7 +723,7 @@ RelTypeで定義されたリンク
 ```
 
 Timelineは継承することができ、またマッピングすることができる。
-マッピングはoffsetで定義する。timecodeはnumber（小数を含む）である。
+マッピングはoffsetで定義する。timecodeおよびoffsetは有限のnumber（小数を含む）である。
 
 extendsした場合は暗黙的にmapping offset 0になる。extendsしていないTimeline同士もmappingできる。
 
@@ -736,7 +731,9 @@ timecodeは人間向けの記述では省略できる。機械的な比較およ
 
 Timelineのextendsおよびmappingは推移的な関係として扱う。
 
-offset mappingは、mappedなTimeline間でtimecodeを変換するときに用いる。各mappingでは`from`または`to`のいずれか一方を指定し、もう一方はそのmappingを記述するTimeline自身である。`from: A`は`A`から現在のTimelineへの変換であり、offsetを加算する。`to: B`は現在のTimelineから`B`への変換であり、offsetを加算する。逆方向の変換ではoffsetを減算する。したがって、`from: A`でoffsetが`d`のmappingと、`to: A`でoffsetが`-d`のmappingは同じ関係を表す。推移的なmappingでは経路上のoffsetを合計する。同じTimelineへ複数経路で到達した結果の累積offsetが一致しない場合、または循環経路のoffset合計が0でない場合、実装は警告を出すべきである。
+offset mappingは、同じ単位および進行率を持つmappedなTimeline間でtimecodeを変換するときに用いる。単位または進行率が異なりscale変換を必要とするTimeline同士は、offset mappingではmappedな関係として表現できない。
+各mappingでは`from`または`to`のいずれか一方を指定し、もう一方はそのmappingを記述するTimeline自身である。`from: A`は`A`から現在のTimelineへの変換であり、offsetを加算する。`to: B`は現在のTimelineから`B`への変換であり、offsetを加算する。逆方向の変換ではoffsetを減算する。したがって、`from: A`でoffsetが`d`のmappingと、`to: A`でoffsetが`-d`のmappingは同じ関係を表す。推移的なmappingでは経路上のoffsetを合計する。
+同じTimelineへ複数経路で到達した結果の累積offsetは、絶対差が`1e-9`以下なら一致とみなす。絶対差が`1e-9`を超える場合、または循環経路のoffset合計と0との絶対差が`1e-9`を超える場合、実装は警告を出すべきである。timecodeおよびoffsetには有限値だけを許すため、`NaN`および正負の無限大は比較対象にならない。
 
 ### Markdown拡張記法
 
@@ -744,20 +741,29 @@ Node/NodeType/RelType/Timeline/Mediaは一つのMarkdown文章として表現さ
 LinkはMarkdown文章中に拡張記法として表現される。
 
 MarkdownのYAML frontmatterとしてNode/NodeType/RelType/Timeline/Mediaを表現することができる。
-ただし、Nodeに関しては拡張記法で自然言語の文章中にPropertyを記述することができる。
+NodeおよびMediaに関しては、拡張記法で自然言語の文章中にPropertyを記述することができる。
 自然言語で記述されたPropertyは処理時にYAMLでの記述とマージされる。
+
+本文中の`@props`および`@link`がグラフのPropertyまたはLinkとして意味を持つのはNodeおよびMediaだけである。NodeType、RelType、Timelineの本文に同じ文字列を記述してもエラーにはしないが、GraphMD拡張記法として抽出または意味解釈せず、通常のMarkdown本文として扱う。
 
 #### {}部
 
 データ構造を記述する本体 各記法のProperty指定で使われる
 
-`{`とkeyと`=`とvalueと`,`と`}`で構成されている
+`{`とkeyと`=`とvalueと`,`と`}`で構成されている。複数のkey-valueは`,`で区切らなければならず、空白および改行だけを区切りとして使用してはならない。最後のvalueの後ろには末尾の`,`を記述できる。
 
-keyは()を使ってtextのキーやvalidTimeを指定することができる
+keyは()を使ってtextのキーやvalidTimeを指定することができる。textの`key`と`validTime`は同時に指定できる。
 
 validTimeは`validTime=...`として指定する。Timelineと期間を指定する場合は`validTime=CommonEra(from=1234,to=12345)`のように記述する。`timeline`、`from`、`to`を単独の引数として指定してはならない。
 
-valueの内容がidの場合、ダブルコーテーションは省略して記述できる
+`{}`部におけるProperty宣言の重複は、記述順ではなく、Property名、textの`key`、および個々のvalidTimeの組で判定する。validTimeの各オブジェクトはフィールドの記述順を無視し、`timeline`、`from`、`to`の値が同じであれば同一とみなす。
+validTimeが配列の場合は個々のvalidTimeへ分解して判定し、既に宣言されたvalidTimeの集合に同一の要素が一つでも含まれていれば重複とする。同じ宣言のvalidTime配列内に同一要素が複数ある場合も重複とする。validTimeを省略した宣言同士は、Property名とtextの`key`が同じ場合に重複とする。
+この重複判定は一つの`{}`部内の宣言に適用する。YAMLのPropertyと本文中のPropertyをマージするときは、前述のマージ規則に従い、同じ主張を本文中の値で上書きする。
+
+例えば`{name(key="lang:ja",validTime=CommonEra)="アリス"}`は有効である。一方、`{name(key="lang:ja",validTime=[TimelineA,TimelineB])="アリス",name(key="lang:ja",validTime=TimelineB)="Alice"}`は、分解後の`TimelineB`が同じkeyのvalidTime集合に既に含まれるため重複エラーとする。
+
+valueには文字列、数値、真偽値、`null`、配列、およびネストした`{}`オブジェクトを記述できる。
+valueの内容がidの場合、ダブルコーテーションは省略して記述できる。
 
 ##### スカラー
 
@@ -840,6 +846,8 @@ valueの内容がidの場合、ダブルコーテーションは省略して記�
 ##### duration
 
 duration自体のtimelineと、fromとto自体のtimelineを指定することができる。同じtimelineでなくてもmappedな関係にある場合は指定可能。
+durationには`from`または`to`の少なくとも一方が必要である。両方を省略した空のdurationはエラーとする。
+durationおよびfrom/toのtimePointで使用できるフィールドは、durationでは`timeline`、`from`、`to`、timePointでは`timeline`、`value`、`timecode`だけである。`timeline`と`value`は文字列、`timecode`は有限の数値でなければならない。
 
 ```
 {eventTime={from=1,to=2},eventTime2={from={value="今日",timecode=3},to={value="明日",timecode=4}}
@@ -924,7 +932,7 @@ duration自体のtimelineと、fromとto自体のtimelineを指定すること�
 
 #### @props拡張記法
 
-Nodeで使える。NodeのYAMLで記述されたpropsをマージする。完全に同じvalidTimeで存在する場合は上書きする。
+NodeおよびMediaで使える。YAMLで記述されたpropsをマージする。完全に同じvalidTimeで存在する場合は上書きする。
 
 自然言語の文中でPropertyを記述することができる。
 各PropertyはvalidTimeで主張するTimelineと期間を表現できる。
@@ -947,7 +955,7 @@ Aliceの名前は@props{name = "Alice"}です。
         class="graphmd-prop-name">name</sub></span></span></span></p>
 ```
 
-`@props`はメタデータの宣言だけではなく、文中へbindしたProperty名、値およびvalidTimeを出力する記法である。プレビューでは、`@props`に記述された各Propertyについて`data-props-name`を持つ要素を生成し、最初にPropertyの値を出力する。validTimeのTimeline IDは、そのvalidTimeが適用される値の直後へ上付き文字として出力し、Property名はすべての値の後へ下付き文字として出力する。validTimeがない場合は上付き文字を省略する。同じ値に複数のvalidTimeがある場合は記述順を保ち、重複を除いて`,`で結合する。値と注釈の間に空白や区切り文字を自動挿入しない。複数のPropertyを指定した場合は記述順にすべて出力する。文字列と数値はその文字列表現を出力し、textは表示対象として選択されたキーの値、その他の構造化された値はJSON表現を出力する。Property名、値およびTimeline IDを安全なテキストとしてエスケープし、HTMLとして解釈してはならない。外側の`data-props-bind`には、bindしたすべてのPropertyをJSONとして保持する。
+`@props`はメタデータの宣言だけではなく、文中へbindしたProperty名、値およびvalidTimeを出力する記法である。プレビューでは、`@props`に記述された各Propertyについて`data-props-name`を持つ要素を生成し、最初にPropertyの値を出力する。validTimeのTimeline IDは、そのvalidTimeが適用される値の直後へ上付き文字として出力し、Property名はすべての値の後へ下付き文字として出力する。validTimeがない場合は上付き文字を省略する。同じ値に複数のvalidTimeがある場合は記述順を保ち、重複を除いて`,`で結合する。値と注釈の間に空白や区切り文字を自動挿入しない。複数のPropertyを指定した場合は記述順にすべて出力する。文字列と数値はその文字列表現を出力する。textに`default`キーがある場合はその値を優先して表示する。`default`キーがないtextの表示方法は規定せず、実装に委ねる。その他の構造化された値はJSON表現を出力する。Property名、値およびTimeline IDを安全なテキストとしてエスケープし、HTMLとして解釈してはならない。外側の`data-props-bind`には、bindしたすべてのPropertyをJSONとして保持する。
 
 例えば`年齢は@props(validTime = CommonEra){age = 25}歳`は、プレビュー上で「年齢は25<sup>CommonEra</sup><sub>age</sub>歳」と表示する。説明上のテキスト表記では`年齢は25^CommonEra^_age_歳`と表す。また、`@props{age=26,age(validTime=CommonEra)=25}`は`[26,25^CommonEra^]_age_`と表示し、`CommonEra`が25にだけ適用されることを明示する。
 
@@ -1074,6 +1082,7 @@ Aliceは@link(validTime=CommonEra)[Bob](bob friendOf)です
 ```
 
 省略形も空のPropertyを持つ通常形`@link{}[Bob](bob friendOf)`と同じLinkとして解釈する。ただし、Link自身のvalidTimeは引き続き`@link(...)`に保持される。`@link`またはその引数の直後と`[`の間、および`{Property}`を記述する場合は`}`と`[`の間に空白を入れてはならない。
+リンク先IDとRelType IDは水平方向の空白で区切る。RelType ID自体に空白を含めてはならず、引用符を使って空白を含むRelType IDを記述する形式も許可しない。
 
 完全形は`@link(validTime){Property}[文字列](id RelType)`、Propertyを省略した形は`@link(validTime)[文字列](id RelType)`である。`validTime`引数も省略可能である。
 
@@ -1120,7 +1129,7 @@ Markdown拡張記法パーサに依存する(Kotlin/JS)
 LSP4Jで構築する
 markdown-itプラグインなどでプレビューをGraphMD対応させる
 
-LSPはワークスペース内のMarkdownファイルを走査し、frontmatterに現れるすべての`id`定義と、Markdown本文およびfrontmatterに現れるすべてのID参照を索引化する。ここでいうIDには、少なくともNode、Media、NodeType、RelType、Timelineの`id`、`type`、`extends`、timeline selector、validTimeの`timeline`、instantおよびdurationの`timeline`、`@link`のリンク先`id`とRelType、および拡張記法の値としてIDを取る箇所を含む。引用符の有無、配列内、ネストしたProperty内、`@link`のProperty部の省略有無によって索引対象から除外してはならない。
+LSPはワークスペース内のMarkdownファイルを走査し、frontmatterに現れるすべての`id`定義とID参照、およびNodeまたはMediaのMarkdown本文に現れるすべてのID参照を索引化する。NodeType、RelType、Timelineの本文は通常のMarkdown本文として扱い、GraphMDのID参照を索引化しない。ここでいうIDには、少なくともNode、Media、NodeType、RelType、Timelineの`id`、`type`、`extends`、timeline selector、validTimeの`timeline`、instantおよびdurationの`timeline`、`@link`のリンク先`id`とRelType、および拡張記法の値としてIDを取る箇所を含む。引用符の有無、配列内、ネストしたProperty内、`@link`のProperty部の省略有無によって索引対象から除外してはならない。
 
 索引化したすべてのID定義およびID参照に対して、LSPは次の機能を提供しなければならない。
 
@@ -1154,7 +1163,7 @@ props:
         type: instant
         timeline:
             - CommonEra:
-              mapped: true
+                mapped: true
     arraySample:
         type: array
         items: number
