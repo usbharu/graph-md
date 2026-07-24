@@ -73,7 +73,7 @@
     ]
   },
   "scripts": {
-    "test": "node --test syntaxes/*.test.mjs",
+    "test": "node --test",
     "typecheck": "tsc -p ./tsconfig.json --noEmit",
     "sync-server": "bash sync-server.sh",
     "vscode:prepublish": "pnpm run sync-server && node esbuild.mjs --production",
