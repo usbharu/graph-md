@@ -55,7 +55,16 @@ class BodySyntaxExtractor {
                                     val props = defaultValidTime?.let { applyDefaultValidTime(parsed.values, it) } ?: parsed.values
                                     propsBlocks += ExtractedPropsBlock(props, SourceRange(index, range.end))
                                 } catch (e: InlinePropsParseException) {
-                                    diagnostics += syntaxDiagnostic(e.message ?: "Invalid @props", sourcePath, documentId, index, range.end)
+                                    val errorRange = e.errorRange?.let {
+                                        SourceRange(objectStart + it.start, objectStart + it.end)
+                                    } ?: SourceRange(index, range.end)
+                                    diagnostics += syntaxDiagnostic(
+                                        e.message ?: "Invalid @props",
+                                        sourcePath,
+                                        documentId,
+                                        errorRange.start,
+                                        errorRange.end,
+                                    )
                                 }
                                 index = range.end
                                 continue

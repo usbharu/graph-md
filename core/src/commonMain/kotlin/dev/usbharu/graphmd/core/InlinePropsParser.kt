@@ -2,7 +2,9 @@ package dev.usbharu.graphmd.core
 
 import dev.usbharu.graphmd.core.model.*
 
-class InlinePropsParseException(message: String) : IllegalArgumentException(message)
+class InlinePropsParseException(message: String) : IllegalArgumentException(message) {
+    internal var errorRange: SourceRange? = null
+}
 
 class InlinePropsParser(private val input: String) {
     private var index: Int = 0
@@ -22,6 +24,7 @@ class InlinePropsParser(private val input: String) {
         skipHorizontalAndNewlines()
         val result = linkedMapOf<String, RawValue>()
         while (!tryConsume('}')) {
+            val keyStart = index
             val key = parseIdentifier()
             skipHorizontalAndNewlines()
             val annotation = if (peek() == '(') parseKeyAnnotation() else KeyAnnotation()
@@ -44,8 +47,13 @@ class InlinePropsParser(private val input: String) {
                 annotation.validTime != null ->
                     mergeTimedAssertion(previous, value as RawObject, annotation.validTime)
                 timedEntries(previous) != null ->
-                    appendFallbackAssertion(key, previous, value)
-                else -> fail("Duplicate key: $key")
+                    appendFallbackAssertion(
+                        key,
+                        previous,
+                        value,
+                        SourceRange(keyStart, keyStart + key.length),
+                    )
+                else -> fail("Duplicate key: $key", SourceRange(keyStart, keyStart + key.length))
             }
             val hadWhitespace = skipHorizontalAndNewlines()
             if (tryConsume(',')) {
@@ -72,10 +80,15 @@ class InlinePropsParser(private val input: String) {
         return RawArray(entries)
     }
 
-    private fun appendFallbackAssertion(key: String, previous: RawValue, value: RawValue): RawArray {
-        val variants = timedEntries(previous) ?: fail("Duplicate key: $key")
+    private fun appendFallbackAssertion(
+        key: String,
+        previous: RawValue,
+        value: RawValue,
+        errorRange: SourceRange,
+    ): RawArray {
+        val variants = timedEntries(previous) ?: fail("Duplicate key: $key", errorRange)
         if (variants.any { "validTime" !in it.values }) {
-            fail("Duplicate key: $key")
+            fail("Duplicate key: $key", errorRange)
         }
         return RawArray(listOf(RawObject(mapOf("value" to value))) + variants)
     }
@@ -307,5 +320,6 @@ class InlinePropsParser(private val input: String) {
 
     private fun isEof(): Boolean = index >= input.length
 
-    private fun fail(message: String): Nothing = throw InlinePropsParseException("$message at index $index")
+    private fun fail(message: String, errorRange: SourceRange? = null): Nothing =
+        throw InlinePropsParseException("$message at index $index").also { it.errorRange = errorRange }
 }

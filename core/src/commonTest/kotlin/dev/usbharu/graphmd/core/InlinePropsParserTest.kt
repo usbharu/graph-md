@@ -25,9 +25,14 @@ class InlinePropsParserTest {
 
     @Test
     fun `rejects duplicate keys`() {
-        assertFailsWith<InlinePropsParseException> {
-            InlinePropsParser("""{ name = "Alice", name = "Bob" }""").parseObject()
+        val input = """{ name = "Alice", name = "Bob" }"""
+
+        val exception = assertFailsWith<InlinePropsParseException> {
+            InlinePropsParser(input).parseObject()
         }
+
+        val duplicateStart = input.lastIndexOf("name")
+        assertEquals(SourceRange(duplicateStart, duplicateStart + "name".length), exception.errorRange)
     }
 
     @Test
