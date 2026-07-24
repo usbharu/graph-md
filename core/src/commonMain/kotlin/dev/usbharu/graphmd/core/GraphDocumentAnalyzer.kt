@@ -528,16 +528,20 @@ class GraphDocumentAnalyzer {
             if (line.isBlank() || line.trimStart().startsWith("#")) continue
             val indent = line.indexOfFirst { !it.isWhitespace() }.let { if (it < 0) line.length else it }
             if (indent == 0) break
-            val match = Regex("""^(\s*)([A-Za-z_][A-Za-z0-9_.:-]*)\s*:""").find(line) ?: continue
-            val key = match.groups[2] ?: continue
-            val keyStart = match.groups[1]?.value?.length ?: indent
+            val content = line.drop(indent)
+            val colonIndex = content.indexOf(':')
+            if (colonIndex <= 0) continue
+            val rawKey = content.substring(0, colonIndex)
+            val key = rawKey.trim()
+            if (key.isEmpty()) continue
+            val keyStart = indent + rawKey.indexOf(key)
             candidates += YamlPropertyKey(
                 indent,
                 PropertyKey(
-                    key.value,
+                    key,
                     SourceRange(
                         lineStarts[lineIndex] + keyStart,
-                        lineStarts[lineIndex] + keyStart + key.value.length,
+                        lineStarts[lineIndex] + keyStart + key.length,
                     ),
                 ),
             )

@@ -437,6 +437,44 @@ class GraphDocumentAnalyzerTest {
     }
 
     @Test
+    fun `extracts unicode and non identifier yaml property keys`() {
+        val typeText = """
+            ---
+            id: Person
+            kind: NodeType
+            props:
+              名前:
+                type: string
+              1st value:
+                type: number
+            ---
+        """.trimIndent()
+        val typeAnalysis = analyzer.analyze(typeText, "/tmp/Person.md")
+
+        assertEquals(listOf("名前", "1st value"), typeAnalysis.propertyDefinitions.map { it.name })
+        typeAnalysis.propertyDefinitions.forEach { definition ->
+            assertEquals(
+                definition.name,
+                typeText.substring(definition.range.start, definition.range.end),
+            )
+        }
+
+        val nodeText = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            props:
+              名前: Alice
+              1st value: 1
+            ---
+        """.trimIndent()
+        val nodeAnalysis = analyzer.analyze(nodeText, "/tmp/alice.md")
+
+        assertEquals(listOf("名前", "1st value"), nodeAnalysis.propertyReferences.map { it.name })
+    }
+
+    @Test
     fun `extracts top level props and relation keys from body`() {
         val text = """
             ---

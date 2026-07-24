@@ -579,6 +579,49 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `definition resolves unicode and non identifier yaml property keys`() {
+        val nodeTypeUri = "file:///workspace/types/Person.md"
+        val nodeUri = "file:///workspace/alice.md"
+        val nodeText = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            props:
+              名前: Alice
+              1st value: 1
+            ---
+            @props{名前 = "Alice"}
+        """.trimIndent()
+        val fixture = serverFixture(
+            mapOf(
+                nodeTypeUri to """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    props:
+                      名前:
+                        type: string
+                      1st value:
+                        type: number
+                    ---
+                """.trimIndent(),
+                nodeUri to nodeText,
+            ),
+        )
+
+        val unicodeDefinitions = listOf(
+            nodeText.indexOf("名前:") + 1,
+            nodeText.indexOf("名前 =") + 1,
+        ).map { fixture.definitions(nodeUri, it).single() }
+        val numericDefinition = fixture.definitions(nodeUri, nodeText.indexOf("1st value") + 1).single()
+
+        assertTrue(unicodeDefinitions.all { it.uri == nodeTypeUri && it.range.start == Position(4, 2) })
+        assertEquals(nodeTypeUri, numericDefinition.uri)
+        assertEquals(Position(6, 2), numericDefinition.range.start)
+    }
+
+    @Test
     fun `completion context is inferred from front matter and relation body`() {
         val analysis = analyzer.analyze(
             """
