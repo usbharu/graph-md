@@ -150,6 +150,15 @@ describe("@props", () => {
     expect(parsed.name[0].validTime[0].from.timecode).toBe(1);
   });
 
+  it("serialises fallback and timed assertions for the same property", () => {
+    const html = render("@props{age=17,age(validTime = TimelineA) = 18}");
+
+    expect(JSON.parse(dataProps(html) ?? "null").age).toEqual([
+      { value: 17 },
+      { value: 18, validTime: [{ timeline: "TimelineA" }] },
+    ]);
+  });
+
   it("serialises text key annotations", () => {
     const html = render('@props{name(key="lang:ja")="アリス",name(key="lang:us")="Alice"}');
     expect(JSON.parse(dataProps(html) ?? "null").name).toEqual({ "lang:ja": "アリス", "lang:us": "Alice" });
