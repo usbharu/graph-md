@@ -9,6 +9,12 @@ data class CliResult(
     val exitCode: Int = 0,
 )
 
+private enum class Visibility(val wireName: String) {
+    Full("full"),
+    AssertionOnly("assertion-only"),
+    Hidden("hidden"),
+}
+
 class GraphMdCli internal constructor(
     private val fileSystem: CliFileSystem = SystemCliFileSystem,
 ) {
@@ -55,9 +61,9 @@ class GraphMdCli internal constructor(
         }
         val items = select(graph, command.kinds, command.types, command.includeDerived, view)
         val output = if (json) {
-            jsonArray(items.map { it.summaryJson() }).encode() + "\n"
+            jsonArray(items.map { it.summaryJson(view) }).encode() + "\n"
         } else {
-            renderList(items)
+            renderList(items, view)
         }
         return queryResult(output, diagnosticsFor(graph, view), json)
     }
@@ -98,10 +104,11 @@ class GraphMdCli internal constructor(
         if (problem != null) return queryResult("", diagnosticsFor(graph, view) + problem, json)
         val node = (candidates.single() as NodeItem).node
         val entries = view?.filterProperties(node.propEntries) ?: node.propEntries
+        val visibility = view?.visibility(node) ?: Visibility.Full
         val output = if (json) {
-            propertyEntriesToJson(entries).encode() + "\n"
+            propertyEntriesToJson(entries, node.id, visibility.wireName).encode() + "\n"
         } else {
-            renderProperties(entries)
+            renderProperties(entries, node.id, visibility)
         }
         return queryResult(output, diagnosticsFor(graph, view), json)
     }
@@ -130,7 +137,7 @@ class GraphMdCli internal constructor(
         val output = if (json) {
             jsonArray(selected.map { RelationItem(it).detailJson(graph, view) }).encode() + "\n"
         } else {
-            renderRelations(selected)
+            renderRelations(selected, view)
         }
         return queryResult(output, diagnosticsFor(graph, view), json)
     }
@@ -139,7 +146,10 @@ class GraphMdCli internal constructor(
         val view = command.validTime?.let { validTime ->
             temporalView(graph, validTime) ?: return unknownTimeline(validTime, json)
         }
-        val diagnostics = diagnosticsFor(graph, view)
+        val diagnostics = (
+            diagnosticsFor(graph, view) +
+                view.orNullAssertionDiagnostics()
+            )
             .sortedWith(diagnosticComparator)
         val output = if (json) {
             jsonArray(diagnostics.map(Diagnostic::toJson)).encode() + "\n"
@@ -171,6 +181,10 @@ class GraphMdCli internal constructor(
             "timeline" to jsonNumber(counts.getValue(CliKind.Timeline)),
             "warnings" to jsonNumber(warnings),
             "errors" to jsonNumber(errors),
+            "full" to jsonNumber(items.count { it is NodeItem && (view?.visibility(it.node) ?: Visibility.Full) == Visibility.Full }),
+            "assertionOnly" to jsonNumber(
+                items.count { it is NodeItem && view?.visibility(it.node) == Visibility.AssertionOnly },
+            ),
         )
         val output = if (json) {
             value.encode() + "\n"
@@ -179,6 +193,12 @@ class GraphMdCli internal constructor(
                 counts.forEach { (kind, count) -> append(kind.wireName).append('\t').append(count).append('\n') }
                 append("warnings\t").append(warnings).append('\n')
                 append("errors\t").append(errors).append('\n')
+                append("full\t")
+                    .append(items.count { it is NodeItem && (view?.visibility(it.node) ?: Visibility.Full) == Visibility.Full })
+                    .append('\n')
+                append("assertion-only\t")
+                    .append(items.count { it is NodeItem && view?.visibility(it.node) == Visibility.AssertionOnly })
+                    .append('\n')
             }
         }
         return queryResult(output, diagnostics, json)
@@ -199,7 +219,7 @@ class GraphMdCli internal constructor(
                 val kind = if (node.kind == DocumentKind.Media) CliKind.Media else CliKind.Node
                 if (
                     kind in selectedKinds &&
-                    (view == null || view.nodeVisible(node)) &&
+                    (view == null || view.visibility(node) != Visibility.Hidden) &&
                     typeMatches(node.type, types, includeDerived, nodeTypes[node.type]?.ancestorIds.orEmpty())
                 ) {
                     add(NodeItem(node))
@@ -286,6 +306,9 @@ class GraphMdCli internal constructor(
         else -> null
     }
 
+    private fun TemporalView?.orNullAssertionDiagnostics(): List<Diagnostic> =
+        this?.assertionOnlyIds.orEmpty().sorted().map(::assertionOnlyDiagnostic)
+
     private fun queryResult(output: String, diagnostics: List<Diagnostic>, json: Boolean): CliResult {
         val sorted = diagnostics.sortedWith(diagnosticComparator)
         val errors = sorted.exitCode()
@@ -306,20 +329,32 @@ private class TemporalView(
     private val requested: ValidTimeFilter,
     private val requestedTimeline: NormalizedTimeline,
 ) {
-    private val visibleNodeIds = graph.nodes
-        .filter(::nodeVisible)
-        .mapTo(hashSetOf()) { it.id }
+    private val nodesById = graph.nodes.associateBy { it.id }
+    private val visibleRelations = graph.relations.filter { assertedAt(it.validTime) }
+    private val linkedIds = visibleRelations.flatMapTo(hashSetOf()) { listOf(it.from, it.to) }
 
     val visibleSourcePaths: Set<String> = graph.nodes
-        .filter(::nodeVisible)
+        .filter(::documentVisible)
         .mapTo(hashSetOf()) { it.source.path }
 
-    fun nodeVisible(node: NormalizedNode): Boolean = assertedAt(node.validTime)
+    val assertionOnlyIds: Set<String>
+        get() = nodesById.values
+            .filter { visibility(it) == Visibility.AssertionOnly }
+            .mapTo(linkedSetOf()) { it.id }
 
-    fun relationVisible(relation: NormalizedRelation): Boolean =
-        relation.from in visibleNodeIds &&
-            relation.to in visibleNodeIds &&
-            assertedAt(relation.validTime)
+    fun visibility(node: NormalizedNode): Visibility = when {
+        documentVisible(node) -> Visibility.Full
+        filterProperties(node.propEntries).isNotEmpty() || node.id in linkedIds -> Visibility.AssertionOnly
+        else -> Visibility.Hidden
+    }
+
+    fun visibility(id: String): Visibility =
+        nodesById[id]?.let(::visibility)
+            ?: if (id in linkedIds) Visibility.AssertionOnly else Visibility.Hidden
+
+    private fun documentVisible(node: NormalizedNode): Boolean = assertedAt(node.validTime)
+
+    fun relationVisible(relation: NormalizedRelation): Boolean = assertedAt(relation.validTime)
 
     fun filterProperties(
         entries: Map<String, List<NormalizedPropEntry>>,
@@ -371,7 +406,7 @@ private sealed interface GraphItem {
     val kind: CliKind
     val id: String
     val sourcePath: String
-    fun summaryJson(): JsonValue
+    fun summaryJson(view: TemporalView?): JsonValue
     fun detailJson(graph: GraphCompilationResult, view: TemporalView?): JsonValue
 }
 
@@ -380,21 +415,44 @@ private data class NodeItem(val node: NormalizedNode) : GraphItem {
     override val id: String = node.id
     override val sourcePath: String = node.source.path
 
-    override fun summaryJson(): JsonValue = jsonObject(
-        "kind" to jsonString(kind.wireName),
-        "id" to jsonString(id),
-        "type" to jsonString(node.type),
-        "url" to jsonNullableString(node.url),
-        "source" to node.source.toJson(),
-    )
+    override fun summaryJson(view: TemporalView?): JsonValue {
+        val visibility = view?.visibility(node) ?: Visibility.Full
+        if (visibility == Visibility.AssertionOnly) {
+            return jsonObject(
+                "kind" to jsonString(kind.wireName),
+                "id" to jsonString(id),
+                "visibility" to jsonString(visibility.wireName),
+            )
+        }
+        return jsonObject(
+            "kind" to jsonString(kind.wireName),
+            "id" to jsonString(id),
+            "visibility" to jsonString(visibility.wireName),
+            "type" to jsonString(node.type),
+            "url" to jsonNullableString(node.url),
+            "source" to node.source.toJson(),
+        )
+    }
 
     override fun detailJson(graph: GraphCompilationResult, view: TemporalView?): JsonValue {
         val relations = graph.relations.filter { view == null || view.relationVisible(it) }
         val incoming = relations.filter { it.to == id }.sortedWith(relationComparator)
         val outgoing = relations.filter { it.from == id }.sortedWith(relationComparator)
+        val visibility = view?.visibility(node) ?: Visibility.Full
+        if (visibility == Visibility.AssertionOnly) {
+            return jsonObject(
+                "kind" to jsonString(kind.wireName),
+                "id" to jsonString(id),
+                "visibility" to jsonString(visibility.wireName),
+                "props" to propertyEntriesToJson(view?.filterProperties(node.propEntries).orEmpty()),
+                "incomingLinks" to jsonArray(incoming.map { RelationItem(it).detailJson(graph, view) }),
+                "outgoingLinks" to jsonArray(outgoing.map { RelationItem(it).detailJson(graph, view) }),
+            )
+        }
         return jsonObject(
             "kind" to jsonString(kind.wireName),
             "id" to jsonString(id),
+            "visibility" to jsonString(visibility.wireName),
             "type" to jsonString(node.type),
             "url" to jsonNullableString(node.url),
             "validTime" to jsonArray(node.validTime.map(ValidTime::toJson)),
@@ -411,12 +469,14 @@ private data class RelationItem(val relation: NormalizedRelation) : GraphItem {
     override val id: String = "${relation.from}->${relation.to}:${relation.type}"
     override val sourcePath: String = relation.source.path
 
-    override fun summaryJson(): JsonValue = jsonObject(
+    override fun summaryJson(view: TemporalView?): JsonValue = jsonObject(
         "kind" to jsonString(kind.wireName),
         "from" to jsonString(relation.from),
         "to" to jsonString(relation.to),
         "type" to jsonString(relation.type),
         "label" to jsonString(relation.sourceLabel),
+        "fromVisibility" to jsonString((view?.visibility(relation.from) ?: Visibility.Full).wireName),
+        "toVisibility" to jsonString((view?.visibility(relation.to) ?: Visibility.Full).wireName),
         "source" to relation.source.toJson(),
     )
 
@@ -426,6 +486,8 @@ private data class RelationItem(val relation: NormalizedRelation) : GraphItem {
         "to" to jsonString(relation.to),
         "type" to jsonString(relation.type),
         "label" to jsonString(relation.sourceLabel),
+        "fromVisibility" to jsonString((view?.visibility(relation.from) ?: Visibility.Full).wireName),
+        "toVisibility" to jsonString((view?.visibility(relation.to) ?: Visibility.Full).wireName),
         "validTime" to jsonArray(relation.validTime.map(ValidTime::toJson)),
         "props" to propertyEntriesToJson(view?.filterProperties(relation.propEntries) ?: relation.propEntries),
         "targetUrl" to jsonNullableString(relation.targetUrl),
@@ -437,7 +499,7 @@ private data class NodeTypeItem(val type: NormalizedNodeType) : GraphItem {
     override val kind = CliKind.NodeType
     override val id = type.id
     override val sourcePath = type.source.path
-    override fun summaryJson(): JsonValue = jsonObject(
+    override fun summaryJson(view: TemporalView?): JsonValue = jsonObject(
         "kind" to jsonString(kind.wireName),
         "id" to jsonString(id),
         "source" to type.source.toJson(),
@@ -455,7 +517,7 @@ private data class RelTypeItem(val type: NormalizedRelType) : GraphItem {
     override val kind = CliKind.RelType
     override val id = type.id
     override val sourcePath = type.source.path
-    override fun summaryJson(): JsonValue = jsonObject(
+    override fun summaryJson(view: TemporalView?): JsonValue = jsonObject(
         "kind" to jsonString(kind.wireName),
         "id" to jsonString(id),
         "source" to type.source.toJson(),
@@ -475,7 +537,7 @@ private data class TimelineItem(val timeline: NormalizedTimeline) : GraphItem {
     override val kind = CliKind.Timeline
     override val id = timeline.id
     override val sourcePath = timeline.source.path
-    override fun summaryJson(): JsonValue = jsonObject(
+    override fun summaryJson(view: TemporalView?): JsonValue = jsonObject(
         "kind" to jsonString(kind.wireName),
         "id" to jsonString(id),
         "source" to timeline.source.toJson(),
@@ -519,6 +581,13 @@ private fun List<Diagnostic>.exitCode(): Int = if (any { it.severity == Severity
 private fun cliDiagnostic(message: String): Diagnostic =
     Diagnostic(DiagnosticCategory.ReferenceError, Severity.Error, message)
 
+private fun assertionOnlyDiagnostic(id: String): Diagnostic =
+    Diagnostic(
+        DiagnosticCategory.ReferenceError,
+        Severity.Warning,
+        "Document $id is outside --valid-time; showing matching assertions and ID only",
+    )
+
 private fun renderDiagnostic(diagnostic: Diagnostic): String {
     val location = diagnostic.source?.let { source ->
         buildString {
@@ -530,16 +599,24 @@ private fun renderDiagnostic(diagnostic: Diagnostic): String {
     return "$location${diagnostic.severity.name.lowercase()} ${diagnostic.category.name}: ${diagnostic.message}\n"
 }
 
-private fun renderList(items: List<GraphItem>): String = buildString {
-    append("KIND\tID\tTYPE\tSOURCE\n")
+private fun renderList(items: List<GraphItem>, view: TemporalView?): String = buildString {
+    append("KIND\tID\tVISIBILITY\tTYPE\tSOURCE\n")
     items.forEach { item ->
         when (item) {
-            is NodeItem -> append(item.kind.wireName).append('\t').append(item.id).append('\t')
-                .append(item.node.type).append('\t').append(item.sourcePath).append('\n')
+            is NodeItem -> {
+                val visibility = view?.visibility(item.node) ?: Visibility.Full
+                append(item.kind.wireName).append('\t').append(item.id).append('\t')
+                    .append(visibility.wireName).append('\t')
+                if (visibility == Visibility.AssertionOnly) {
+                    append("-\t-\n")
+                } else {
+                    append(item.node.type).append('\t').append(item.sourcePath).append('\n')
+                }
+            }
             is RelationItem -> append("link\t").append(item.relation.from).append(" -> ")
-                .append(item.relation.to).append('\t').append(item.relation.type).append('\t')
+                .append(item.relation.to).append("\t-\t").append(item.relation.type).append('\t')
                 .append(item.sourcePath).append('\n')
-            else -> append(item.kind.wireName).append('\t').append(item.id).append("\t-\t")
+            else -> append(item.kind.wireName).append('\t').append(item.id).append("\tfull\t-\t")
                 .append(item.sourcePath).append('\n')
         }
     }
@@ -548,11 +625,15 @@ private fun renderList(items: List<GraphItem>): String = buildString {
 private fun renderShow(item: GraphItem, graph: GraphCompilationResult, view: TemporalView?): String = buildString {
     append("Kind: ").append(item.kind.wireName).append('\n')
     append("ID: ").append(item.id).append('\n')
-    append("Source: ").append(item.sourcePath).append('\n')
     when (item) {
         is NodeItem -> {
-            append("Type: ").append(item.node.type).append('\n')
-            item.node.url?.let { append("URL: ").append(it).append('\n') }
+            val visibility = view?.visibility(item.node) ?: Visibility.Full
+            append("Visibility: ").append(visibility.wireName).append('\n')
+            if (visibility == Visibility.Full) {
+                append("Source: ").append(item.sourcePath).append('\n')
+                append("Type: ").append(item.node.type).append('\n')
+                item.node.url?.let { append("URL: ").append(it).append('\n') }
+            }
             append("\nProperties:\n")
                 .append(renderProperties(view?.filterProperties(item.node.propEntries) ?: item.node.propEntries))
             append("\nIncoming links:\n")
@@ -561,6 +642,7 @@ private fun renderShow(item: GraphItem, graph: GraphCompilationResult, view: Tem
                     graph.relations
                         .filter { it.to == item.id && (view == null || view.relationVisible(it)) }
                         .sortedWith(relationComparator),
+                    view,
                 ),
             )
             append("\nOutgoing links:\n")
@@ -569,10 +651,12 @@ private fun renderShow(item: GraphItem, graph: GraphCompilationResult, view: Tem
                     graph.relations
                         .filter { it.from == item.id && (view == null || view.relationVisible(it)) }
                         .sortedWith(relationComparator),
+                    view,
                 ),
             )
         }
         is NodeTypeItem -> {
+            append("Source: ").append(item.sourcePath).append('\n')
             append("Ancestors: ").append(item.type.ancestorIds.sorted().joinToString()).append('\n')
             append("Property schemas:\n")
             item.type.props.sortedByKey().forEach { (name, schema) ->
@@ -582,6 +666,7 @@ private fun renderShow(item: GraphItem, graph: GraphCompilationResult, view: Tem
             }
         }
         is RelTypeItem -> {
+            append("Source: ").append(item.sourcePath).append('\n')
             append("From: ").append(item.type.from?.joinToString() ?: "*").append('\n')
             append("To: ").append(item.type.to?.joinToString() ?: "*").append('\n')
             append("Ancestors: ").append(item.type.ancestorIds.sorted().joinToString()).append('\n')
@@ -593,6 +678,7 @@ private fun renderShow(item: GraphItem, graph: GraphCompilationResult, view: Tem
             }
         }
         is TimelineItem -> {
+            append("Source: ").append(item.sourcePath).append('\n')
             append("Timecode: ").append(item.timeline.timecode?.type?.name ?: "-").append('\n')
             append("Ancestors: ").append(item.timeline.ancestorIds.sorted().joinToString()).append('\n')
             append("Mappings: ").append(item.timeline.mappings.size).append('\n')
@@ -601,20 +687,34 @@ private fun renderShow(item: GraphItem, graph: GraphCompilationResult, view: Tem
     }
 }
 
-private fun renderProperties(entries: Map<String, List<NormalizedPropEntry>>): String = buildString {
+private fun renderProperties(
+    entries: Map<String, List<NormalizedPropEntry>>,
+    ownerId: String? = null,
+    ownerVisibility: Visibility? = null,
+): String = buildString {
+    if (ownerId != null && ownerVisibility != null) {
+        append("OWNER_ID\tOWNER_VISIBILITY\t")
+    }
     append("NAME\tVALUE\tVALID_TIME\n")
     entries.sortedByKey().forEach { (name, values) ->
         values.forEach { entry ->
+            if (ownerId != null && ownerVisibility != null) {
+                append(ownerId).append('\t').append(ownerVisibility.wireName).append('\t')
+            }
             append(name).append('\t').append(entry.value.toJson().encode()).append('\t')
             append(jsonArray(entry.validTime.map(ValidTime::toJson)).encode()).append('\n')
         }
     }
 }
 
-private fun renderRelations(relations: List<NormalizedRelation>): String = buildString {
-    append("TYPE\tFROM\tTO\tLABEL\tSOURCE\n")
+private fun renderRelations(relations: List<NormalizedRelation>, view: TemporalView? = null): String = buildString {
+    append("TYPE\tFROM\tFROM_VISIBILITY\tTO\tTO_VISIBILITY\tLABEL\tSOURCE\n")
     relations.forEach { relation ->
-        append(relation.type).append('\t').append(relation.from).append('\t').append(relation.to)
-            .append('\t').append(relation.sourceLabel).append('\t').append(relation.source.path).append('\n')
+        append(relation.type).append('\t')
+            .append(relation.from).append('\t')
+            .append((view?.visibility(relation.from) ?: Visibility.Full).wireName).append('\t')
+            .append(relation.to).append('\t')
+            .append((view?.visibility(relation.to) ?: Visibility.Full).wireName).append('\t')
+            .append(relation.sourceLabel).append('\t').append(relation.source.path).append('\n')
     }
 }

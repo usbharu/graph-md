@@ -44,7 +44,10 @@ Discovered `.md` files are treated as GraphMD only when their first line is
 syntax such as `CommonEra`, `CommonEra(from=10)`, or
 `CommonEra(from=10,to=20)`, and only includes overlapping assertions on that
 Timeline or the ancestor Timelines it `extends`. A Timeline `mapping` alone
-does not make assertions visible.
+does not make assertions visible. When a Property or Link matches but its
+Document does not, the CLI returns an `assertion-only` entity containing only
+its ID and the matching assertions. A matching Link also exposes out-of-range
+endpoints as `assertion-only` ID references.
 
 This project uses a version catalog (see `gradle/libs.versions.toml`) to declare and version dependencies
 and both a build cache and a configuration cache (see `gradle.properties`).

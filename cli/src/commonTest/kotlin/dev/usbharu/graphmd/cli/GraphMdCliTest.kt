@@ -244,11 +244,13 @@ class GraphMdCliTest {
         assertTrue(listed.stdout.contains("\"id\":\"erin\""))
         assertFalse(listed.stdout.contains("\"id\":\"carol\""))
         assertFalse(listed.stdout.contains("\"id\":\"dave\""))
-        assertFalse(listed.stdout.contains("\"id\":\"bob\""))
+        assertTrue(listed.stdout.contains("\"id\":\"bob\",\"visibility\":\"assertion-only\""))
+        assertTrue(listed.stdout.contains("\"id\":\"frank\",\"visibility\":\"assertion-only\""))
         assertTrue(props.stdout.contains("\"value\":\"old\""))
         assertTrue(props.stdout.contains("\"value\":\"new\""))
         assertTrue(links.stdout.contains("\"to\":\"erin\""))
-        assertFalse(links.stdout.contains("\"to\":\"bob\""))
+        assertTrue(links.stdout.contains("\"to\":\"bob\""))
+        assertTrue(links.stdout.contains("\"toVisibility\":\"assertion-only\""))
     }
 
     @Test
@@ -271,6 +273,34 @@ class GraphMdCliTest {
         assertTrue(mappedOnly.stderr.contains("No entity found"))
         assertEquals(0, inherited.exitCode, inherited.stderr)
         assertTrue(inherited.stdout.contains("\"id\":\"alice\""))
+    }
+
+    @Test
+    fun `matching property exposes only assertions and id when document is outside valid time`() {
+        val cli = GraphMdCli(validTimeFixture())
+
+        val shown = cli.run(
+            listOf("show", "frank", "/workspace", "--valid-time", "CommonEra(from=14,to=16)", "--json"),
+        )
+        val props = cli.run(
+            listOf("props", "frank", "/workspace", "--valid-time", "CommonEra(from=14,to=16)", "--json"),
+        )
+        val linkedTarget = cli.run(
+            listOf("show", "bob", "/workspace", "--valid-time", "CommonEra(from=14,to=16)", "--json"),
+        )
+
+        assertEquals(0, shown.exitCode)
+        assertTrue(shown.stdout.contains("\"visibility\":\"assertion-only\""))
+        assertTrue(shown.stdout.contains("\"value\":\"searchable\""))
+        assertFalse(shown.stdout.contains("\"type\":\"Person\""))
+        assertFalse(shown.stdout.contains("\"source\""))
+        assertTrue(props.stdout.contains("\"value\":\"searchable\""))
+        assertTrue(props.stdout.contains("\"ownerId\":\"frank\""))
+        assertTrue(props.stdout.contains("\"ownerVisibility\":\"assertion-only\""))
+        assertEquals("", props.stderr)
+        assertTrue(linkedTarget.stdout.contains("\"visibility\":\"assertion-only\""))
+        assertTrue(linkedTarget.stdout.contains("\"incomingLinks\""))
+        assertFalse(linkedTarget.stdout.contains("\"type\":\"Person\""))
     }
 
     @Test
@@ -485,6 +515,16 @@ class GraphMdCliTest {
                     to:
                       timecode: 20
                 ---
+            """.trimIndent(),
+            "/workspace/frank.md" to """
+                ---
+                id: frank
+                kind: Node
+                type: Person
+                validTime:
+                  - timeline: ProjectEra
+                ---
+                @props{name(validTime=CommonEra(from=10,to=20)) = "searchable"}
             """.trimIndent(),
         ),
     )

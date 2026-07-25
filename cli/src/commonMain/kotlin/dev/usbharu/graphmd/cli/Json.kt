@@ -119,13 +119,21 @@ internal fun NormalizedPropEntry.toJson(): JsonValue = jsonObject(
     "validTime" to jsonArray(validTime.map(ValidTime::toJson)),
 )
 
-internal fun propertyEntriesToJson(entries: Map<String, List<NormalizedPropEntry>>): JsonValue =
+internal fun propertyEntriesToJson(
+    entries: Map<String, List<NormalizedPropEntry>>,
+    ownerId: String? = null,
+    ownerVisibility: String? = null,
+): JsonValue =
     jsonArray(entries.sortedByKey().flatMap { (name, values) ->
         values.map { entry ->
-            jsonObject(
-                "name" to jsonString(name),
-                "value" to entry.value.toJson(),
-                "validTime" to jsonArray(entry.validTime.map(ValidTime::toJson)),
+            JsonValue.Object(
+                linkedMapOf<String, JsonValue>().apply {
+                    ownerId?.let { put("ownerId", jsonString(it)) }
+                    ownerVisibility?.let { put("ownerVisibility", jsonString(it)) }
+                    put("name", jsonString(name))
+                    put("value", entry.value.toJson())
+                    put("validTime", jsonArray(entry.validTime.map(ValidTime::toJson)))
+                },
             )
         }
     })
