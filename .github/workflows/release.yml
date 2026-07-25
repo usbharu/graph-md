@@ -115,9 +115,7 @@ jobs:
           java-version: "21"
           cache: gradle
       - name: Build native release
-        env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: ./gradlew "-PreleaseVersion=$VERSION" :cli:${{ matrix.task }}
+        run: ./gradlew "-PreleaseVersion=${{ needs.prepare.outputs.version }}" :cli:${{ matrix.task }}
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
