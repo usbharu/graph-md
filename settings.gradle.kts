@@ -19,3 +19,4 @@ plugins {
 rootProject.name = "graph-md"
 include("core")
 include("lsp")
+include("cli")

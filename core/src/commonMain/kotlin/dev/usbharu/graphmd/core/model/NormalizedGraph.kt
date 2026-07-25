@@ -36,6 +36,7 @@ data class NormalizedRelType(
     val to: List<String>?,
     val props: Map<String, ResolvedPropSchema>,
     val source: SourceInfo,
+    val ancestorIds: Set<String> = emptySet(),
 )
 
 data class NormalizedTimeline(
