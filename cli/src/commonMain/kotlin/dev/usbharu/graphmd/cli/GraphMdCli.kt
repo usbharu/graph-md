@@ -367,28 +367,45 @@ private class TemporalView(
         assertions.mapNotNull(::filterEntry).takeIf { it.isNotEmpty() }?.let { name to it }
     }.toMap(linkedMapOf())
 
-    private fun filterEntry(entry: NormalizedPropEntry): NormalizedPropEntry? =
-        entry.takeIf { assertedAt(it.validTime) }?.copy(value = filterValue(entry.value))
-
-    private fun filterValue(value: NormalizedValue): NormalizedValue = when (value) {
-        is TextValue -> TextValue(
-            value.memberEntries.mapNotNull { (name, entry) ->
-                filterEntry(entry)?.let { name to it }
-            }.toMap(linkedMapOf()),
+    private fun filterEntry(entry: NormalizedPropEntry): NormalizedPropEntry? {
+        val asserted = assertedAt(entry.validTime)
+        val filtered = filterValue(entry.value)
+        if (!asserted && !filtered.containsAssertion) return null
+        return entry.copy(
+            value = filtered.value,
+            validTime = entry.validTime.takeIf { asserted }.orEmpty(),
         )
+    }
+
+    private fun filterValue(value: NormalizedValue): FilteredValue = when (value) {
+        is TextValue -> {
+            val entries = value.memberEntries.mapNotNull { (name, entry) ->
+                filterEntry(entry)?.let { name to it }
+            }.toMap(linkedMapOf())
+            FilteredValue(TextValue(entries), entries.isNotEmpty())
+        }
         is ArrayValue -> {
             val elements = value.elements.mapNotNull { element ->
-                element.takeIf { assertedAt(it.validTime) }?.copy(value = filterValue(element.value))
+                val asserted = assertedAt(element.validTime)
+                val filtered = filterValue(element.value)
+                if (!asserted && !filtered.containsAssertion) {
+                    null
+                } else {
+                    element.copy(
+                        value = filtered.value,
+                        validTime = element.validTime.takeIf { asserted }.orEmpty(),
+                    )
+                }
             }
-            ArrayValue(elements.map { it.value }, elements)
+            FilteredValue(ArrayValue(elements.map { it.value }, elements), elements.isNotEmpty())
         }
         is ObjectValue -> {
             val members = value.members.mapNotNull { (name, entry) ->
                 filterEntry(entry)?.let { name to it }
             }.toMap(linkedMapOf())
-            ObjectValue(members.mapValues { it.value.value }, members)
+            FilteredValue(ObjectValue(members.mapValues { it.value.value }, members), members.isNotEmpty())
         }
-        else -> value
+        else -> FilteredValue(value, containsAssertion = false)
     }
 
     private fun assertedAt(validTimes: List<ValidTime>): Boolean = validTimes.any { validTime ->
@@ -406,6 +423,11 @@ private class TemporalView(
             (assertedTo == null || requestedFrom == null || assertedTo >= requestedFrom)
     }
 }
+
+private data class FilteredValue(
+    val value: NormalizedValue,
+    val containsAssertion: Boolean,
+)
 
 private sealed interface GraphItem {
     val kind: CliKind

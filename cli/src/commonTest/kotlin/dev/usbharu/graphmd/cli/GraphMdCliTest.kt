@@ -306,6 +306,73 @@ class GraphMdCliTest {
     }
 
     @Test
+    fun `nested assertion remains visible when it overrides its property and document timeline`() {
+        val fs = FakeFileSystem(
+            files = mapOf(
+                "/workspace/TimelineA.md" to """
+                    ---
+                    id: TimelineA
+                    kind: Timeline
+                    timecode:
+                      type: number
+                    ---
+                """.trimIndent(),
+                "/workspace/TimelineB.md" to """
+                    ---
+                    id: TimelineB
+                    kind: Timeline
+                    timecode:
+                      type: number
+                    ---
+                """.trimIndent(),
+                "/workspace/SampleType.md" to """
+                    ---
+                    id: Sample
+                    kind: NodeType
+                    props:
+                      values:
+                        type: array
+                        items: number
+                    ---
+                """.trimIndent(),
+                "/workspace/sample.md" to """
+                    ---
+                    id: sample
+                    kind: Node
+                    type: Sample
+                    validTime:
+                      - timeline: TimelineA
+                    props:
+                      values:
+                        - 1
+                        - value: 2
+                          validTime:
+                            - timeline: TimelineB
+                    ---
+                """.trimIndent(),
+            ),
+        )
+        val cli = GraphMdCli(fs)
+
+        val timelineA = cli.run(
+            listOf("props", "sample", "/workspace", "--valid-time", "TimelineA", "--json"),
+        )
+        val timelineB = cli.run(
+            listOf("props", "sample", "/workspace", "--valid-time", "TimelineB", "--json"),
+        )
+        val valueOne = Regex("\"value\":1(?:\\.0)?,")
+        val valueTwo = Regex("\"value\":2(?:\\.0)?,")
+
+        assertEquals(0, timelineA.exitCode, timelineA.stderr)
+        assertTrue(valueOne.containsMatchIn(timelineA.stdout))
+        assertFalse(valueTwo.containsMatchIn(timelineA.stdout))
+        assertEquals(0, timelineB.exitCode, timelineB.stderr)
+        assertTrue(timelineB.stdout.contains("\"ownerVisibility\":\"assertion-only\""))
+        assertTrue(valueTwo.containsMatchIn(timelineB.stdout))
+        assertFalse(valueOne.containsMatchIn(timelineB.stdout))
+    }
+
+    @Test
     fun `valid time rejects invalid ranges and unknown timelines`() {
         val cli = GraphMdCli(validTimeFixture())
 
