@@ -207,10 +207,12 @@ class GraphMdCliTest {
 
         val regular = GraphMdCli(fs).run(listOf("lint", "/workspace", "--json"))
         val strict = GraphMdCli(fs).run(listOf("lint", "/workspace", "--strict", "--json"))
+        val query = GraphMdCli(fs).run(listOf("list", "/workspace", "--json"))
 
         assertEquals(0, regular.exitCode)
         assertEquals(1, strict.exitCode)
         assertTrue(strict.stdout.contains("\"severity\":\"error\""))
+        assertEquals("", query.stderr)
     }
 
     @Test

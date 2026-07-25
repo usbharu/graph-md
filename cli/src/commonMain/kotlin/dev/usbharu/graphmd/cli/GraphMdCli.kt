@@ -65,7 +65,7 @@ class GraphMdCli internal constructor(
         } else {
             renderList(items, view)
         }
-        return queryResult(output, diagnosticsFor(graph, view), json)
+        return queryResult(output, queryDiagnosticsFor(graph, view), json)
     }
 
     private fun show(
@@ -79,14 +79,14 @@ class GraphMdCli internal constructor(
         val candidates = select(graph, command.kinds, emptySet(), includeDerived = false, view)
             .filter { it.id == command.id && it.kind != CliKind.Link }
         val problem = candidateProblem(command.id, candidates)
-        if (problem != null) return queryResult("", diagnosticsFor(graph, view) + problem, json)
+        if (problem != null) return queryResult("", queryDiagnosticsFor(graph, view) + problem, json)
         val item = candidates.single()
         val output = if (json) {
             item.detailJson(graph, view).encode() + "\n"
         } else {
             renderShow(item, graph, view)
         }
-        return queryResult(output, diagnosticsFor(graph, view), json)
+        return queryResult(output, queryDiagnosticsFor(graph, view), json)
     }
 
     private fun props(
@@ -101,7 +101,7 @@ class GraphMdCli internal constructor(
         val candidates = select(graph, allowedKinds, emptySet(), includeDerived = false, view)
             .filter { it.id == command.id }
         val problem = candidateProblem(command.id, candidates)
-        if (problem != null) return queryResult("", diagnosticsFor(graph, view) + problem, json)
+        if (problem != null) return queryResult("", queryDiagnosticsFor(graph, view) + problem, json)
         val node = (candidates.single() as NodeItem).node
         val entries = view?.filterProperties(node.propEntries) ?: node.propEntries
         val visibility = view?.visibility(node) ?: Visibility.Full
@@ -110,7 +110,7 @@ class GraphMdCli internal constructor(
         } else {
             renderProperties(entries, node.id, visibility)
         }
-        return queryResult(output, diagnosticsFor(graph, view), json)
+        return queryResult(output, queryDiagnosticsFor(graph, view), json)
     }
 
     private fun links(
@@ -125,7 +125,7 @@ class GraphMdCli internal constructor(
         val candidates = select(graph, allowedKinds, emptySet(), includeDerived = false, view)
             .filter { it.id == command.id }
         val problem = candidateProblem(command.id, candidates)
-        if (problem != null) return queryResult("", diagnosticsFor(graph, view) + problem, json)
+        if (problem != null) return queryResult("", queryDiagnosticsFor(graph, view) + problem, json)
         val selected = relationsFor(
             graph = graph,
             id = command.id,
@@ -139,7 +139,7 @@ class GraphMdCli internal constructor(
         } else {
             renderRelations(selected, view)
         }
-        return queryResult(output, diagnosticsFor(graph, view), json)
+        return queryResult(output, queryDiagnosticsFor(graph, view), json)
     }
 
     private fun lint(graph: GraphCompilationResult, command: CliCommand.Lint, json: Boolean): CliResult {
@@ -201,7 +201,7 @@ class GraphMdCli internal constructor(
                     .append('\n')
             }
         }
-        return queryResult(output, diagnostics, json)
+        return queryResult(output, diagnostics.filter { it.severity == Severity.Error }, json)
     }
 
     private fun select(
@@ -297,6 +297,11 @@ class GraphMdCli internal constructor(
     } else {
         graph.diagnostics.filter { it.source?.path in view.visibleSourcePaths }
     }
+
+    private fun queryDiagnosticsFor(
+        graph: GraphCompilationResult,
+        view: TemporalView?,
+    ): List<Diagnostic> = diagnosticsFor(graph, view).filter { it.severity == Severity.Error }
 
     private fun candidateProblem(id: String, candidates: List<GraphItem>): Diagnostic? = when {
         candidates.isEmpty() -> cliDiagnostic("No entity found with ID: $id")
