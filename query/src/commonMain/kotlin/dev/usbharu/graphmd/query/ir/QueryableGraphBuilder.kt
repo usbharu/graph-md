@@ -34,7 +34,7 @@ class QueryableGraphBuilder(
             queryNode
         }
 
-        val relations = compilation.relations.map { relation ->
+        var relations = compilation.relations.map { relation ->
             buildRelation(
                 relation = relation,
                 ancestorTypeIds = compilation.relTypes
@@ -45,6 +45,13 @@ class QueryableGraphBuilder(
             )
         }
 
+        resolveFallbackProperties()
+        val propertyById = properties.associateBy { it.id }
+        relations = relations.map { relation ->
+            relation.copy(properties = relation.properties.map { propertyById.getValue(it.id) })
+        }
+        properties.forEach(::addTextValues)
+
         return QueryableGraph(
             nodes = nodes,
             propertyAssertions = properties.toList(),
@@ -53,6 +60,22 @@ class QueryableGraphBuilder(
             timelines = timelineCatalog.timelines,
             nodeTypeIds = compilation.nodeTypes.mapTo(linkedSetOf()) { NodeTypeId(it.id) },
             relationTypeIds = compilation.relTypes.mapTo(linkedSetOf()) { RelationTypeId(it.id) },
+            nodeTypeSchemas = compilation.nodeTypes.associate { type ->
+                NodeTypeId(type.id) to QueryNodeTypeSchema(
+                    NodeTypeId(type.id),
+                    type.props,
+                    type.ancestorIds.mapTo(linkedSetOf(), ::NodeTypeId),
+                )
+            },
+            relationTypeSchemas = compilation.relTypes.associate { type ->
+                RelationTypeId(type.id) to QueryRelationTypeSchema(
+                    RelationTypeId(type.id),
+                    type.props,
+                    type.from?.mapTo(linkedSetOf(), ::NodeTypeId),
+                    type.to?.mapTo(linkedSetOf(), ::NodeTypeId),
+                    type.ancestorIds.mapTo(linkedSetOf(), ::RelationTypeId),
+                )
+            },
         )
     }
 
@@ -144,9 +167,9 @@ class QueryableGraphBuilder(
             value = entry.value,
             validTime = validTime,
             source = source,
+            isFallback = entry.isFallback,
         )
         properties += assertion
-        addTextValues(assertion)
 
         when (val value = entry.value) {
             is TextValue -> value.memberEntries.forEach { (name, member) ->
@@ -174,7 +197,11 @@ class QueryableGraphBuilder(
                     owner,
                     propertyId,
                     PropertyPath(path.segments + index.toString()),
-                    NormalizedPropEntry(element.value, element.validTime.ifEmpty { entry.validTime }),
+                    NormalizedPropEntry(
+                        element.value,
+                        element.validTime.ifEmpty { entry.validTime },
+                        element.isFallback || element.validTime.isEmpty() && entry.isFallback,
+                    ),
                     source,
                     "$stablePrefix:array:$index",
                 )
@@ -203,7 +230,38 @@ class QueryableGraphBuilder(
             text = text,
             validTime = assertion.validTime,
             source = assertion.source,
+            propertyPath = assertion.path,
         )
+    }
+
+    private fun resolveFallbackProperties() {
+        val replacements = properties.groupBy { it.owner to it.path }.values.flatMap { group ->
+            val timed = group.filterNot { it.isFallback }
+            val timedUnion = timed.fold(IntervalSet.empty()) { result, assertion -> result union assertion.validTime }
+            group.map { assertion ->
+                if (!assertion.isFallback) {
+                    assertion
+                } else {
+                    // The compiler has already inherited the nearest owner/parent extent.
+                    // Keeping that scope is essential for fallback members inside a timed
+                    // text/object value.
+                    val ownerTime = assertion.validTime
+                    val fallbackBase = when {
+                        !ownerTime.isUniversal -> ownerTime
+                        timedUnion.isEmpty -> IntervalSet.universal()
+                        else -> IntervalSet.of(
+                            timedUnion.intervals.map { TemporalInterval(it.timelineId) }.distinct(),
+                        )
+                    }
+                    assertion.copy(
+                        validTime = if (timedUnion.isEmpty) fallbackBase else fallbackBase.subtract(timedUnion),
+                    )
+                }
+            }
+        }.associateBy { it.id }
+        properties.indices.forEach { index ->
+            properties[index] = replacements.getValue(properties[index].id)
+        }
     }
 
     private fun buildBodyText(node: NormalizedNode, nodeValidTime: IntervalSet) {

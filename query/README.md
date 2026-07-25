@@ -63,6 +63,47 @@ relation patterns with nested target expressions, and text predicates.
 `engine.scan(query)` runs the unindexed reference semantics and is intended for
 differential tests.
 
+## GMQL v0.1
+
+GMQL text can be compiled once and executed repeatedly with typed parameters:
+
+```kotlin
+val compilation = engine.compileGmql(
+    """
+    MATCH (person:Person)
+    WHERE person.age >= ${'$'}minimumAge
+      AND FULLTEXT(person, "勇者")
+    VALID ON MainStory AT ${'$'}instant
+    RETURN ID(person) AS id, VALIDITY() AS validity, SCORE() AS score
+    ORDER BY score DESC, id ASC
+    """.trimIndent(),
+    mapOf(
+        "minimumAge" to GmqlType.Integer,
+        "instant" to GmqlType.Decimal,
+    ),
+)
+val compiled = requireNotNull(compilation.query) { compilation.diagnostics.joinToString() }
+val result = engine.executeGmql(
+    compiled,
+    mapOf(
+        "minimumAge" to GmqlValue.IntegerValue(15),
+        "instant" to GmqlValue.DecimalValue(150.0),
+    ),
+)
+```
+
+`queryGmql` is the convenience form and derives parameter types from the
+supplied values. Syntax, name, type, temporal and execution-limit failures are
+returned as `GMQL1xxx` through `GMQL5xxx` diagnostics.
+
+GraphMD `string` and `text` remain distinct. A `string` is a scalar. A `text`
+is a structured, temporal member map: compare `person.biography.default`, or
+pass `person.biography` to `FULLTEXT` to search all of its members.
+
+`VALID ANYTIME` may omit a timeline. `AT`, `OVERLAPS`, `CONTAINS`, and `DURING`
+require `VALID ON <timeline>` so numeric bounds are never compared across
+timeline domains implicitly.
+
 ## Temporal behavior
 
 GraphMD source `validTime.from` and `validTime.to` remain inclusive.

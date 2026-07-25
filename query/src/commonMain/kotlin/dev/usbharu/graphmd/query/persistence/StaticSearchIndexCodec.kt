@@ -35,7 +35,7 @@ data class StaticSearchBundle(
 }
 
 object StaticSearchIndexCodec {
-    const val FORMAT_VERSION: Int = 2
+    const val FORMAT_VERSION: Int = 3
 
     fun encode(
         index: SearchIndex,
@@ -62,6 +62,12 @@ object StaticSearchIndexCodec {
                     "nodeTypeIds" to jsonArray(index.graph.nodeTypeIds.sortedBy { it.value }.map { jsonString(it.value) }),
                     "relationTypeIds" to jsonArray(
                         index.graph.relationTypeIds.sortedBy { it.value }.map { jsonString(it.value) },
+                    ),
+                    "nodeTypeSchemas" to jsonArray(
+                        index.graph.nodeTypeSchemas.values.sortedBy { it.id.value }.map(::encodeNodeTypeSchema),
+                    ),
+                    "relationTypeSchemas" to jsonArray(
+                        index.graph.relationTypeSchemas.values.sortedBy { it.id.value }.map(::encodeRelationTypeSchema),
                     ),
                 ),
             ),
@@ -177,6 +183,10 @@ object StaticSearchIndexCodec {
         val relationTypeIds = metadata.required("relationTypeIds").arrayValue().mapTo(linkedSetOf()) {
             RelationTypeId(it.stringValue())
         }
+        val nodeTypeSchemas = metadata.required("nodeTypeSchemas").arrayValue().map(::decodeNodeTypeSchema)
+            .associateBy { it.id }
+        val relationTypeSchemas = metadata.required("relationTypeSchemas").arrayValue().map(::decodeRelationTypeSchema)
+            .associateBy { it.id }
         val nodes = records("nodes").map(::decodeNode)
         val properties = records("properties").map(::decodeProperty)
         val propertyById = properties.associateBy { it.id }
@@ -190,6 +200,8 @@ object StaticSearchIndexCodec {
             timelines,
             nodeTypeIds,
             relationTypeIds,
+            nodeTypeSchemas,
+            relationTypeSchemas,
         )
 
         val nodePostings = records("node-postings").associate { record ->
@@ -338,6 +350,7 @@ private fun encodeProperty(assertion: PropertyAssertion): Json = jsonObject(
     "value" to encodeNormalizedValue(assertion.value),
     "validTime" to encodeIntervalSet(assertion.validTime),
     "source" to encodeSource(assertion.source),
+    "fallback" to jsonBoolean(assertion.isFallback),
 )
 
 private fun decodeProperty(json: Json): PropertyAssertion {
@@ -351,6 +364,7 @@ private fun decodeProperty(json: Json): PropertyAssertion {
         value = decodeNormalizedValue(value.required("value")),
         validTime = decodeIntervalSet(value.required("validTime")),
         source = decodeSource(value.required("source")),
+        isFallback = value.required("fallback").booleanValue(),
     )
 }
 
@@ -401,6 +415,9 @@ private fun encodeText(assertion: TextAssertion): Json = jsonObject(
     "validTime" to encodeIntervalSet(assertion.validTime),
     "source" to encodeSource(assertion.source),
     "sourceRange" to encodeRange(assertion.sourceRange),
+    "propertyPath" to (assertion.propertyPath?.let { path ->
+        jsonArray(path.segments.map(::jsonString))
+    } ?: Json.Null),
 )
 
 private fun decodeText(json: Json): TextAssertion {
@@ -414,6 +431,76 @@ private fun decodeText(json: Json): TextAssertion {
         validTime = decodeIntervalSet(value.required("validTime")),
         source = decodeSource(value.required("source")),
         sourceRange = decodeRange(value.required("sourceRange")),
+        propertyPath = value.required("propertyPath").let { encoded ->
+            if (encoded === Json.Null) null else PropertyPath(encoded.arrayValue().map(Json::stringValue))
+        },
+    )
+}
+
+private fun encodeNodeTypeSchema(schema: QueryNodeTypeSchema): Json = jsonObject(
+    "id" to jsonString(schema.id.value),
+    "ancestors" to jsonArray(schema.ancestorTypeIds.sortedBy { it.value }.map { jsonString(it.value) }),
+    "properties" to encodePropertySchemas(schema.properties),
+)
+
+private fun decodeNodeTypeSchema(json: Json): QueryNodeTypeSchema {
+    val value = json.objectValue()
+    return QueryNodeTypeSchema(
+        NodeTypeId(value.required("id").stringValue()),
+        decodePropertySchemas(value.required("properties")),
+        value.required("ancestors").arrayValue().mapTo(linkedSetOf()) { NodeTypeId(it.stringValue()) },
+    )
+}
+
+private fun encodeRelationTypeSchema(schema: QueryRelationTypeSchema): Json = jsonObject(
+    "id" to jsonString(schema.id.value),
+    "ancestors" to jsonArray(schema.ancestorTypeIds.sortedBy { it.value }.map { jsonString(it.value) }),
+    "sources" to (schema.sourceTypeIds?.let {
+        jsonArray(it.sortedBy { id -> id.value }.map { id -> jsonString(id.value) })
+    } ?: Json.Null),
+    "targets" to (schema.targetTypeIds?.let {
+        jsonArray(it.sortedBy { id -> id.value }.map { id -> jsonString(id.value) })
+    } ?: Json.Null),
+    "properties" to encodePropertySchemas(schema.properties),
+)
+
+private fun decodeRelationTypeSchema(json: Json): QueryRelationTypeSchema {
+    val value = json.objectValue()
+    fun types(name: String): Set<NodeTypeId>? = value.required(name).let { encoded ->
+        if (encoded === Json.Null) null else encoded.arrayValue().mapTo(linkedSetOf()) { NodeTypeId(it.stringValue()) }
+    }
+    return QueryRelationTypeSchema(
+        RelationTypeId(value.required("id").stringValue()),
+        decodePropertySchemas(value.required("properties")),
+        types("sources"),
+        types("targets"),
+        value.required("ancestors").arrayValue().mapTo(linkedSetOf()) { RelationTypeId(it.stringValue()) },
+    )
+}
+
+private fun encodePropertySchemas(schemas: Map<String, ResolvedPropSchema>): Json =
+    jsonArray(schemas.entries.sortedBy { it.key }.map { (name, schema) ->
+        jsonObject("name" to jsonString(name), "schema" to encodePropertySchema(schema))
+    })
+
+private fun decodePropertySchemas(json: Json): Map<String, ResolvedPropSchema> =
+    json.arrayValue().associateTo(linkedMapOf()) {
+        val value = it.objectValue()
+        value.required("name").stringValue() to decodePropertySchema(value.required("schema"))
+    }
+
+private fun encodePropertySchema(schema: ResolvedPropSchema): Json = jsonObject(
+    "type" to jsonString(schema.type.name),
+    "required" to jsonBoolean(schema.required),
+    "items" to (schema.items?.let(::encodePropertySchema) ?: Json.Null),
+)
+
+private fun decodePropertySchema(json: Json): ResolvedPropSchema {
+    val value = json.objectValue()
+    return ResolvedPropSchema(
+        type = PropType.valueOf(value.required("type").stringValue()),
+        required = value.required("required").booleanValue(),
+        items = value.required("items").let { if (it === Json.Null) null else decodePropertySchema(it) },
     )
 }
 
@@ -520,6 +607,7 @@ private fun encodeNormalizedValue(value: NormalizedValue): Json = when (value) {
             jsonObject(
                 "value" to encodeNormalizedValue(element.value),
                 "validTime" to encodeValidTimes(element.validTime),
+                "fallback" to jsonBoolean(element.isFallback),
             )
         }),
     )
@@ -558,6 +646,7 @@ private fun decodeNormalizedValue(json: Json): NormalizedValue {
                 NormalizedArrayElement(
                     decodeNormalizedValue(element.required("value")),
                     decodeValidTimes(element.required("validTime")),
+                    element.required("fallback").booleanValue(),
                 )
             }
             ArrayValue(elements.map { it.value }, elements)
@@ -586,6 +675,7 @@ private fun encodeMembers(members: Map<String, NormalizedPropEntry>): Json =
             "name" to jsonString(name),
             "value" to encodeNormalizedValue(entry.value),
             "validTime" to encodeValidTimes(entry.validTime),
+            "fallback" to jsonBoolean(entry.isFallback),
         )
     })
 
@@ -595,6 +685,7 @@ private fun decodeMembers(json: Json): Map<String, NormalizedPropEntry> =
         value.required("name").stringValue() to NormalizedPropEntry(
             decodeNormalizedValue(value.required("value")),
             decodeValidTimes(value.required("validTime")),
+            value.required("fallback").booleanValue(),
         )
     }
 

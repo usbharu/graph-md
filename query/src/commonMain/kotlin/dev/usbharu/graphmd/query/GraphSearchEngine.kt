@@ -4,6 +4,7 @@ import dev.usbharu.graphmd.core.model.GraphCompilationResult
 import dev.usbharu.graphmd.core.model.SourceDocument
 import dev.usbharu.graphmd.query.index.SearchIndex
 import dev.usbharu.graphmd.query.index.SearchIndexBuilder
+import dev.usbharu.graphmd.query.gmql.*
 import dev.usbharu.graphmd.query.ir.QueryableGraph
 import dev.usbharu.graphmd.query.ir.QueryableGraphBuilder
 import dev.usbharu.graphmd.query.model.GraphQuery
@@ -30,6 +31,39 @@ class GraphSearchEngine private constructor(
      */
     suspend fun scan(query: GraphQuery): QueryResult =
         ScanQueryExecutor().execute(graph, query)
+
+    fun compileGmql(
+        text: String,
+        parameterTypes: Map<String, GmqlType> = emptyMap(),
+    ): GmqlCompileResult = GmqlCompiler(graph).compile(text, parameterTypes)
+
+    suspend fun executeGmql(
+        query: GmqlCompiledQuery,
+        parameters: Map<String, GmqlValue> = emptyMap(),
+        options: GmqlExecutionOptions = GmqlExecutionOptions(),
+    ): GmqlQueryResult {
+        val plan = GmqlPlanner.plan(query, indexed = true)
+        return GmqlExecutor(index, options, useIndex = plan.indexed).execute(plan.query, parameters)
+    }
+
+    suspend fun scanGmql(
+        query: GmqlCompiledQuery,
+        parameters: Map<String, GmqlValue> = emptyMap(),
+        options: GmqlExecutionOptions = GmqlExecutionOptions(),
+    ): GmqlQueryResult {
+        val plan = GmqlPlanner.plan(query, indexed = false)
+        return GmqlExecutor(index, options, useIndex = plan.indexed).execute(plan.query, parameters)
+    }
+
+    suspend fun queryGmql(
+        text: String,
+        parameters: Map<String, GmqlValue> = emptyMap(),
+        options: GmqlExecutionOptions = GmqlExecutionOptions(),
+    ): GmqlQueryResult {
+        val compilation = compileGmql(text, parameters.mapValues { it.value.type() })
+        val compiled = compilation.query ?: return GmqlQueryResult(diagnostics = compilation.diagnostics)
+        return executeGmql(compiled, parameters, options)
+    }
 
     fun exportStatic(
         options: SearchIndexFormatOptions = SearchIndexFormatOptions(),

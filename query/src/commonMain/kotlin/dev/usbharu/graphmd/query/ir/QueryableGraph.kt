@@ -2,6 +2,7 @@ package dev.usbharu.graphmd.query.ir
 
 import dev.usbharu.graphmd.core.model.DocumentKind
 import dev.usbharu.graphmd.core.model.NormalizedValue
+import dev.usbharu.graphmd.core.model.ResolvedPropSchema
 import dev.usbharu.graphmd.core.model.SourceInfo
 import dev.usbharu.graphmd.core.model.SourceRange
 import dev.usbharu.graphmd.query.model.*
@@ -30,6 +31,7 @@ data class PropertyAssertion(
     val value: NormalizedValue,
     val validTime: IntervalSet,
     val source: SourceInfo,
+    val isFallback: Boolean = false,
 )
 
 data class RelationAssertion(
@@ -63,6 +65,21 @@ data class TextAssertion(
     val validTime: IntervalSet,
     val source: SourceInfo,
     val sourceRange: SourceRange? = source.range,
+    val propertyPath: PropertyPath? = null,
+)
+
+data class QueryNodeTypeSchema(
+    val id: NodeTypeId,
+    val properties: Map<String, ResolvedPropSchema>,
+    val ancestorTypeIds: Set<NodeTypeId>,
+)
+
+data class QueryRelationTypeSchema(
+    val id: RelationTypeId,
+    val properties: Map<String, ResolvedPropSchema>,
+    val sourceTypeIds: Set<NodeTypeId>?,
+    val targetTypeIds: Set<NodeTypeId>?,
+    val ancestorTypeIds: Set<RelationTypeId>,
 )
 
 data class QueryableGraph(
@@ -73,6 +90,8 @@ data class QueryableGraph(
     val timelines: List<QueryTimeline>,
     val nodeTypeIds: Set<NodeTypeId>,
     val relationTypeIds: Set<RelationTypeId>,
+    val nodeTypeSchemas: Map<NodeTypeId, QueryNodeTypeSchema> = emptyMap(),
+    val relationTypeSchemas: Map<RelationTypeId, QueryRelationTypeSchema> = emptyMap(),
 ) {
     val timelineCatalog: TimelineCatalog
         get() = TimelineCatalog.fromQueryTimelines(timelines)
