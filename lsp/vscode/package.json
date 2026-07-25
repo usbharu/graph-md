@@ -7,10 +7,37 @@
     "vscode": "^1.90.0"
   },
   "activationEvents": [
-    "onLanguage:markdown"
+    "onLanguage:markdown",
+    "onView:graphmd.search",
+    "onCommand:graphmd.openSearch"
   ],
   "main": "./dist/extension.js",
   "contributes": {
+    "commands": [
+      {
+        "command": "graphmd.openSearch",
+        "title": "GraphMD: 検索を開く",
+        "icon": "$(search)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "graphmd",
+          "title": "GraphMD",
+          "icon": "media/graphmd-search.svg"
+        }
+      ]
+    },
+    "views": {
+      "graphmd": [
+        {
+          "id": "graphmd.search",
+          "name": "検索",
+          "type": "webview"
+        }
+      ]
+    },
     "markdown.markdownItPlugins": true,
     "markdown.previewStyles": [
       "./preview/graphmd.css"

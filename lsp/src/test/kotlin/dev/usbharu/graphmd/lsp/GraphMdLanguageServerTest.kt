@@ -38,6 +38,7 @@ import org.eclipse.lsp4j.TextDocumentItem
 import org.eclipse.lsp4j.VersionedTextDocumentIdentifier
 import org.eclipse.lsp4j.WorkspaceFolder
 import org.eclipse.lsp4j.services.LanguageClient
+import org.eclipse.lsp4j.jsonrpc.services.ServiceEndpoints
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
@@ -56,6 +57,119 @@ class GraphMdLanguageServerTest {
 
         assertNotNull(capabilities.codeActionProvider)
         assertTrue(CodeActionKind.QuickFix in capabilities.codeActionProvider.right.codeActionKinds)
+    }
+
+    @Test
+    fun `server registers GraphMD search requests`() {
+        val methods = ServiceEndpoints.getSupportedMethods(GraphMdLanguageServer::class.java)
+
+        assertTrue("graphmd/search" in methods)
+        assertTrue("graphmd/searchMetadata" in methods)
+    }
+
+    @Test
+    fun `search exposes metadata parameters results and document locations`() {
+        val root = Files.createTempDirectory("graphmd-search")
+        try {
+            val type = root.resolve("Person.md")
+            val node = root.resolve("alice.md")
+            Files.writeString(
+                type,
+                """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    props:
+                      age:
+                        type: number
+                    ---
+                """.trimIndent(),
+            )
+            Files.writeString(
+                node,
+                """
+                    ---
+                    id: alice
+                    kind: Node
+                    type: Person
+                    props:
+                      age: 21
+                    ---
+                    Alice is a brave adventurer.
+                """.trimIndent(),
+            )
+            val server = GraphMdLanguageServer()
+            server.initialize(
+                InitializeParams().apply {
+                    workspaceFolders = listOf(WorkspaceFolder(root.toUri().toString(), "search"))
+                },
+            ).get()
+
+            val metadata = server.searchMetadata().get()
+            val person = metadata.nodeTypes.single { it.id == "Person" }
+            assertEquals("number", person.properties.single { it.name == "age" }.type)
+
+            val result = server.search(
+                GraphMdSearchParams(
+                    """
+                        MATCH (node:Person)
+                        WHERE FULLTEXT(node, ${'$'}keyword)
+                          AND node.age >= ${'$'}minimum
+                        VALID ANYTIME
+                        RETURN ID(node) AS id, TYPE(node) AS type, SCORE() AS score, VALIDITY() AS validity
+                        ORDER BY score DESC, id ASC
+                        LIMIT 100
+                    """.trimIndent(),
+                    mapOf("keyword" to "\"brave\"", "minimum" to "18"),
+                ),
+            ).get()
+
+            assertTrue(result.diagnostics.isEmpty())
+            assertEquals(listOf("id", "type", "score", "validity"), result.columns.map { it.name })
+            assertEquals("alice", result.rows.single().values.first())
+            assertEquals(node.toUri().toString(), result.rows.single().location?.uri)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `search reports query errors and observes unsaved document changes`() {
+        val root = Files.createTempDirectory("graphmd-search-change")
+        try {
+            val node = root.resolve("alice.md")
+            val original = "---\nid: alice\nkind: Node\ntype: Person\n---\nOriginal body"
+            Files.writeString(root.resolve("Person.md"), "---\nid: Person\nkind: NodeType\n---")
+            Files.writeString(node, original)
+            val server = GraphMdLanguageServer()
+            server.initialize(
+                InitializeParams().apply {
+                    workspaceFolders = listOf(WorkspaceFolder(root.toUri().toString(), "search"))
+                },
+            ).get()
+            val invalid = server.search(GraphMdSearchParams("MATCH broken")).get()
+            assertTrue(invalid.diagnostics.any { it.code.startsWith("GMQL") })
+
+            val uri = node.toUri().toString()
+            server.textDocumentService.didOpen(
+                DidOpenTextDocumentParams(TextDocumentItem(uri, "markdown", 1, original)),
+            )
+            server.textDocumentService.didChange(
+                DidChangeTextDocumentParams(
+                    VersionedTextDocumentIdentifier(uri, 2),
+                    listOf(TextDocumentContentChangeEvent(original.replace("Original", "Updated"))),
+                ),
+            )
+            val updated = server.search(
+                GraphMdSearchParams(
+                    """MATCH (node) WHERE FULLTEXT(node, "Updated") RETURN ID(node) AS id""",
+                ),
+            ).get()
+
+            assertEquals("alice", updated.rows.single().values.single())
+        } finally {
+            root.toFile().deleteRecursively()
+        }
     }
 
     @Test

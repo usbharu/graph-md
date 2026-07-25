@@ -3,6 +3,10 @@ package dev.usbharu.graphmd.lsp
 import dev.usbharu.graphmd.core.*
 import dev.usbharu.graphmd.core.model.Diagnostic
 import dev.usbharu.graphmd.core.model.*
+import dev.usbharu.graphmd.query.GraphSearchEngine
+import dev.usbharu.graphmd.query.gmql.GmqlExecutionOptions
+import dev.usbharu.graphmd.query.gmql.GmqlExecutionProfile
+import dev.usbharu.graphmd.query.gmql.GmqlValue
 import org.eclipse.lsp4j.*
 import org.eclipse.lsp4j.jsonrpc.messages.Either
 import org.eclipse.lsp4j.services.LanguageClient
@@ -15,11 +19,14 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.util.concurrent.CompletableFuture
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.EmptyCoroutineContext
+import kotlin.coroutines.startCoroutine
 import kotlin.io.path.extension
 import kotlin.io.path.isRegularFile
 import kotlin.io.path.readText
 
-class GraphMdLanguageServer : LanguageServer, LanguageClientAware {
+class GraphMdLanguageServer : LanguageServer, LanguageClientAware, GraphMdSearchService {
     private val workspaceIndex = GraphMdWorkspaceIndex()
     private val textDocumentService = GraphMdTextDocumentService(this, workspaceIndex)
     private val workspaceService = GraphMdWorkspaceService(this, workspaceIndex)
@@ -72,6 +79,12 @@ class GraphMdLanguageServer : LanguageServer, LanguageClientAware {
     override fun connect(client: LanguageClient) {
         this.client = client
     }
+
+    override fun search(params: GraphMdSearchParams): CompletableFuture<GraphMdSearchResponse> =
+        CompletableFuture.supplyAsync { workspaceIndex.search(params) }
+
+    override fun searchMetadata(): CompletableFuture<GraphMdSearchMetadata> =
+        CompletableFuture.supplyAsync { workspaceIndex.searchMetadata() }
 
     fun publishDiagnostics() {
         val client = client ?: return
@@ -154,6 +167,7 @@ private class GraphMdWorkspaceIndex {
     private val documents = linkedMapOf<String, IndexedDocument>()
     private val openDocuments = mutableSetOf<String>()
     private var compiledCache: GraphCompilationResult? = null
+    private var searchEngineCache: GraphSearchEngine? = null
 
     fun setWorkspaceRoots(roots: List<Path>) {
         this.roots = roots
@@ -162,7 +176,7 @@ private class GraphMdWorkspaceIndex {
     fun loadWorkspace() {
         documents.clear()
         openDocuments.clear()
-        compiledCache = null
+        invalidateCompilation()
         roots.forEach { root ->
             if (!Files.exists(root)) return@forEach
             Files.walk(root).use { paths ->
@@ -211,7 +225,7 @@ private class GraphMdWorkspaceIndex {
         val path = Paths.get(URI.create(uri))
         val analysis = analyzer.analyze(text, path.toString())
         documents[uri] = IndexedDocument(uri, path, text, analysis)
-        compiledCache = null
+        invalidateCompilation()
     }
 
     fun reload(uri: String) {
@@ -233,7 +247,7 @@ private class GraphMdWorkspaceIndex {
 
     private fun removeNormalized(uri: String) {
         documents.remove(uri)
-        compiledCache = null
+        invalidateCompilation()
     }
 
     fun completions(uri: String, position: Position): List<CompletionItem> {
@@ -1159,10 +1173,103 @@ private class GraphMdWorkspaceIndex {
         )
     }
 
+    fun search(params: GraphMdSearchParams): GraphMdSearchResponse {
+        if (params.query.isBlank()) {
+            return GraphMdSearchResponse(
+                diagnostics = listOf(
+                    GraphMdSearchDiagnostic("GRAPHMD_SEARCH", "input", "Query must not be blank."),
+                ),
+            )
+        }
+        val parameters = try {
+            params.parameters.mapValues { (name, value) -> parseSearchParameter(name, value) }
+        } catch (exception: SearchParameterException) {
+            return GraphMdSearchResponse(
+                diagnostics = listOf(
+                    GraphMdSearchDiagnostic("GRAPHMD_PARAM", "type", exception.message ?: "Invalid parameter."),
+                ),
+            )
+        }
+        val (compilation, engine) = synchronized(this) {
+            val compiled = compiledWorkspace()
+            val cachedEngine = searchEngineCache ?: GraphSearchEngine.build(
+                compiled,
+                sourceDocuments(),
+            ).also { searchEngineCache = it }
+            compiled to cachedEngine
+        }
+        val result = runSearchSuspend {
+            engine.queryGmql(
+                params.query,
+                parameters,
+                GmqlExecutionOptions(profile = GmqlExecutionProfile.SERVER),
+            )
+        }
+        val diagnostics = compilation.diagnostics
+            .filter { it.severity == Severity.Error }
+            .map {
+                GraphMdSearchDiagnostic(
+                    code = "GRAPHMD_COMPILE",
+                    kind = it.category.name.lowercase(),
+                    message = it.message,
+                )
+            } + result.diagnostics.map { it.toSearchDiagnostic() }
+        val columns = result.columns.map { GraphMdSearchColumn(it.name, it.type.wireName()) }
+        val idColumn = result.columns.indexOfFirst {
+            it.name.equals("id", ignoreCase = true) || it.name.equals("nodeId", ignoreCase = true)
+        }
+        val rows = result.rows.map { row ->
+            val nodeId = row.values.filterIsInstance<GmqlValue.NodeValue>().firstOrNull()?.id?.value
+                ?: idColumn.takeIf { it >= 0 }
+                    ?.let { row.values.getOrNull(it) as? GmqlValue.StringValue }
+                    ?.value
+            GraphMdSearchRow(
+                values = row.values.map(GmqlValue::toWireValue),
+                location = nodeId?.let(::nodeLocation),
+            )
+        }
+        return GraphMdSearchResponse(columns, rows, diagnostics)
+    }
+
+    fun searchMetadata(): GraphMdSearchMetadata {
+        val compiled = synchronized(this) { compiledWorkspace() }
+        return GraphMdSearchMetadata(
+            nodeTypes = compiled.nodeTypes
+                .sortedBy { it.id }
+                .map { type ->
+                    GraphMdSearchNodeType(
+                        type.id,
+                        type.props.entries
+                            .sortedBy { it.key }
+                            .map { (name, schema) -> schema.toSearchProperty(name) },
+                    )
+                },
+            timelines = compiled.timelines.map { it.id }.distinct().sorted(),
+        )
+    }
+
+    private fun nodeLocation(nodeId: String): GraphMdSearchLocation? = synchronized(this) {
+        resolve(ReferenceTargetKind.Node, nodeId).firstOrNull()?.let { definition ->
+            GraphMdSearchLocation(
+                definition.uri,
+                definition.range(),
+            )
+        }
+    }
+
+    private fun sourceDocuments(): List<SourceDocument> =
+        documents.values
+            .filter { it.isGraphDocumentCandidate() }
+            .map { SourceDocument(it.text, it.path.toString()) }
+
+    private fun invalidateCompilation() {
+        compiledCache = null
+        searchEngineCache = null
+    }
+
     private fun compiledWorkspace(): GraphCompilationResult {
         compiledCache?.let { return it }
-        val graphDocuments = documents.values.filter { it.isGraphDocumentCandidate() }
-        return compiler.compileSources(graphDocuments.map { SourceDocument(it.text, it.path.toString()) })
+        return compiler.compileSources(sourceDocuments())
             .also { compiledCache = it }
     }
 
@@ -2702,3 +2809,73 @@ private data class IndexedPropertyDefinition(
     val document: IndexedDocument,
     val definition: PropertyDefinition,
 )
+
+private class SearchParameterException(message: String) : IllegalArgumentException(message)
+
+private fun parseSearchParameter(name: String, encoded: String): GmqlValue {
+    val value = encoded.trim()
+    return when {
+        value == "null" -> GmqlValue.NullValue
+        value.equals("true", ignoreCase = true) -> GmqlValue.BooleanValue(true)
+        value.equals("false", ignoreCase = true) -> GmqlValue.BooleanValue(false)
+        SEARCH_INTEGER.matches(value) -> value.toLongOrNull()?.let(GmqlValue::IntegerValue)
+            ?: throw SearchParameterException("Parameter '$name' is outside the Integer range.")
+        SEARCH_DECIMAL.matches(value) -> value.toDoubleOrNull()?.takeIf(Double::isFinite)
+            ?.let(GmqlValue::DecimalValue)
+            ?: throw SearchParameterException("Parameter '$name' is not a finite Decimal.")
+        value.startsWith('"') -> GmqlValue.StringValue(
+            decodeSearchString(value)
+                ?: throw SearchParameterException("Parameter '$name' contains an invalid quoted string."),
+        )
+        else -> GmqlValue.StringValue(encoded)
+    }
+}
+
+private fun decodeSearchString(encoded: String): String? {
+    if (encoded.length < 2 || encoded.last() != '"') return null
+    var index = 1
+    return buildString {
+        while (index < encoded.lastIndex) {
+            when (val character = encoded[index++]) {
+                '\\' -> {
+                    if (index >= encoded.lastIndex) return null
+                    append(
+                        when (val escaped = encoded[index++]) {
+                            '"', '\\', '/' -> escaped
+                            'b' -> '\b'
+                            'f' -> '\u000c'
+                            'n' -> '\n'
+                            'r' -> '\r'
+                            't' -> '\t'
+                            'u' -> {
+                                if (index + 4 > encoded.lastIndex) return null
+                                encoded.substring(index, index + 4).toIntOrNull(16)?.toChar()
+                                    ?.also { index += 4 } ?: return null
+                            }
+                            else -> return null
+                        },
+                    )
+                }
+                '"' -> return null
+                else -> append(character)
+            }
+        }
+    }
+}
+
+private fun <T> runSearchSuspend(block: suspend () -> T): T {
+    var outcome: Result<T>? = null
+    block.startCoroutine(
+        object : Continuation<T> {
+            override val context = EmptyCoroutineContext
+            override fun resumeWith(result: Result<T>) {
+                outcome = result
+            }
+        },
+    )
+    return checkNotNull(outcome) { "Search execution suspended unexpectedly." }.getOrThrow()
+}
+
+private val SEARCH_INTEGER = Regex("""[-+]?[0-9]+""")
+private val SEARCH_DECIMAL =
+    Regex("""[-+]?(?:(?:[0-9]+\.[0-9]*|[0-9]*\.[0-9]+)(?:[eE][-+]?[0-9]+)?|[0-9]+[eE][-+]?[0-9]+)""")

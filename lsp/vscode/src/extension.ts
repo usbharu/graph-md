@@ -3,6 +3,7 @@ import * as vscode from "vscode";
 import { Executable, LanguageClient, LanguageClientOptions, ServerOptions, TransportKind } from "vscode-languageclient/node";
 import { graphMdPlugin } from "markdown-it-graphmd";
 import { relativeMarkdownHref } from "./preview-links";
+import { GraphMdSearchViewProvider } from "./search-view";
 
 let client: LanguageClient | undefined;
 const mediaTargets = new Map<string, string>();
@@ -50,6 +51,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<GraphM
 
   client = new LanguageClient("graphmd-lsp", "GraphMD LSP", serverOptions, clientOptions);
   await client.start();
+  const searchViewProvider = new GraphMdSearchViewProvider(context.extensionUri, client);
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(GraphMdSearchViewProvider.viewType, searchViewProvider),
+    vscode.commands.registerCommand("graphmd.openSearch", () =>
+      vscode.commands.executeCommand(`${GraphMdSearchViewProvider.viewType}.focus`)),
+  );
   context.subscriptions.push({
     dispose: () => {
       void client?.stop();

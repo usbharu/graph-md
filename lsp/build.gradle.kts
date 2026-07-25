@@ -12,6 +12,7 @@ kotlin {
 
 dependencies {
     implementation(project(":core"))
+    implementation(project(":query"))
     implementation("org.eclipse.lsp4j:org.eclipse.lsp4j:0.24.0")
     implementation("org.eclipse.lsp4j:org.eclipse.lsp4j.jsonrpc:0.24.0")
     testImplementation(kotlin("test"))
