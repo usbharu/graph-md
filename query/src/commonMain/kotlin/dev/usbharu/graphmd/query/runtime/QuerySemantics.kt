@@ -77,6 +77,14 @@ internal class QuerySemantics(
             ?.toIntervalSet(graph.timelineCatalog)
             ?: IntervalSet.universal()
     }
+    private val timelineUniverse by lazy {
+        IntervalSet.of(
+            graph.timelineCatalog.timelines
+                .map { it.canonicalId }
+                .distinct()
+                .map { TemporalInterval(it) },
+        )
+    }
 
     fun execute(): QueryResult {
         val diagnostics = validate()
@@ -191,7 +199,9 @@ internal class QuerySemantics(
                 .fold(IntervalSet.empty(), IntervalSet::union)
             when {
                 excluded.isEmpty -> input
-                input.validTime.isUniversal -> null
+                input.validTime.isUniversal -> timelineUniverse.subtract(excluded)
+                    .takeUnless { it.isEmpty }
+                    ?.let { input.copy(validTime = it) }
                 else -> input.validTime.subtract(excluded).takeUnless { it.isEmpty }?.let {
                     input.copy(validTime = it)
                 }
@@ -358,26 +368,25 @@ internal fun valueMatches(value: NormalizedValue, predicate: PropertyPredicate):
 }
 
 internal fun normalizedValueEquals(left: NormalizedValue, right: NormalizedValue): Boolean {
-    val numericLeft = left.numericValue()
-    val numericRight = right.numericValue()
-    return if (numericLeft != null && numericRight != null) numericLeft == numericRight else left == right
+    return when {
+        left is IntegerValue && right is IntegerValue -> left.value == right.value
+        left is NumberValue && right is NumberValue -> left.value == right.value
+        left is IntegerValue && right is NumberValue -> compareLongToDouble(left.value, right.value) == 0
+        left is NumberValue && right is IntegerValue -> compareLongToDouble(right.value, left.value) == 0
+        else -> left == right
+    }
 }
 
 internal fun compareNormalizedValues(left: NormalizedValue, right: NormalizedValue): Int? {
-    val numericLeft = left.numericValue()
-    val numericRight = right.numericValue()
-    if (numericLeft != null && numericRight != null) return numericLeft.compareTo(numericRight)
     return when {
+        left is IntegerValue && right is IntegerValue -> left.value.compareTo(right.value)
+        left is NumberValue && right is NumberValue -> left.value.compareTo(right.value)
+        left is IntegerValue && right is NumberValue -> compareLongToDouble(left.value, right.value)
+        left is NumberValue && right is IntegerValue -> -compareLongToDouble(right.value, left.value)
         left is StringValue && right is StringValue -> left.value.compareTo(right.value)
         left is BooleanValue && right is BooleanValue -> left.value.compareTo(right.value)
         else -> null
     }
-}
-
-private fun NormalizedValue.numericValue(): Double? = when (this) {
-    is IntegerValue -> value.toDouble()
-    is NumberValue -> value
-    else -> null
 }
 
 private fun normalizedContains(container: NormalizedValue, item: NormalizedValue): Boolean = when {

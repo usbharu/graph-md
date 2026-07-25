@@ -18,6 +18,7 @@ internal fun jsonNumber(value: Number): Json.NumberValue = Json.NumberValue(valu
 internal fun jsonBoolean(value: Boolean): Json.BooleanValue = Json.BooleanValue(value)
 internal fun jsonNullableString(value: String?): Json = value?.let(::jsonString) ?: Json.Null
 internal fun jsonNullableNumber(value: Double?): Json = value?.let(::jsonNumber) ?: Json.Null
+internal fun jsonNullableLong(value: Long?): Json = value?.let(::jsonNumber) ?: Json.Null
 
 internal fun Json.encode(): String = when (this) {
     is Json.Object -> values.entries.joinToString(prefix = "{", postfix = "}", separator = ",") {
@@ -200,6 +201,7 @@ internal fun Json.doubleValue(): Double = (this as Json.NumberValue).value.toDou
 internal fun Json.booleanValue(): Boolean = (this as Json.BooleanValue).value
 internal fun Json.nullableStringValue(): String? = if (this === Json.Null) null else stringValue()
 internal fun Json.nullableDoubleValue(): Double? = if (this === Json.Null) null else doubleValue()
+internal fun Json.nullableLongValue(): Long? = if (this === Json.Null) null else longValue()
 
 internal fun Map<String, Json>.required(name: String): Json =
     requireNotNull(this[name]) { "Missing JSON field: $name" }

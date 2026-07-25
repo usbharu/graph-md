@@ -1,6 +1,7 @@
 package dev.usbharu.graphmd.query.text
 
 import dev.usbharu.graphmd.query.ir.TextAssertion
+import dev.usbharu.graphmd.query.index.FullTextIndex
 import dev.usbharu.graphmd.query.model.AssertionId
 import dev.usbharu.graphmd.query.model.TextPredicate
 import kotlin.math.ln
@@ -52,6 +53,22 @@ class Bm25Scorer private constructor(
                 documentLengths = lengths,
                 averageDocumentLength = lengths.values.average().takeUnless(Double::isNaN) ?: 0.0,
                 documentCount = assertions.size,
+            )
+        }
+
+        fun from(index: FullTextIndex): Bm25Scorer {
+            val frequencies = linkedMapOf<AssertionId, MutableMap<String, Int>>()
+            index.postingsByTerm.forEach { (term, postings) ->
+                postings.forEach { posting ->
+                    frequencies.getOrPut(posting.assertionId, ::linkedMapOf)[term] = posting.termFrequency
+                }
+            }
+            return Bm25Scorer(
+                termFrequencies = frequencies,
+                documentFrequencies = index.postingsByTerm.mapValues { it.value.size },
+                documentLengths = index.documentLengths,
+                averageDocumentLength = index.averageDocumentLength,
+                documentCount = index.documentLengths.size,
             )
         }
     }

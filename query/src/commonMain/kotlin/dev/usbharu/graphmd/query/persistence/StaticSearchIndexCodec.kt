@@ -35,7 +35,7 @@ data class StaticSearchBundle(
 }
 
 object StaticSearchIndexCodec {
-    const val FORMAT_VERSION: Int = 1
+    const val FORMAT_VERSION: Int = 2
 
     fun encode(
         index: SearchIndex,
@@ -648,6 +648,7 @@ private fun encodePropertyPosting(posting: PropertyValuePosting): Json = jsonObj
     "sortKey" to jsonObject(
         "typeRank" to jsonNumber(posting.sortKey.typeRank),
         "numericValue" to jsonNullableNumber(posting.sortKey.numericValue),
+        "integerValue" to jsonNullableLong(posting.sortKey.integerValue),
         "textValue" to jsonNullableString(posting.sortKey.textValue),
     ),
 )
@@ -658,9 +659,10 @@ private fun decodePropertyPosting(json: Json): PropertyValuePosting {
     return PropertyValuePosting(
         AssertionId(value.required("assertionId").intValue()),
         PropertySortKey(
-            key.required("typeRank").intValue(),
-            key.required("numericValue").nullableDoubleValue(),
-            key.required("textValue").nullableStringValue(),
+            typeRank = key.required("typeRank").intValue(),
+            numericValue = key.required("numericValue").nullableDoubleValue(),
+            integerValue = key.required("integerValue").nullableLongValue(),
+            textValue = key.required("textValue").nullableStringValue(),
         ),
     )
 }

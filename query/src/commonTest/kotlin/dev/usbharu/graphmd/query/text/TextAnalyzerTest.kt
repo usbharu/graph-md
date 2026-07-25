@@ -1,5 +1,7 @@
 package dev.usbharu.graphmd.query.text
 
+import dev.usbharu.graphmd.query.index.SearchIndexBuilder
+import dev.usbharu.graphmd.query.indexedFixtureGraph
 import dev.usbharu.graphmd.query.model.TextPredicate
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -29,5 +31,23 @@ class TextAnalyzerTest {
         assertTrue("engine" in terms)
         assertTrue("user" in terms)
         assertTrue("id" in terms)
+    }
+
+    @Test
+    fun `BM25 scores reconstructed from the physical index match assertion scores`() {
+        val graph = indexedFixtureGraph()
+        val fromAssertions = Bm25Scorer.from(graph.textAssertions)
+        val fromIndex = Bm25Scorer.from(SearchIndexBuilder().build(graph).fullTextIndex)
+        val predicates = listOf(TextPredicate("勇者"), TextPredicate("Bob"))
+
+        graph.textAssertions.forEach { assertion ->
+            predicates.forEach { predicate ->
+                assertEquals(
+                    fromAssertions.score(assertion.id, predicate),
+                    fromIndex.score(assertion.id, predicate),
+                    absoluteTolerance = 0.000_000_001,
+                )
+            }
+        }
     }
 }

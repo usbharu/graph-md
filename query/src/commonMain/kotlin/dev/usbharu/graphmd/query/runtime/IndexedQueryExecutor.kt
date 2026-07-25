@@ -9,6 +9,8 @@ import dev.usbharu.graphmd.query.text.TextAnalyzer
 class IndexedQueryExecutor(
     private val index: SearchIndex,
 ) : QueryExecutor {
+    private val scorer = Bm25Scorer.from(index.fullTextIndex)
+
     override suspend fun execute(
         graph: QueryableGraph,
         query: GraphQuery,
@@ -18,19 +20,19 @@ class IndexedQueryExecutor(
     }
 
     suspend fun execute(query: GraphQuery): QueryResult =
-        QuerySemantics(IndexedQueryDataSource(index, query), query).execute()
+        QuerySemantics(IndexedQueryDataSource(index, query, scorer), query).execute()
 }
 
 private class IndexedQueryDataSource(
     private val index: SearchIndex,
     query: GraphQuery,
+    private val scorer: Bm25Scorer,
 ) : QueryDataSource {
     override val graph: QueryableGraph = index.graph
     private val nodeById = graph.nodes.associateBy { it.id }
     private val propertyById = graph.propertyAssertions.associateBy { it.id }
     private val relationById = graph.relationAssertions.associateBy { it.id }
     private val textById = graph.textAssertions.associateBy { it.id }
-    private val scorer = Bm25Scorer.from(graph.textAssertions)
     private val temporalCandidates: Set<AssertionId>? = query.temporalWindow?.let { window ->
         if (window.timelineId !in graph.timelineCatalog) {
             emptySet()
@@ -55,18 +57,37 @@ private class IndexedQueryDataSource(
         owner: AssertionOwner,
         predicate: PropertyPredicate,
     ): List<PropertyAssertion> {
-        val ids = if (predicate.operator == ValueOperator.EQUALS) {
-            index.propertyExactPostings[
-                PropertyExactKey(predicate.path.propertyId, normalizedValueKey(predicate.value))
-            ].orEmpty()
-        } else {
-            index.propertyValuePostings[predicate.path.propertyId].orEmpty().map { it.assertionId }
-        }
+        val ids = propertyCandidateIds(predicate)
         return ids.asSequence()
             .filterTemporally()
             .mapNotNull(propertyById::get)
             .filter { it.owner == owner && it.path == predicate.path && valueMatches(it.value, predicate) }
             .toList()
+    }
+
+    private fun propertyCandidateIds(predicate: PropertyPredicate): List<AssertionId> {
+        if (predicate.operator == ValueOperator.EQUALS) {
+            return index.propertyExactPostings[
+                PropertyExactKey(predicate.path.propertyId, normalizedValueKey(predicate.value))
+            ].orEmpty()
+        }
+
+        val postings = index.propertyValuePostings[predicate.path.propertyId].orEmpty()
+        if (predicate.operator == ValueOperator.NOT_EQUALS || predicate.operator == ValueOperator.CONTAINS) {
+            return postings.map { it.assertionId }
+        }
+
+        val key = propertySortKey(predicate.value)
+        val lower = postings.lowerBound(key)
+        val upper = postings.upperBound(key)
+        val candidates = when (predicate.operator) {
+            ValueOperator.LESS_THAN -> postings.subList(0, lower)
+            ValueOperator.LESS_THAN_OR_EQUALS -> postings.subList(0, upper)
+            ValueOperator.GREATER_THAN -> postings.subList(upper, postings.size)
+            ValueOperator.GREATER_THAN_OR_EQUALS -> postings.subList(lower, postings.size)
+            ValueOperator.EQUALS, ValueOperator.NOT_EQUALS, ValueOperator.CONTAINS -> postings
+        }
+        return candidates.map { it.assertionId }
     }
 
     override fun relationAssertions(
@@ -122,4 +143,24 @@ private class IndexedQueryDataSource(
 
     private fun Sequence<AssertionId>.filterTemporally(): Sequence<AssertionId> =
         temporalCandidates?.let { candidates -> filter { it in candidates } } ?: this
+}
+
+private fun List<PropertyValuePosting>.lowerBound(key: PropertySortKey): Int {
+    var low = 0
+    var high = size
+    while (low < high) {
+        val middle = (low + high) ushr 1
+        if (this[middle].sortKey < key) low = middle + 1 else high = middle
+    }
+    return low
+}
+
+private fun List<PropertyValuePosting>.upperBound(key: PropertySortKey): Int {
+    var low = 0
+    var high = size
+    while (low < high) {
+        val middle = (low + high) ushr 1
+        if (this[middle].sortKey <= key) low = middle + 1 else high = middle
+    }
+    return low
 }

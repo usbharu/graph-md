@@ -117,8 +117,9 @@ fun normalizedValueKey(value: NormalizedValue): String = when (value) {
     is TextValue -> "t:{" + value.memberEntries.entries.sortedBy { it.key }.joinToString(",") {
         "${escapeKey(it.key)}=${normalizedValueKey(it.value.value)}"
     } + "}"
-    is IntegerValue -> "n:${canonicalNumber(value.value.toDouble())}"
-    is NumberValue -> "n:${canonicalNumber(value.value)}"
+    is IntegerValue -> "i:${value.value}"
+    is NumberValue -> value.value.exactLongValueOrNull()?.let { "i:$it" }
+        ?: "n:${canonicalNumber(value.value)}"
     is BooleanValue -> "b:${value.value}"
     NullValue -> "z:null"
     is ArrayValue -> "a:[" + value.elements.joinToString(",") { normalizedValueKey(it.value) } + "]"
@@ -130,7 +131,7 @@ fun normalizedValueKey(value: NormalizedValue): String = when (value) {
 }
 
 fun propertySortKey(value: NormalizedValue): PropertySortKey = when (value) {
-    is IntegerValue -> PropertySortKey(0, numericValue = value.value.toDouble())
+    is IntegerValue -> PropertySortKey(0, integerValue = value.value)
     is NumberValue -> PropertySortKey(0, numericValue = value.value)
     is StringValue -> PropertySortKey(1, textValue = value.value)
     is BooleanValue -> PropertySortKey(2, textValue = value.value.toString())

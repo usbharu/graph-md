@@ -11,16 +11,20 @@ data class PropertyExactKey(
 data class PropertySortKey(
     val typeRank: Int,
     val numericValue: Double? = null,
+    val integerValue: Long? = null,
     val textValue: String? = null,
 ) : Comparable<PropertySortKey> {
     override fun compareTo(other: PropertySortKey): Int {
         val rankComparison = typeRank.compareTo(other.typeRank)
         if (rankComparison != 0) return rankComparison
         val numberComparison = when {
-            numericValue == null && other.numericValue == null -> 0
-            numericValue == null -> -1
-            other.numericValue == null -> 1
-            else -> numericValue.compareTo(other.numericValue)
+            integerValue != null && other.integerValue != null -> integerValue.compareTo(other.integerValue)
+            integerValue != null && other.numericValue != null -> compareLongToDouble(integerValue, other.numericValue)
+            numericValue != null && other.integerValue != null -> -compareLongToDouble(other.integerValue, numericValue)
+            numericValue != null && other.numericValue != null -> numericValue.compareTo(other.numericValue)
+            integerValue == null && numericValue == null && other.integerValue == null && other.numericValue == null -> 0
+            integerValue == null && numericValue == null -> -1
+            else -> 1
         }
         if (numberComparison != 0) return numberComparison
         return (textValue ?: "").compareTo(other.textValue ?: "")
