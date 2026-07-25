@@ -91,7 +91,11 @@ export function quoteIdentifier(value: string): string {
 }
 
 function buildTemporal(state: SearchFormState, parameters: Record<string, string>): string {
-  if (state.temporalMode === "anytime") return "VALID ANYTIME";
+  if (state.temporalMode === "anytime") {
+    return state.timeline
+      ? `VALID ON ${quoteIdentifier(state.timeline)} ANYTIME`
+      : "VALID ANYTIME";
+  }
   if (!state.timeline) throw new Error("時間条件にはタイムラインが必要です。");
   const timeline = quoteIdentifier(state.timeline);
   if (state.temporalMode === "at") {

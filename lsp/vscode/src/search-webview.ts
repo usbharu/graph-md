@@ -37,6 +37,8 @@ document.querySelectorAll<HTMLButtonElement>(".tab").forEach((button) => {
 
 byId<HTMLSelectElement>("node-type").addEventListener("change", refreshConditionProperties);
 byId<HTMLSelectElement>("temporal-mode").addEventListener("change", refreshTemporalFields);
+byId("form-panel").addEventListener("input", updateGeneratedQuery);
+byId("form-panel").addEventListener("change", updateGeneratedQuery);
 byId("add-condition").addEventListener("click", () => addCondition());
 byId("add-parameter").addEventListener("click", () => addParameter());
 byId("form-search").addEventListener("click", runFormSearch);
@@ -59,8 +61,10 @@ function populateMetadata(): void {
   const nodeType = byId<HTMLSelectElement>("node-type");
   nodeType.replaceChildren(option("", "すべて"), ...metadata.nodeTypes.map((item) => option(item.id, item.id)));
   const timeline = byId<HTMLSelectElement>("timeline");
-  timeline.replaceChildren(...metadata.timelines.map((item) => option(item, item)));
+  timeline.replaceChildren(option("", "指定なし"), ...metadata.timelines.map((item) => option(item, item)));
   refreshConditionProperties();
+  refreshTemporalFields();
+  updateGeneratedQuery();
 }
 
 function addCondition(initial?: Partial<PropertyCondition>): void {
@@ -77,13 +81,17 @@ function addCondition(initial?: Partial<PropertyCondition>): void {
   remove.className = "secondary icon";
   remove.textContent = "×";
   remove.title = "条件を削除";
-  remove.addEventListener("click", () => row.remove());
+  remove.addEventListener("click", () => {
+    row.remove();
+    updateGeneratedQuery();
+  });
   property.addEventListener("change", () => refreshOperator(row));
   row.append(property, operator, value, remove);
   byId("conditions").append(row);
   fillPropertySelect(property, initial?.property);
   refreshOperator(row, initial?.operator);
   value.value = initial?.value ?? "";
+  updateGeneratedQuery();
 }
 
 function refreshConditionProperties(): void {
@@ -263,9 +271,24 @@ function formatBoundary(value: unknown, fallback: string): string {
 
 function refreshTemporalFields(): void {
   const mode = byId<HTMLSelectElement>("temporal-mode").value;
-  byId("timeline-wrap").classList.toggle("hidden", mode === "anytime");
+  const timeline = byId<HTMLSelectElement>("timeline");
+  const unspecified = timeline.options[0];
+  if (unspecified) unspecified.disabled = mode !== "anytime";
+  if (mode !== "anytime" && !timeline.value && timeline.options.length > 1) {
+    timeline.selectedIndex = 1;
+  }
   byId("at-fields").classList.toggle("hidden", mode !== "at");
   byId("range-fields").classList.toggle("hidden", mode !== "overlaps");
+  updateGeneratedQuery();
+}
+
+function updateGeneratedQuery(): void {
+  const output = byId<HTMLTextAreaElement>("generated-gmql");
+  try {
+    output.value = buildFormQuery(collectForm()).query;
+  } catch (error) {
+    output.value = `// ${error instanceof Error ? error.message : String(error)}`;
+  }
 }
 
 function setBusy(busy: boolean): void {
@@ -291,4 +314,5 @@ function option(value: string, label: string): HTMLOptionElement {
 
 addCondition();
 refreshTemporalFields();
+updateGeneratedQuery();
 vscodeApi.postMessage({ type: "ready" });

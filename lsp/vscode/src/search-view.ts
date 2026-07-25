@@ -86,6 +86,7 @@ export class GraphMdSearchViewProvider implements vscode.WebviewViewProvider {
     button.icon { padding: 3px 7px; }
     input, select, textarea { width: 100%; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); padding: 5px 6px; }
     textarea { min-height: 180px; resize: vertical; font-family: var(--vscode-editor-font-family); }
+    textarea.generated { min-height: 130px; color: var(--vscode-descriptionForeground); }
     label { display: block; margin: 10px 0 4px; font-size: 12px; }
     .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--vscode-panel-border); margin-bottom: 12px; }
     .tab { color: var(--vscode-foreground); background: transparent; border-bottom: 2px solid transparent; }
@@ -120,7 +121,7 @@ export class GraphMdSearchViewProvider implements vscode.WebviewViewProvider {
     <button id="add-condition" class="secondary">条件を追加</button>
     <div class="two">
       <div><label for="temporal-mode">時間条件</label><select id="temporal-mode"><option value="anytime">Anytime</option><option value="at">特定時点</option><option value="overlaps">期間の重複</option></select></div>
-      <div id="timeline-wrap" class="hidden"><label for="timeline">タイムライン</label><select id="timeline"></select></div>
+      <div id="timeline-wrap"><label for="timeline">タイムライン</label><select id="timeline"><option value="">指定なし</option></select></div>
     </div>
     <div id="at-fields" class="hidden"><label for="instant">時点</label><input id="instant" type="number" step="any"></div>
     <div id="range-fields" class="two hidden"><div><label for="from">開始</label><input id="from" type="number" step="any"></div><div><label for="to">終了</label><input id="to" type="number" step="any"></div></div>
@@ -128,6 +129,8 @@ export class GraphMdSearchViewProvider implements vscode.WebviewViewProvider {
       <div><label for="sort">並び順</label><select id="sort"><option value="relevance">関連度</option><option value="id-asc">ID昇順</option><option value="id-desc">ID降順</option></select></div>
       <div><label for="limit">件数</label><input id="limit" type="number" min="1" max="1000" value="100"></div>
     </div>
+    <label for="generated-gmql">生成されたGMQL</label>
+    <textarea id="generated-gmql" class="generated" readonly spellcheck="false"></textarea>
     <div class="actions"><button id="form-search">検索</button></div>
   </section>
   <section id="gmql-panel" class="hidden">

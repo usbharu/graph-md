@@ -50,6 +50,17 @@ test("builds temporal queries and clamps the result limit", () => {
   assert.deepEqual(result.parameters, { from: "10", to: "20" });
 });
 
+test("allows Anytime to target one timeline or all timelines", () => {
+  assert.match(
+    buildFormQuery(form({ temporalMode: "anytime", timeline: "Main Story" })).query,
+    /VALID ON `Main Story` ANYTIME/,
+  );
+  assert.match(
+    buildFormQuery(form({ temporalMode: "anytime", timeline: "" })).query,
+    /\nVALID ANYTIME\n/,
+  );
+});
+
 test("quotes non-standard identifiers and rejects backticks", () => {
   assert.equal(quoteIdentifier("display-name"), "`display-name`");
   assert.throws(() => quoteIdentifier("bad`name"), /cannot be represented/);
