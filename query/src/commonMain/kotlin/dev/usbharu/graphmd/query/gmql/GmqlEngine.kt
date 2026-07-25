@@ -703,7 +703,7 @@ internal class GmqlExecutor(
         if (valid.operator == GmqlValidOperator.ANYTIME) {
             val filtered = valid.timeline?.let { timeline ->
                 val canonical = graph.timelineCatalog.normalize(TimelineId(timeline), null, null).timelineId
-                if (binding.validity.isUniversal) IntervalSet.of(TemporalInterval(canonical))
+                if (binding.validity.isUniversal) IntervalSet.empty()
                 else IntervalSet.of(binding.validity.intervals.filter { it.timelineId == canonical })
             } ?: binding.validity
             return filtered.takeUnless { it.isEmpty }?.let { binding.copy(validity = it, matchedValidity = it) }
@@ -711,7 +711,7 @@ internal class GmqlExecutor(
         val timeline = TimelineId(checkNotNull(valid.timeline))
         val canonical = graph.timelineCatalog.normalize(timeline, null, null).timelineId
         val scopedValidity = if (binding.validity.isUniversal) {
-            IntervalSet.of(TemporalInterval(canonical))
+            IntervalSet.empty()
         } else {
             IntervalSet.of(binding.validity.intervals.filter { it.timelineId == canonical })
         }

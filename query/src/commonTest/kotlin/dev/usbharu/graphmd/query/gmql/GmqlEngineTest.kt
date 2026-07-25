@@ -207,6 +207,43 @@ class GmqlEngineTest {
     }
 
     @Test
+    fun `valid on timeline excludes documents without a validity assertion on that timeline`() {
+        val localSources = sources + source(
+            "/charlie.md",
+            """
+            ---
+            id: charlie
+            kind: Node
+            type: Person
+            props:
+              name: Charlie
+            ---
+            """,
+        )
+        val localEngine = GraphSearchEngine.build(GraphCompiler().compileSources(localSources), localSources)
+
+        val scopedAnytime = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person) VALID ON MainStory ANYTIME RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
+        val scopedAt = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person) VALID ON MainStory AT 150 RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
+        val unscopedAnytime = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person) VALID ANYTIME RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
+
+        assertEquals(listOf("alice", "bob"), scopedAnytime.stringColumn())
+        assertEquals(listOf("alice", "bob"), scopedAt.stringColumn())
+        assertEquals(listOf("alice", "bob", "charlie"), unscopedAnytime.stringColumn())
+    }
+
+    @Test
     fun `static bundle retains schemas needed to compile queries`() {
         val loaded = GraphSearchEngine.loadStatic(engine.exportStatic())
         val result = loaded.compileGmql(
@@ -322,6 +359,9 @@ class GmqlEngineTest {
 
     private fun source(path: String, text: String) = SourceDocument(text.trimIndent(), path)
 }
+
+private fun GmqlQueryResult.stringColumn(): List<String> =
+    rows.map { (it.values.single() as GmqlValue.StringValue).value }
 
 private fun <T> runSuspend(block: suspend () -> T): T {
     var outcome: Result<T>? = null
