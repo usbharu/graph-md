@@ -213,6 +213,120 @@ class GraphMdCliTest {
         assertTrue(strict.stdout.contains("\"severity\":\"error\""))
     }
 
+    @Test
+    fun `valid time filters documents properties and links by overlapping range`() {
+        val cli = GraphMdCli(validTimeFixture())
+
+        val listed = cli.run(
+            listOf(
+                "list",
+                "/workspace",
+                "--valid-time",
+                "CommonEra(from=14,to=16)",
+                "--json",
+            ),
+        )
+        val props = cli.run(
+            listOf(
+                "props",
+                "alice",
+                "/workspace",
+                "--valid-time=CommonEra(from=14,to=16)",
+                "--json",
+            ),
+        )
+        val links = cli.run(
+            listOf("links", "alice", "/workspace", "--valid-time", "CommonEra(from=14,to=16)", "--json"),
+        )
+
+        assertEquals(0, listed.exitCode, listed.stderr)
+        assertTrue(listed.stdout.contains("\"id\":\"alice\""))
+        assertTrue(listed.stdout.contains("\"id\":\"erin\""))
+        assertFalse(listed.stdout.contains("\"id\":\"carol\""))
+        assertFalse(listed.stdout.contains("\"id\":\"dave\""))
+        assertFalse(listed.stdout.contains("\"id\":\"bob\""))
+        assertTrue(props.stdout.contains("\"value\":\"old\""))
+        assertTrue(props.stdout.contains("\"value\":\"new\""))
+        assertTrue(links.stdout.contains("\"to\":\"erin\""))
+        assertFalse(links.stdout.contains("\"to\":\"bob\""))
+    }
+
+    @Test
+    fun `valid time uses inclusive bounds and timeline inheritance but not mappings`() {
+        val cli = GraphMdCli(validTimeFixture())
+
+        val boundary = cli.run(
+            listOf("props", "alice", "/workspace", "--valid-time", "CommonEra(from=14,to=14)", "--json"),
+        )
+        val mappedOnly = cli.run(
+            listOf("show", "carol", "/workspace", "--valid-time", "CommonEra(from=10,to=20)", "--json"),
+        )
+        val inherited = cli.run(
+            listOf("show", "alice", "/workspace", "--valid-time", "Branch(from=10,to=20)", "--json"),
+        )
+
+        assertTrue(boundary.stdout.contains("\"value\":\"old\""))
+        assertFalse(boundary.stdout.contains("\"value\":\"new\""))
+        assertEquals(1, mappedOnly.exitCode)
+        assertTrue(mappedOnly.stderr.contains("No entity found"))
+        assertEquals(0, inherited.exitCode, inherited.stderr)
+        assertTrue(inherited.stdout.contains("\"id\":\"alice\""))
+    }
+
+    @Test
+    fun `valid time rejects invalid ranges and unknown timelines`() {
+        val cli = GraphMdCli(validTimeFixture())
+
+        val invalid = cli.run(
+            listOf("list", "/workspace", "--valid-time", "CommonEra(from=20,to=10)", "--json"),
+        )
+        val unknown = cli.run(
+            listOf("list", "/workspace", "--valid-time", "Missing(from=1)", "--json"),
+        )
+
+        assertEquals(2, invalid.exitCode)
+        assertTrue(invalid.stderr.contains("from must not exceed to"))
+        assertEquals(1, unknown.exitCode)
+        assertTrue(unknown.stderr.contains("Unknown Timeline"))
+    }
+
+    @Test
+    fun `lint with valid time only reports visible documents`() {
+        val fs = FakeFileSystem(
+            files = mapOf(
+                "/workspace/Timeline.md" to """
+                    ---
+                    id: CommonEra
+                    kind: Timeline
+                    timecode:
+                      type: number
+                    ---
+                """.trimIndent(),
+                "/workspace/Person.md" to nodeType("Person"),
+                "/workspace/visible.md" to """
+                    ---
+                    id: visible
+                    kind: Node
+                    type: Person
+                    validTime:
+                      - timeline: CommonEra
+                    props:
+                      unexpected: value
+                    ---
+                """.trimIndent(),
+                "/workspace/hidden.md" to node("hidden", "MissingType"),
+            ),
+        )
+
+        val result = GraphMdCli(fs).run(
+            listOf("lint", "/workspace", "--valid-time", "CommonEra(from=1,to=2)", "--json"),
+        )
+
+        assertEquals(0, result.exitCode)
+        assertTrue(result.stdout.contains("Unknown property unexpected"))
+        assertFalse(result.stdout.contains("Unknown NodeType"))
+    }
+
     private fun fixtureCli(): GraphMdCli = GraphMdCli(
         FakeFileSystem(
             files = mapOf(
@@ -264,6 +378,114 @@ class GraphMdCliTest {
                 @link{}[Bob](bob friend)
             """.trimIndent(),
             "/workspace/bob.md" to node("bob", "Person"),
+        ),
+    )
+
+    private fun validTimeFixture(): FakeFileSystem = FakeFileSystem(
+        files = mapOf(
+            "/workspace/Person.md" to """
+                ---
+                id: Person
+                kind: NodeType
+                props:
+                  name:
+                    type: string
+                ---
+            """.trimIndent(),
+            "/workspace/CommonEra.md" to """
+                ---
+                id: CommonEra
+                kind: Timeline
+                timecode:
+                  type: number
+                mappings:
+                  - kind: offset
+                    to: ProjectEra
+                    offset: 100
+                ---
+            """.trimIndent(),
+            "/workspace/ProjectEra.md" to """
+                ---
+                id: ProjectEra
+                kind: Timeline
+                timecode:
+                  type: number
+                ---
+            """.trimIndent(),
+            "/workspace/Branch.md" to """
+                ---
+                id: Branch
+                kind: Timeline
+                extends: [CommonEra]
+                timecode:
+                  type: number
+                ---
+            """.trimIndent(),
+            "/workspace/related.md" to """
+                ---
+                id: related
+                kind: RelType
+                ---
+            """.trimIndent(),
+            "/workspace/alice.md" to """
+                ---
+                id: alice
+                kind: Node
+                type: Person
+                validTime:
+                  - timeline: CommonEra
+                    from:
+                      timecode: 10
+                    to:
+                      timecode: 20
+                ---
+                @props{
+                  name(validTime=CommonEra(from=10,to=14)) = "old",
+                  name(validTime=CommonEra(from=15,to=20)) = "new"
+                }
+                @link(validTime=CommonEra(from=12,to=18))[Erin](erin related)
+                @link(validTime=CommonEra(from=12,to=18))[Bob](bob related)
+            """.trimIndent(),
+            "/workspace/bob.md" to node("bob", "Person"),
+            "/workspace/carol.md" to """
+                ---
+                id: carol
+                kind: Node
+                type: Person
+                validTime:
+                  - timeline: ProjectEra
+                    from:
+                      timecode: 110
+                    to:
+                      timecode: 120
+                ---
+            """.trimIndent(),
+            "/workspace/dave.md" to """
+                ---
+                id: dave
+                kind: Node
+                type: Person
+                validTime:
+                  - timeline: Branch
+                    from:
+                      timecode: 10
+                    to:
+                      timecode: 20
+                ---
+            """.trimIndent(),
+            "/workspace/erin.md" to """
+                ---
+                id: erin
+                kind: Node
+                type: Person
+                validTime:
+                  - timeline: CommonEra
+                    from:
+                      timecode: 10
+                    to:
+                      timecode: 20
+                ---
+            """.trimIndent(),
         ),
     )
 

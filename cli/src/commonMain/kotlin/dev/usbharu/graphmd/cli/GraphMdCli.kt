@@ -40,7 +40,7 @@ class GraphMdCli internal constructor(
             is CliCommand.Show -> show(compilation, command, invocation.json)
             is CliCommand.Props -> props(compilation, command, invocation.json)
             is CliCommand.Links -> links(compilation, command, invocation.json)
-            is CliCommand.Lint -> lint(compilation, invocation.json)
+            is CliCommand.Lint -> lint(compilation, command, invocation.json)
             is CliCommand.Stats -> stats(compilation, command, invocation.json)
         }
     }
@@ -50,13 +50,16 @@ class GraphMdCli internal constructor(
         command: CliCommand.ListItems,
         json: Boolean,
     ): CliResult {
-        val items = select(graph, command.kinds, command.types, command.includeDerived)
+        val view = command.validTime?.let { validTime ->
+            temporalView(graph, validTime) ?: return unknownTimeline(validTime, json)
+        }
+        val items = select(graph, command.kinds, command.types, command.includeDerived, view)
         val output = if (json) {
             jsonArray(items.map { it.summaryJson() }).encode() + "\n"
         } else {
             renderList(items)
         }
-        return queryResult(output, graph.diagnostics, json)
+        return queryResult(output, diagnosticsFor(graph, view), json)
     }
 
     private fun show(
@@ -64,17 +67,20 @@ class GraphMdCli internal constructor(
         command: CliCommand.Show,
         json: Boolean,
     ): CliResult {
-        val candidates = select(graph, command.kinds, emptySet(), includeDerived = false)
+        val view = command.validTime?.let { validTime ->
+            temporalView(graph, validTime) ?: return unknownTimeline(validTime, json)
+        }
+        val candidates = select(graph, command.kinds, emptySet(), includeDerived = false, view)
             .filter { it.id == command.id && it.kind != CliKind.Link }
         val problem = candidateProblem(command.id, candidates)
-        if (problem != null) return queryResult("", graph.diagnostics + problem, json)
+        if (problem != null) return queryResult("", diagnosticsFor(graph, view) + problem, json)
         val item = candidates.single()
         val output = if (json) {
-            item.detailJson(graph).encode() + "\n"
+            item.detailJson(graph, view).encode() + "\n"
         } else {
-            renderShow(item, graph)
+            renderShow(item, graph, view)
         }
-        return queryResult(output, graph.diagnostics, json)
+        return queryResult(output, diagnosticsFor(graph, view), json)
     }
 
     private fun props(
@@ -82,18 +88,22 @@ class GraphMdCli internal constructor(
         command: CliCommand.Props,
         json: Boolean,
     ): CliResult {
+        val view = command.validTime?.let { validTime ->
+            temporalView(graph, validTime) ?: return unknownTimeline(validTime, json)
+        }
         val allowedKinds = command.kinds.ifEmpty { setOf(CliKind.Node, CliKind.Media) }
-        val candidates = select(graph, allowedKinds, emptySet(), includeDerived = false)
+        val candidates = select(graph, allowedKinds, emptySet(), includeDerived = false, view)
             .filter { it.id == command.id }
         val problem = candidateProblem(command.id, candidates)
-        if (problem != null) return queryResult("", graph.diagnostics + problem, json)
+        if (problem != null) return queryResult("", diagnosticsFor(graph, view) + problem, json)
         val node = (candidates.single() as NodeItem).node
+        val entries = view?.filterProperties(node.propEntries) ?: node.propEntries
         val output = if (json) {
-            propertyEntriesToJson(node.propEntries).encode() + "\n"
+            propertyEntriesToJson(entries).encode() + "\n"
         } else {
-            renderProperties(node.propEntries)
+            renderProperties(entries)
         }
-        return queryResult(output, graph.diagnostics, json)
+        return queryResult(output, diagnosticsFor(graph, view), json)
     }
 
     private fun links(
@@ -101,28 +111,36 @@ class GraphMdCli internal constructor(
         command: CliCommand.Links,
         json: Boolean,
     ): CliResult {
+        val view = command.validTime?.let { validTime ->
+            temporalView(graph, validTime) ?: return unknownTimeline(validTime, json)
+        }
         val allowedKinds = command.kinds.ifEmpty { setOf(CliKind.Node, CliKind.Media) }
-        val candidates = select(graph, allowedKinds, emptySet(), includeDerived = false)
+        val candidates = select(graph, allowedKinds, emptySet(), includeDerived = false, view)
             .filter { it.id == command.id }
         val problem = candidateProblem(command.id, candidates)
-        if (problem != null) return queryResult("", graph.diagnostics + problem, json)
+        if (problem != null) return queryResult("", diagnosticsFor(graph, view) + problem, json)
         val selected = relationsFor(
             graph = graph,
             id = command.id,
             direction = command.direction,
             types = command.types,
             includeDerived = command.includeDerived,
+            view = view,
         )
         val output = if (json) {
-            jsonArray(selected.map { RelationItem(it).detailJson(graph) }).encode() + "\n"
+            jsonArray(selected.map { RelationItem(it).detailJson(graph, view) }).encode() + "\n"
         } else {
             renderRelations(selected)
         }
-        return queryResult(output, graph.diagnostics, json)
+        return queryResult(output, diagnosticsFor(graph, view), json)
     }
 
-    private fun lint(graph: GraphCompilationResult, json: Boolean): CliResult {
-        val diagnostics = graph.diagnostics.sortedWith(diagnosticComparator)
+    private fun lint(graph: GraphCompilationResult, command: CliCommand.Lint, json: Boolean): CliResult {
+        val view = command.validTime?.let { validTime ->
+            temporalView(graph, validTime) ?: return unknownTimeline(validTime, json)
+        }
+        val diagnostics = diagnosticsFor(graph, view)
+            .sortedWith(diagnosticComparator)
         val output = if (json) {
             jsonArray(diagnostics.map(Diagnostic::toJson)).encode() + "\n"
         } else {
@@ -136,10 +154,14 @@ class GraphMdCli internal constructor(
         command: CliCommand.Stats,
         json: Boolean,
     ): CliResult {
-        val items = select(graph, command.kinds, command.types, command.includeDerived)
+        val view = command.validTime?.let { validTime ->
+            temporalView(graph, validTime) ?: return unknownTimeline(validTime, json)
+        }
+        val items = select(graph, command.kinds, command.types, command.includeDerived, view)
         val counts = CliKind.entries.associateWith { kind -> items.count { it.kind == kind } }
-        val warnings = graph.diagnostics.count { it.severity == Severity.Warning }
-        val errors = graph.diagnostics.count { it.severity == Severity.Error }
+        val diagnostics = diagnosticsFor(graph, view)
+        val warnings = diagnostics.count { it.severity == Severity.Warning }
+        val errors = diagnostics.count { it.severity == Severity.Error }
         val value = jsonObject(
             "node" to jsonNumber(counts.getValue(CliKind.Node)),
             "media" to jsonNumber(counts.getValue(CliKind.Media)),
@@ -159,7 +181,7 @@ class GraphMdCli internal constructor(
                 append("errors\t").append(errors).append('\n')
             }
         }
-        return queryResult(output, graph.diagnostics, json)
+        return queryResult(output, diagnostics, json)
     }
 
     private fun select(
@@ -167,6 +189,7 @@ class GraphMdCli internal constructor(
         kinds: Set<CliKind>,
         types: Set<String>,
         includeDerived: Boolean,
+        view: TemporalView?,
     ): List<GraphItem> {
         val selectedKinds = kinds.ifEmpty { CliKind.entries.toSet() }
         val nodeTypes = graph.nodeTypes.associateBy { it.id }
@@ -174,18 +197,25 @@ class GraphMdCli internal constructor(
         return buildList {
             graph.nodes.forEach { node ->
                 val kind = if (node.kind == DocumentKind.Media) CliKind.Media else CliKind.Node
-                if (kind in selectedKinds && typeMatches(node.type, types, includeDerived, nodeTypes[node.type]?.ancestorIds.orEmpty())) {
+                if (
+                    kind in selectedKinds &&
+                    (view == null || view.nodeVisible(node)) &&
+                    typeMatches(node.type, types, includeDerived, nodeTypes[node.type]?.ancestorIds.orEmpty())
+                ) {
                     add(NodeItem(node))
                 }
             }
             if (CliKind.Link in selectedKinds) {
                 graph.relations.forEach { relation ->
-                    if (typeMatches(relation.type, types, includeDerived, relTypes[relation.type]?.ancestorIds.orEmpty())) {
+                    if (
+                        (view == null || view.relationVisible(relation)) &&
+                        typeMatches(relation.type, types, includeDerived, relTypes[relation.type]?.ancestorIds.orEmpty())
+                    ) {
                         add(RelationItem(relation))
                     }
                 }
             }
-            if (types.isEmpty()) {
+            if (types.isEmpty() && view == null) {
                 if (CliKind.NodeType in selectedKinds) graph.nodeTypes.forEach { add(NodeTypeItem(it)) }
                 if (CliKind.RelType in selectedKinds) graph.relTypes.forEach { add(RelTypeItem(it)) }
                 if (CliKind.Timeline in selectedKinds) graph.timelines.forEach { add(TimelineItem(it)) }
@@ -206,6 +236,7 @@ class GraphMdCli internal constructor(
         direction: LinkDirection,
         types: Set<String>,
         includeDerived: Boolean,
+        view: TemporalView?,
     ): List<NormalizedRelation> {
         val relTypes = graph.relTypes.associateBy { it.id }
         return graph.relations.filter { relation ->
@@ -214,13 +245,37 @@ class GraphMdCli internal constructor(
                 LinkDirection.Outgoing -> relation.from == id
                 LinkDirection.Both -> relation.from == id || relation.to == id
             }
-            directionMatches && typeMatches(
+            directionMatches && (view == null || view.relationVisible(relation)) && typeMatches(
                 relation.type,
                 types,
                 includeDerived,
                 relTypes[relation.type]?.ancestorIds.orEmpty(),
             )
         }.sortedWith(relationComparator)
+    }
+
+    private fun temporalView(graph: GraphCompilationResult, validTime: ValidTimeFilter): TemporalView? {
+        return graph.timelines.firstOrNull { it.id == validTime.timeline }?.let {
+            TemporalView(graph, validTime, it)
+        }
+    }
+
+    private fun unknownTimeline(
+        validTime: ValidTimeFilter,
+        json: Boolean,
+    ): CliResult = queryResult(
+        "",
+        listOf(cliDiagnostic("Unknown Timeline in --valid-time: ${validTime.timeline}")),
+        json,
+    )
+
+    private fun diagnosticsFor(
+        graph: GraphCompilationResult,
+        view: TemporalView?,
+    ): List<Diagnostic> = if (view == null) {
+        graph.diagnostics
+    } else {
+        graph.diagnostics.filter { it.source?.path in view.visibleSourcePaths }
     }
 
     private fun candidateProblem(id: String, candidates: List<GraphItem>): Diagnostic? = when {
@@ -246,12 +301,78 @@ class GraphMdCli internal constructor(
         CliResult(stderr = "error: $message\nTry 'graphmd --help' for usage.\n", exitCode = 2)
 }
 
+private class TemporalView(
+    graph: GraphCompilationResult,
+    private val requested: ValidTimeFilter,
+    private val requestedTimeline: NormalizedTimeline,
+) {
+    private val visibleNodeIds = graph.nodes
+        .filter(::nodeVisible)
+        .mapTo(hashSetOf()) { it.id }
+
+    val visibleSourcePaths: Set<String> = graph.nodes
+        .filter(::nodeVisible)
+        .mapTo(hashSetOf()) { it.source.path }
+
+    fun nodeVisible(node: NormalizedNode): Boolean = assertedAt(node.validTime)
+
+    fun relationVisible(relation: NormalizedRelation): Boolean =
+        relation.from in visibleNodeIds &&
+            relation.to in visibleNodeIds &&
+            assertedAt(relation.validTime)
+
+    fun filterProperties(
+        entries: Map<String, List<NormalizedPropEntry>>,
+    ): Map<String, List<NormalizedPropEntry>> = entries.mapNotNull { (name, assertions) ->
+        assertions.mapNotNull(::filterEntry).takeIf { it.isNotEmpty() }?.let { name to it }
+    }.toMap(linkedMapOf())
+
+    private fun filterEntry(entry: NormalizedPropEntry): NormalizedPropEntry? =
+        entry.takeIf { assertedAt(it.validTime) }?.copy(value = filterValue(entry.value))
+
+    private fun filterValue(value: NormalizedValue): NormalizedValue = when (value) {
+        is TextValue -> TextValue(
+            value.memberEntries.mapNotNull { (name, entry) ->
+                filterEntry(entry)?.let { name to it }
+            }.toMap(linkedMapOf()),
+        )
+        is ArrayValue -> {
+            val elements = value.elements.mapNotNull { element ->
+                element.takeIf { assertedAt(it.validTime) }?.copy(value = filterValue(element.value))
+            }
+            ArrayValue(elements.map { it.value }, elements)
+        }
+        is ObjectValue -> {
+            val members = value.members.mapNotNull { (name, entry) ->
+                filterEntry(entry)?.let { name to it }
+            }.toMap(linkedMapOf())
+            ObjectValue(members.mapValues { it.value.value }, members)
+        }
+        else -> value
+    }
+
+    private fun assertedAt(validTimes: List<ValidTime>): Boolean = validTimes.any { validTime ->
+        if (
+            validTime.timeline != requested.timeline &&
+            validTime.timeline !in requestedTimeline.ancestorIds
+        ) {
+            return@any false
+        }
+        val requestedFrom = requested.from
+        val requestedTo = requested.to
+        val assertedFrom = validTime.from?.timecode
+        val assertedTo = validTime.to?.timecode
+        (requestedTo == null || assertedFrom == null || requestedTo >= assertedFrom) &&
+            (assertedTo == null || requestedFrom == null || assertedTo >= requestedFrom)
+    }
+}
+
 private sealed interface GraphItem {
     val kind: CliKind
     val id: String
     val sourcePath: String
     fun summaryJson(): JsonValue
-    fun detailJson(graph: GraphCompilationResult): JsonValue
+    fun detailJson(graph: GraphCompilationResult, view: TemporalView?): JsonValue
 }
 
 private data class NodeItem(val node: NormalizedNode) : GraphItem {
@@ -267,18 +388,19 @@ private data class NodeItem(val node: NormalizedNode) : GraphItem {
         "source" to node.source.toJson(),
     )
 
-    override fun detailJson(graph: GraphCompilationResult): JsonValue {
-        val incoming = graph.relations.filter { it.to == id }.sortedWith(relationComparator)
-        val outgoing = graph.relations.filter { it.from == id }.sortedWith(relationComparator)
+    override fun detailJson(graph: GraphCompilationResult, view: TemporalView?): JsonValue {
+        val relations = graph.relations.filter { view == null || view.relationVisible(it) }
+        val incoming = relations.filter { it.to == id }.sortedWith(relationComparator)
+        val outgoing = relations.filter { it.from == id }.sortedWith(relationComparator)
         return jsonObject(
             "kind" to jsonString(kind.wireName),
             "id" to jsonString(id),
             "type" to jsonString(node.type),
             "url" to jsonNullableString(node.url),
             "validTime" to jsonArray(node.validTime.map(ValidTime::toJson)),
-            "props" to propertyEntriesToJson(node.propEntries),
-            "incomingLinks" to jsonArray(incoming.map { RelationItem(it).detailJson(graph) }),
-            "outgoingLinks" to jsonArray(outgoing.map { RelationItem(it).detailJson(graph) }),
+            "props" to propertyEntriesToJson(view?.filterProperties(node.propEntries) ?: node.propEntries),
+            "incomingLinks" to jsonArray(incoming.map { RelationItem(it).detailJson(graph, view) }),
+            "outgoingLinks" to jsonArray(outgoing.map { RelationItem(it).detailJson(graph, view) }),
             "source" to node.source.toJson(),
         )
     }
@@ -298,14 +420,14 @@ private data class RelationItem(val relation: NormalizedRelation) : GraphItem {
         "source" to relation.source.toJson(),
     )
 
-    override fun detailJson(graph: GraphCompilationResult): JsonValue = jsonObject(
+    override fun detailJson(graph: GraphCompilationResult, view: TemporalView?): JsonValue = jsonObject(
         "kind" to jsonString(kind.wireName),
         "from" to jsonString(relation.from),
         "to" to jsonString(relation.to),
         "type" to jsonString(relation.type),
         "label" to jsonString(relation.sourceLabel),
         "validTime" to jsonArray(relation.validTime.map(ValidTime::toJson)),
-        "props" to propertyEntriesToJson(relation.propEntries),
+        "props" to propertyEntriesToJson(view?.filterProperties(relation.propEntries) ?: relation.propEntries),
         "targetUrl" to jsonNullableString(relation.targetUrl),
         "source" to relation.source.toJson(),
     )
@@ -320,7 +442,7 @@ private data class NodeTypeItem(val type: NormalizedNodeType) : GraphItem {
         "id" to jsonString(id),
         "source" to type.source.toJson(),
     )
-    override fun detailJson(graph: GraphCompilationResult): JsonValue = jsonObject(
+    override fun detailJson(graph: GraphCompilationResult, view: TemporalView?): JsonValue = jsonObject(
         "kind" to jsonString(kind.wireName),
         "id" to jsonString(id),
         "ancestors" to jsonArray(type.ancestorIds.sorted().map(::jsonString)),
@@ -338,7 +460,7 @@ private data class RelTypeItem(val type: NormalizedRelType) : GraphItem {
         "id" to jsonString(id),
         "source" to type.source.toJson(),
     )
-    override fun detailJson(graph: GraphCompilationResult): JsonValue = jsonObject(
+    override fun detailJson(graph: GraphCompilationResult, view: TemporalView?): JsonValue = jsonObject(
         "kind" to jsonString(kind.wireName),
         "id" to jsonString(id),
         "from" to (type.from?.let { jsonArray(it.map(::jsonString)) } ?: JsonValue.Null),
@@ -358,7 +480,7 @@ private data class TimelineItem(val timeline: NormalizedTimeline) : GraphItem {
         "id" to jsonString(id),
         "source" to timeline.source.toJson(),
     )
-    override fun detailJson(graph: GraphCompilationResult): JsonValue = jsonObject(
+    override fun detailJson(graph: GraphCompilationResult, view: TemporalView?): JsonValue = jsonObject(
         "kind" to jsonString(kind.wireName),
         "id" to jsonString(id),
         "timecode" to (timeline.timecode?.let {
@@ -423,7 +545,7 @@ private fun renderList(items: List<GraphItem>): String = buildString {
     }
 }
 
-private fun renderShow(item: GraphItem, graph: GraphCompilationResult): String = buildString {
+private fun renderShow(item: GraphItem, graph: GraphCompilationResult, view: TemporalView?): String = buildString {
     append("Kind: ").append(item.kind.wireName).append('\n')
     append("ID: ").append(item.id).append('\n')
     append("Source: ").append(item.sourcePath).append('\n')
@@ -431,11 +553,24 @@ private fun renderShow(item: GraphItem, graph: GraphCompilationResult): String =
         is NodeItem -> {
             append("Type: ").append(item.node.type).append('\n')
             item.node.url?.let { append("URL: ").append(it).append('\n') }
-            append("\nProperties:\n").append(renderProperties(item.node.propEntries))
+            append("\nProperties:\n")
+                .append(renderProperties(view?.filterProperties(item.node.propEntries) ?: item.node.propEntries))
             append("\nIncoming links:\n")
-            append(renderRelations(graph.relations.filter { it.to == item.id }.sortedWith(relationComparator)))
+            append(
+                renderRelations(
+                    graph.relations
+                        .filter { it.to == item.id && (view == null || view.relationVisible(it)) }
+                        .sortedWith(relationComparator),
+                ),
+            )
             append("\nOutgoing links:\n")
-            append(renderRelations(graph.relations.filter { it.from == item.id }.sortedWith(relationComparator)))
+            append(
+                renderRelations(
+                    graph.relations
+                        .filter { it.from == item.id && (view == null || view.relationVisible(it)) }
+                        .sortedWith(relationComparator),
+                ),
+            )
         }
         is NodeTypeItem -> {
             append("Ancestors: ").append(item.type.ancestorIds.sorted().joinToString()).append('\n')

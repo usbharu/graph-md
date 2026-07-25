@@ -31,6 +31,12 @@ internal enum class LinkDirection {
     }
 }
 
+internal data class ValidTimeFilter(
+    val timeline: String,
+    val from: Double?,
+    val to: Double?,
+)
+
 internal sealed interface CliCommand {
     val paths: List<String>
 
@@ -39,18 +45,21 @@ internal sealed interface CliCommand {
         val kinds: Set<CliKind>,
         val types: Set<String>,
         val includeDerived: Boolean,
+        val validTime: ValidTimeFilter?,
     ) : CliCommand
 
     data class Show(
         val id: String,
         override val paths: List<String>,
         val kinds: Set<CliKind>,
+        val validTime: ValidTimeFilter?,
     ) : CliCommand
 
     data class Props(
         val id: String,
         override val paths: List<String>,
         val kinds: Set<CliKind>,
+        val validTime: ValidTimeFilter?,
     ) : CliCommand
 
     data class Links(
@@ -60,11 +69,13 @@ internal sealed interface CliCommand {
         val direction: LinkDirection,
         val types: Set<String>,
         val includeDerived: Boolean,
+        val validTime: ValidTimeFilter?,
     ) : CliCommand
 
     data class Lint(
         override val paths: List<String>,
         val strict: Boolean,
+        val validTime: ValidTimeFilter?,
     ) : CliCommand
 
     data class Stats(
@@ -72,6 +83,7 @@ internal sealed interface CliCommand {
         val kinds: Set<CliKind>,
         val types: Set<String>,
         val includeDerived: Boolean,
+        val validTime: ValidTimeFilter?,
     ) : CliCommand
 }
 
@@ -105,27 +117,33 @@ internal object CliArguments {
         val parsed = parseTokens(tokens)
         return when (operation) {
             "list" -> {
-                parsed.reject(setOf("kind", "type", "include-derived"))
-                CliCommand.ListItems(parsed.positionals, parsed.kinds(), parsed.types(), parsed.flag("include-derived"))
+                parsed.reject(setOf("kind", "type", "include-derived", "valid-time"))
+                CliCommand.ListItems(
+                    parsed.positionals,
+                    parsed.kinds(),
+                    parsed.types(),
+                    parsed.flag("include-derived"),
+                    parsed.validTime(),
+                )
             }
             "show" -> {
-                parsed.reject(setOf("kind"))
+                parsed.reject(setOf("kind", "valid-time"))
                 val (id, paths) = parsed.idAndPaths("show")
                 val kinds = parsed.kinds()
                 if (CliKind.Link in kinds) usage("show does not support --kind link")
-                CliCommand.Show(id, paths, kinds)
+                CliCommand.Show(id, paths, kinds, parsed.validTime())
             }
             "props" -> {
-                parsed.reject(setOf("kind"))
+                parsed.reject(setOf("kind", "valid-time"))
                 val (id, paths) = parsed.idAndPaths("props")
                 val kinds = parsed.kinds()
                 if (kinds.any { it !in setOf(CliKind.Node, CliKind.Media) }) {
                     usage("props only supports --kind node or --kind media")
                 }
-                CliCommand.Props(id, paths, kinds)
+                CliCommand.Props(id, paths, kinds, parsed.validTime())
             }
             "links" -> {
-                parsed.reject(setOf("kind", "type", "include-derived", "direction"))
+                parsed.reject(setOf("kind", "type", "include-derived", "direction", "valid-time"))
                 val (id, paths) = parsed.idAndPaths("links")
                 val kinds = parsed.kinds()
                 if (kinds.any { it !in setOf(CliKind.Node, CliKind.Media) }) {
@@ -136,15 +154,29 @@ internal object CliArguments {
                 val direction = directionValues.singleOrNull()?.let {
                     LinkDirection.parse(it) ?: usage("Unknown direction: $it")
                 } ?: LinkDirection.Both
-                CliCommand.Links(id, paths, kinds, direction, parsed.types(), parsed.flag("include-derived"))
+                CliCommand.Links(
+                    id,
+                    paths,
+                    kinds,
+                    direction,
+                    parsed.types(),
+                    parsed.flag("include-derived"),
+                    parsed.validTime(),
+                )
             }
             "lint" -> {
-                parsed.reject(setOf("strict"))
-                CliCommand.Lint(parsed.positionals, parsed.flag("strict"))
+                parsed.reject(setOf("strict", "valid-time"))
+                CliCommand.Lint(parsed.positionals, parsed.flag("strict"), parsed.validTime())
             }
             "stats" -> {
-                parsed.reject(setOf("kind", "type", "include-derived"))
-                CliCommand.Stats(parsed.positionals, parsed.kinds(), parsed.types(), parsed.flag("include-derived"))
+                parsed.reject(setOf("kind", "type", "include-derived", "valid-time"))
+                CliCommand.Stats(
+                    parsed.positionals,
+                    parsed.kinds(),
+                    parsed.types(),
+                    parsed.flag("include-derived"),
+                    parsed.validTime(),
+                )
             }
             else -> usage("Unknown operation: $operation")
         }
@@ -181,7 +213,7 @@ internal object CliArguments {
                     flags += name
                     index++
                 }
-                "kind", "type", "direction" -> {
+                "kind", "type", "direction", "valid-time" -> {
                     val value = inlineValue ?: tokens.getOrNull(index + 1)?.takeUnless { it.startsWith("--") }
                         ?: usage("--$name requires a value")
                     values.getOrPut(name) { mutableListOf() } += value
@@ -198,6 +230,34 @@ internal object CliArguments {
     }
 
     private fun ParsedTokens.types(): Set<String> = values["type"].orEmpty().toCollection(linkedSetOf())
+
+    private fun ParsedTokens.validTime(): ValidTimeFilter? {
+        val specified = values["valid-time"].orEmpty()
+        if (specified.size > 1) usage("--valid-time may only be specified once")
+        val value = specified.singleOrNull() ?: return null
+        val match = VALID_TIME_PATTERN.matchEntire(value.trim())
+            ?: usage("--valid-time must be TIMELINE, TIMELINE(from=N), TIMELINE(to=N), or TIMELINE(from=N,to=N)")
+        val timeline = match.groupValues[1]
+        var from: Double? = null
+        var to: Double? = null
+        val arguments = match.groupValues[2]
+        if (arguments.isNotBlank()) {
+            arguments.split(",").forEach { argument ->
+                val parts = argument.split("=", limit = 2).map(String::trim)
+                if (parts.size != 2 || parts[0] !in setOf("from", "to")) {
+                    usage("Invalid --valid-time bound: $argument")
+                }
+                val timecode = parts[1].toDoubleOrNull()?.takeIf { it.isFinite() }
+                    ?: usage("Invalid --valid-time timecode: ${parts[1]}")
+                when (parts[0]) {
+                    "from" -> if (from == null) from = timecode else usage("Duplicate from bound")
+                    "to" -> if (to == null) to = timecode else usage("Duplicate to bound")
+                }
+            }
+        }
+        if (from != null && to != null && from > to) usage("--valid-time from must not exceed to")
+        return ValidTimeFilter(timeline, from, to)
+    }
 
     private fun ParsedTokens.idAndPaths(operation: String): Pair<String, List<String>> {
         val id = positionals.firstOrNull() ?: usage("$operation requires an ID")
@@ -227,17 +287,19 @@ internal object CliArguments {
 
         Global options:
           --json       Emit JSON
+          --valid-time VALID_TIME
+                       Only include assertions overlapping this ValidTime
           --help, -h   Show help
           --version    Show version
     """.trimIndent() + "\n"
 
     private fun commandHelp(operation: String): String = when (operation) {
-        "list" -> "Usage: graphmd list [paths...] [--kind KIND]... [--type ID]... [--include-derived] [--json]\n"
-        "show" -> "Usage: graphmd show ID [paths...] [--kind KIND]... [--json]\n"
-        "props" -> "Usage: graphmd props ID [paths...] [--kind node|media] [--json]\n"
-        "links" -> "Usage: graphmd links ID [paths...] [--kind node|media] [--direction incoming|outgoing|both] [--type ID]... [--include-derived] [--json]\n"
-        "lint" -> "Usage: graphmd lint [paths...] [--strict] [--json]\n"
-        "stats" -> "Usage: graphmd stats [paths...] [--kind KIND]... [--type ID]... [--include-derived] [--json]\n"
+        "list" -> "Usage: graphmd list [paths...] [--kind KIND]... [--type ID]... [--include-derived] [--valid-time VALID_TIME] [--json]\n"
+        "show" -> "Usage: graphmd show ID [paths...] [--kind KIND]... [--valid-time VALID_TIME] [--json]\n"
+        "props" -> "Usage: graphmd props ID [paths...] [--kind node|media] [--valid-time VALID_TIME] [--json]\n"
+        "links" -> "Usage: graphmd links ID [paths...] [--kind node|media] [--direction incoming|outgoing|both] [--type ID]... [--include-derived] [--valid-time VALID_TIME] [--json]\n"
+        "lint" -> "Usage: graphmd lint [paths...] [--strict] [--valid-time VALID_TIME] [--json]\n"
+        "stats" -> "Usage: graphmd stats [paths...] [--kind KIND]... [--type ID]... [--include-derived] [--valid-time VALID_TIME] [--json]\n"
         else -> rootHelp()
     }
 }
@@ -249,3 +311,5 @@ private data class ParsedTokens(
 )
 
 private class CliUsageException(message: String) : RuntimeException(message)
+
+private val VALID_TIME_PATTERN = Regex("""([A-Za-z_][A-Za-z0-9_.:-]*)(?:\((.*)\))?""")
