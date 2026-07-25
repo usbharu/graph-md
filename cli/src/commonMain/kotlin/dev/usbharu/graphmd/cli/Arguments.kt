@@ -85,6 +85,13 @@ internal sealed interface CliCommand {
         val includeDerived: Boolean,
         val validTime: ValidTimeFilter?,
     ) : CliCommand
+
+    data class Search(
+        val query: String?,
+        val queryFile: String?,
+        override val paths: List<String>,
+        val parameters: Map<String, String>,
+    ) : CliCommand
 }
 
 internal sealed interface ParseResult {
@@ -178,6 +185,28 @@ internal object CliArguments {
                     parsed.validTime(),
                 )
             }
+            "search" -> {
+                parsed.reject(setOf("query-file", "param"))
+                val queryFiles = parsed.values["query-file"].orEmpty()
+                if (queryFiles.size > 1) usage("--query-file may only be specified once")
+                val queryFile = queryFiles.singleOrNull()
+                val query = if (queryFile == null) {
+                    parsed.positionals.firstOrNull() ?: usage("search requires a QUERY or --query-file")
+                } else {
+                    null
+                }
+                val paths = if (queryFile == null) parsed.positionals.drop(1) else parsed.positionals
+                val parameters = linkedMapOf<String, String>()
+                parsed.values["param"].orEmpty().forEach { encoded ->
+                    val name = encoded.substringBefore("=", missingDelimiterValue = "")
+                    if (name.isEmpty() || "=" !in encoded || !PARAMETER_NAME.matches(name)) {
+                        usage("--param must be NAME=VALUE")
+                    }
+                    if (name in parameters) usage("Duplicate parameter: $name")
+                    parameters[name] = encoded.substringAfter("=")
+                }
+                CliCommand.Search(query, queryFile, paths, parameters)
+            }
             else -> usage("Unknown operation: $operation")
         }
     }
@@ -213,7 +242,7 @@ internal object CliArguments {
                     flags += name
                     index++
                 }
-                "kind", "type", "direction", "valid-time" -> {
+                "kind", "type", "direction", "valid-time", "query-file", "param" -> {
                     val value = inlineValue ?: tokens.getOrNull(index + 1)?.takeUnless { it.startsWith("--") }
                         ?: usage("--$name requires a value")
                     values.getOrPut(name) { mutableListOf() } += value
@@ -284,6 +313,7 @@ internal object CliArguments {
           links   List incoming and outgoing links for a Node or Media
           lint    Validate GraphMD documents
           stats   Show graph statistics
+          search  Execute a GMQL query
 
         Global options:
           --json       Emit JSON
@@ -300,6 +330,10 @@ internal object CliArguments {
         "links" -> "Usage: graphmd links ID [paths...] [--kind node|media] [--direction incoming|outgoing|both] [--type ID]... [--include-derived] [--valid-time VALID_TIME] [--json]\n"
         "lint" -> "Usage: graphmd lint [paths...] [--strict] [--valid-time VALID_TIME] [--json]\n"
         "stats" -> "Usage: graphmd stats [paths...] [--kind KIND]... [--type ID]... [--include-derived] [--valid-time VALID_TIME] [--json]\n"
+        "search" -> """
+            Usage: graphmd search QUERY [paths...] [--param NAME=VALUE]... [--json]
+                   graphmd search --query-file FILE [paths...] [--param NAME=VALUE]... [--json]
+        """.trimIndent() + "\n"
         else -> rootHelp()
     }
 }
@@ -313,3 +347,4 @@ private data class ParsedTokens(
 private class CliUsageException(message: String) : RuntimeException(message)
 
 private val VALID_TIME_PATTERN = Regex("""([A-Za-z_][A-Za-z0-9_.:-]*)(?:\((.*)\))?""")
+private val PARAMETER_NAME = Regex("""[A-Za-z_][A-Za-z0-9_]*""")
