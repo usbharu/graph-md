@@ -422,6 +422,25 @@ class GmqlEngineTest {
         assertEquals(listOf("alice", "bob"), result.stringColumn())
     }
 
+    @Test
+    fun `boolean operators require boolean operands and retain temporal values`() {
+        val invalidAnd = engine.compileGmql("""MATCH (n) WHERE 1 AND 2 RETURN n""")
+        val invalidNot = engine.compileGmql("""MATCH (n) WHERE NOT 1 RETURN n""")
+        val projected = runSuspend {
+            engine.queryGmql(
+                """MATCH (n:Person) WHERE ID(n) = "alice"
+                   RETURN n.age < 100 AND NOT (n.age > 100) AS matches""",
+            )
+        }
+
+        assertEquals("GMQL3001", invalidAnd.diagnostics.single().code)
+        assertEquals("GMQL3001", invalidNot.diagnostics.single().code)
+        assertTrue(projected.isSuccess, projected.diagnostics.toString())
+        val temporal = assertIs<GmqlValue.TemporalValue>(projected.rows.single().values.single())
+        assertTrue(temporal.entries.isNotEmpty())
+        assertTrue(temporal.entries.all { it.value == GmqlValue.BooleanValue(true) })
+    }
+
     private fun source(path: String, text: String) = SourceDocument(text.trimIndent(), path)
 }
 

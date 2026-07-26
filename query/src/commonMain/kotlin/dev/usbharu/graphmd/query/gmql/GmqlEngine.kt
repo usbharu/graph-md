@@ -193,7 +193,23 @@ private class ExpressionChecker(
             is GmqlExpression.IsTest -> GmqlType.Boolean
             is GmqlExpression.Unary -> {
                 val operand = typeOf(expression.operand)
-                if (expression.operator == "NOT") GmqlType.Boolean else operand
+                if (expression.operator == "NOT") {
+                    if (operand.unwrapTemporal() != GmqlType.Boolean) {
+                        diagnostics += diagnostic(
+                            "GMQL3001",
+                            "Operator 'NOT' requires a Boolean operand.",
+                            expression.range,
+                            GmqlDiagnosticKind.TYPE,
+                        )
+                    }
+                    if (operand is GmqlType.Temporal) {
+                        GmqlType.Temporal(GmqlType.Boolean)
+                    } else {
+                        GmqlType.Boolean
+                    }
+                } else {
+                    operand
+                }
             }
             is GmqlExpression.Binary -> binaryType(expression)
         }
@@ -306,7 +322,21 @@ private class ExpressionChecker(
         val left = typeOf(binary.left)
         val right = typeOf(binary.right)
         return when (binary.operator.uppercase()) {
-            "AND", "OR" -> GmqlType.Boolean
+            "AND", "OR" -> {
+                if (left.unwrapTemporal() != GmqlType.Boolean || right.unwrapTemporal() != GmqlType.Boolean) {
+                    diagnostics += diagnostic(
+                        "GMQL3001",
+                        "Operator '${binary.operator}' requires Boolean operands.",
+                        binary.range,
+                        GmqlDiagnosticKind.TYPE,
+                    )
+                }
+                if (left is GmqlType.Temporal || right is GmqlType.Temporal) {
+                    GmqlType.Temporal(GmqlType.Boolean)
+                } else {
+                    GmqlType.Boolean
+                }
+            }
             "=", "!=", "<", "<=", ">", ">=", "IN", "CONTAINS", "STARTS WITH", "ENDS WITH" -> {
                 val l = left.unwrapTemporal()
                 val r = right.unwrapTemporal()
@@ -514,7 +544,11 @@ internal class GmqlExecutor(
             is GmqlExpression.Unary -> {
                 val operand = evaluate(expression.operand, binding, parameters)
                 when (expression.operator) {
-                    "NOT" -> Eval(GmqlValue.BooleanValue(true), binding.validity.subtract(operand.truthTime(binding.validity)))
+                    "NOT" -> booleanResult(
+                        trueTime = binding.validity.subtract(operand.truthTime(binding.validity)),
+                        evaluatedTime = binding.validity,
+                        temporal = operand.value is GmqlValue.TemporalValue,
+                    )
                     "-" -> Eval(negate(operand.value), operand.time)
                     else -> operand
                 }
@@ -566,15 +600,17 @@ internal class GmqlExecutor(
         val left = evaluate(binary.left, binding, parameters)
         val right = evaluate(binary.right, binding, parameters)
         return when (binary.operator.uppercase()) {
-            "AND" -> Eval(
-                GmqlValue.BooleanValue(true),
-                left.truthTime(binding.validity) intersect right.truthTime(binding.validity),
-                left.score + right.score,
+            "AND" -> booleanResult(
+                trueTime = left.truthTime(binding.validity) intersect right.truthTime(binding.validity),
+                evaluatedTime = left.presenceTime() intersect right.presenceTime() intersect binding.validity,
+                score = left.score + right.score,
+                temporal = left.value is GmqlValue.TemporalValue || right.value is GmqlValue.TemporalValue,
             )
-            "OR" -> Eval(
-                GmqlValue.BooleanValue(true),
-                left.truthTime(binding.validity) union right.truthTime(binding.validity),
-                maxOf(left.score, right.score),
+            "OR" -> booleanResult(
+                trueTime = left.truthTime(binding.validity) union right.truthTime(binding.validity),
+                evaluatedTime = (left.presenceTime() union right.presenceTime()) intersect binding.validity,
+                score = maxOf(left.score, right.score),
+                temporal = left.value is GmqlValue.TemporalValue || right.value is GmqlValue.TemporalValue,
             )
             "+", "-", "*", "/", "%" -> arithmetic(left, right, binary.operator, binary.range)
             else -> predicate(left, right, binary.operator)
@@ -606,6 +642,23 @@ internal class GmqlExecutor(
             if (!falseTime.isEmpty) add(GmqlValue.TemporalEntry(GmqlValue.BooleanValue(false), falseTime))
         }
         return Eval(GmqlValue.TemporalValue(entries), evaluatedTime, left.score + right.score)
+    }
+
+    private fun booleanResult(
+        trueTime: IntervalSet,
+        evaluatedTime: IntervalSet,
+        score: Double = 0.0,
+        temporal: Boolean,
+    ): Eval {
+        if (!temporal) {
+            return Eval(GmqlValue.BooleanValue(!trueTime.isEmpty), evaluatedTime, score)
+        }
+        val entries = buildList {
+            if (!trueTime.isEmpty) add(GmqlValue.TemporalEntry(GmqlValue.BooleanValue(true), trueTime))
+            val falseTime = evaluatedTime.subtract(trueTime)
+            if (!falseTime.isEmpty) add(GmqlValue.TemporalEntry(GmqlValue.BooleanValue(false), falseTime))
+        }
+        return Eval(GmqlValue.TemporalValue(entries), evaluatedTime, score)
     }
 
     private fun arithmetic(
