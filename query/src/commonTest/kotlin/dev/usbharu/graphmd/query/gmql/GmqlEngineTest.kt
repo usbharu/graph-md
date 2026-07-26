@@ -357,6 +357,23 @@ class GmqlEngineTest {
         assertEquals("GMQL5001", limited.diagnostics.single().code)
     }
 
+    @Test
+    fun `comparison projections preserve scalar and temporal false values`() {
+        val result = runSuspend {
+            engine.queryGmql(
+                """MATCH (n:Person) WHERE ID(n) = "alice"
+                   RETURN 1 > 100 AS scalar, n.age > 100 AS temporal""",
+            )
+        }
+
+        assertTrue(result.isSuccess, result.diagnostics.toString())
+        val values = result.rows.single().values
+        assertEquals(GmqlValue.BooleanValue(false), values[0])
+        val temporal = assertIs<GmqlValue.TemporalValue>(values[1])
+        assertTrue(temporal.entries.isNotEmpty())
+        assertTrue(temporal.entries.all { it.value == GmqlValue.BooleanValue(false) })
+    }
+
     private fun source(path: String, text: String) = SourceDocument(text.trimIndent(), path)
 }
 

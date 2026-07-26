@@ -320,7 +320,11 @@ private class ExpressionChecker(
                     "GMQL3001", "Operator '${binary.operator}' cannot be applied to $l and $r.",
                     binary.range, GmqlDiagnosticKind.TYPE,
                 )
-                GmqlType.Boolean
+                if (left is GmqlType.Temporal || right is GmqlType.Temporal) {
+                    GmqlType.Temporal(GmqlType.Boolean)
+                } else {
+                    GmqlType.Boolean
+                }
             }
             "+", "-", "*", "/", "%" -> {
                 if (!left.unwrapTemporal().isNumeric() || !right.unwrapTemporal().isNumeric()) diagnostics += diagnostic(
@@ -569,14 +573,30 @@ internal class GmqlExecutor(
     }
 
     private fun predicate(left: Eval, right: Eval, operator: String): Eval {
-        var time = IntervalSet.empty()
+        var evaluatedTime = IntervalSet.empty()
+        var trueTime = IntervalSet.empty()
         left.entries().forEach { l ->
             right.entries().forEach { r ->
                 val overlap = l.validTime intersect r.validTime
-                if (!overlap.isEmpty && compare(l.value, r.value, operator)) time = time union overlap
+                if (!overlap.isEmpty) {
+                    evaluatedTime = evaluatedTime union overlap
+                    if (compare(l.value, r.value, operator)) trueTime = trueTime union overlap
+                }
             }
         }
-        return Eval(GmqlValue.BooleanValue(true), time, left.score + right.score)
+        if (left.value !is GmqlValue.TemporalValue && right.value !is GmqlValue.TemporalValue) {
+            return Eval(
+                GmqlValue.BooleanValue(!trueTime.isEmpty),
+                evaluatedTime,
+                left.score + right.score,
+            )
+        }
+        val entries = buildList {
+            if (!trueTime.isEmpty) add(GmqlValue.TemporalEntry(GmqlValue.BooleanValue(true), trueTime))
+            val falseTime = evaluatedTime.subtract(trueTime)
+            if (!falseTime.isEmpty) add(GmqlValue.TemporalEntry(GmqlValue.BooleanValue(false), falseTime))
+        }
+        return Eval(GmqlValue.TemporalValue(entries), evaluatedTime, left.score + right.score)
     }
 
     private fun arithmetic(left: Eval, right: Eval, operator: String): Eval {
