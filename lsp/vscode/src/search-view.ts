@@ -111,27 +111,55 @@ export class GraphMdSearchViewProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
   <div class="tabs">
-    <button class="tab active" data-tab="form">フォーム</button>
+    <button class="tab active" data-tab="node">ノード</button>
+    <button class="tab" data-tab="link">Link</button>
     <button class="tab" data-tab="gmql">GMQL</button>
   </div>
-  <section id="form-panel">
+  <section id="node-panel">
     <label for="node-type">ノード型</label><select id="node-type"><option value="">すべて</option></select>
-    <label for="keyword">全文検索</label><input id="keyword" type="search" placeholder="キーワード">
-    <h3>プロパティ条件</h3><div id="conditions"></div>
-    <button id="add-condition" class="secondary">条件を追加</button>
+    <label for="node-keyword">全文検索</label><input id="node-keyword" type="search" placeholder="キーワード">
+    <h3>プロパティ条件</h3><div id="node-conditions"></div>
+    <button id="node-add-condition" class="secondary">条件を追加</button>
     <div class="two">
-      <div><label for="temporal-mode">時間条件</label><select id="temporal-mode"><option value="anytime">Anytime</option><option value="at">特定時点</option><option value="overlaps">期間の重複</option></select></div>
-      <div id="timeline-wrap"><label for="timeline">タイムライン</label><select id="timeline"><option value="">指定なし</option></select></div>
+      <div><label for="node-temporal-mode">時間条件</label><select id="node-temporal-mode"><option value="anytime">Anytime</option><option value="at">特定時点</option><option value="overlaps">期間の重複</option></select></div>
+      <div><label for="node-timeline">タイムライン</label><select id="node-timeline"><option value="">指定なし</option></select></div>
     </div>
-    <div id="at-fields" class="hidden"><label for="instant">時点</label><input id="instant" type="number" step="any"></div>
-    <div id="range-fields" class="two hidden"><div><label for="from">開始</label><input id="from" type="number" step="any"></div><div><label for="to">終了</label><input id="to" type="number" step="any"></div></div>
+    <div id="node-at-fields" class="hidden"><label for="node-instant">時点</label><input id="node-instant" type="number" step="any"></div>
+    <div id="node-range-fields" class="two hidden"><div><label for="node-from">開始</label><input id="node-from" type="number" step="any"></div><div><label for="node-to">終了</label><input id="node-to" type="number" step="any"></div></div>
     <div class="two">
-      <div><label for="sort">並び順</label><select id="sort"><option value="relevance">関連度</option><option value="id-asc">ID昇順</option><option value="id-desc">ID降順</option></select></div>
-      <div><label for="limit">件数</label><input id="limit" type="number" min="1" max="1000" value="100"></div>
+      <div><label for="node-sort">並び順</label><select id="node-sort"><option value="relevance">関連度</option><option value="id-asc">ID昇順</option><option value="id-desc">ID降順</option></select></div>
+      <div><label for="node-limit">件数</label><input id="node-limit" type="number" min="1" max="1000" value="100"></div>
     </div>
-    <label for="generated-gmql">生成されたGMQL</label>
-    <textarea id="generated-gmql" class="generated" readonly spellcheck="false"></textarea>
-    <div class="actions"><button id="form-search">検索</button></div>
+    <label for="node-generated-gmql">生成されたGMQL</label>
+    <textarea id="node-generated-gmql" class="generated" readonly spellcheck="false"></textarea>
+    <div class="actions"><button id="node-search">ノードを検索</button></div>
+  </section>
+  <section id="link-panel" class="hidden">
+    <label for="link-type">Link型</label><select id="link-type"><option value="">すべて</option></select>
+    <div class="two">
+      <div><label for="link-source-type">始点のノード型</label><select id="link-source-type"><option value="">すべて</option></select></div>
+      <div><label for="link-target-type">終点のノード型</label><select id="link-target-type"><option value="">すべて</option></select></div>
+    </div>
+    <div class="two">
+      <div><label for="link-source-id">始点ID</label><input id="link-source-id" placeholder="任意"></div>
+      <div><label for="link-target-id">終点ID</label><input id="link-target-id" placeholder="任意"></div>
+    </div>
+    <label for="link-keyword">Linkの全文検索</label><input id="link-keyword" type="search" placeholder="ラベルまたはプロパティ値">
+    <h3>Linkプロパティ条件</h3><div id="link-conditions"></div>
+    <button id="link-add-condition" class="secondary">条件を追加</button>
+    <div class="two">
+      <div><label for="link-temporal-mode">時間条件</label><select id="link-temporal-mode"><option value="anytime">Anytime</option><option value="at">特定時点</option><option value="overlaps">期間の重複</option></select></div>
+      <div><label for="link-timeline">タイムライン</label><select id="link-timeline"><option value="">指定なし</option></select></div>
+    </div>
+    <div id="link-at-fields" class="hidden"><label for="link-instant">時点</label><input id="link-instant" type="number" step="any"></div>
+    <div id="link-range-fields" class="two hidden"><div><label for="link-from">開始</label><input id="link-from" type="number" step="any"></div><div><label for="link-to">終了</label><input id="link-to" type="number" step="any"></div></div>
+    <div class="two">
+      <div><label for="link-sort">並び順</label><select id="link-sort"><option value="relevance">関連度</option><option value="id-asc">ID昇順</option><option value="id-desc">ID降順</option></select></div>
+      <div><label for="link-limit">件数</label><input id="link-limit" type="number" min="1" max="1000" value="100"></div>
+    </div>
+    <label for="link-generated-gmql">生成されたGMQL</label>
+    <textarea id="link-generated-gmql" class="generated" readonly spellcheck="false"></textarea>
+    <div class="actions"><button id="link-search">Linkを検索</button></div>
   </section>
   <section id="gmql-panel" class="hidden">
     <label for="gmql">GMQLクエリ</label>

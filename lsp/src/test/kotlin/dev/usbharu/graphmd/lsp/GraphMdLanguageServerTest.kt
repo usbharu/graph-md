@@ -72,7 +72,9 @@ class GraphMdLanguageServerTest {
         val root = Files.createTempDirectory("graphmd-search")
         try {
             val type = root.resolve("Person.md")
+            val relationType = root.resolve("friendOf.md")
             val node = root.resolve("alice.md")
+            val targetNode = root.resolve("bob.md")
             Files.writeString(
                 type,
                 """
@@ -81,6 +83,20 @@ class GraphMdLanguageServerTest {
                     kind: NodeType
                     props:
                       age:
+                        type: number
+                    ---
+                """.trimIndent(),
+            )
+            Files.writeString(
+                relationType,
+                """
+                    ---
+                    id: friendOf
+                    kind: RelType
+                    from: [Person]
+                    to: [Person]
+                    props:
+                      since:
                         type: number
                     ---
                 """.trimIndent(),
@@ -96,6 +112,20 @@ class GraphMdLanguageServerTest {
                       age: 21
                     ---
                     Alice is a brave adventurer.
+                    @link{since = 2021}[Bob](bob friendOf)
+                """.trimIndent(),
+            )
+            Files.writeString(
+                targetNode,
+                """
+                    ---
+                    id: bob
+                    kind: Node
+                    type: Person
+                    props:
+                      age: 22
+                    ---
+                    Bob is Alice's friend.
                 """.trimIndent(),
             )
             val server = GraphMdLanguageServer()
@@ -108,6 +138,10 @@ class GraphMdLanguageServerTest {
             val metadata = server.searchMetadata().get()
             val person = metadata.nodeTypes.single { it.id == "Person" }
             assertEquals("number", person.properties.single { it.name == "age" }.type)
+            val friendOf = metadata.relationTypes.single { it.id == "friendOf" }
+            assertEquals(listOf("Person"), friendOf.sourceTypes)
+            assertEquals(listOf("Person"), friendOf.targetTypes)
+            assertEquals("number", friendOf.properties.single { it.name == "since" }.type)
 
             val result = server.search(
                 GraphMdSearchParams(
@@ -128,6 +162,33 @@ class GraphMdLanguageServerTest {
             assertEquals(listOf("id", "type", "score", "validity"), result.columns.map { it.name })
             assertEquals("alice", result.rows.single().values.first())
             assertEquals(node.toUri().toString(), result.rows.single().location?.uri)
+
+            val links = server.search(
+                GraphMdSearchParams(
+                    """
+                        MATCH (source:Person)-[link:friendOf]->(target:Person)
+                        WHERE ID(source) = ${'$'}sourceId
+                          AND ID(target) = ${'$'}targetId
+                          AND link.since >= ${'$'}since
+                          AND FULLTEXT(link, ${'$'}keyword)
+                        VALID ANYTIME
+                        RETURN ID(link) AS id, TYPE(link) AS type, ID(source) AS source, ID(target) AS target, SCORE() AS score, VALIDITY() AS validity
+                        ORDER BY score DESC, id ASC
+                    """.trimIndent(),
+                    mapOf(
+                        "sourceId" to "\"alice\"",
+                        "targetId" to "\"bob\"",
+                        "since" to "2020",
+                        "keyword" to "\"Bob\"",
+                    ),
+                ),
+            ).get()
+
+            assertTrue(links.diagnostics.isEmpty())
+            assertEquals(listOf("id", "type", "source", "target", "score", "validity"), links.columns.map { it.name })
+            assertEquals("alice", links.rows.single().values[2])
+            assertEquals("bob", links.rows.single().values[3])
+            assertEquals(node.toUri().toString(), links.rows.single().location?.uri)
         } finally {
             root.toFile().deleteRecursively()
         }

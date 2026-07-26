@@ -60,8 +60,16 @@ data class GraphMdSearchNodeType(
     val properties: List<GraphMdSearchProperty>,
 )
 
+data class GraphMdSearchRelationType(
+    val id: String,
+    val sourceTypes: List<String>?,
+    val targetTypes: List<String>?,
+    val properties: List<GraphMdSearchProperty>,
+)
+
 data class GraphMdSearchMetadata(
     val nodeTypes: List<GraphMdSearchNodeType> = emptyList(),
+    val relationTypes: List<GraphMdSearchRelationType> = emptyList(),
     val timelines: List<String> = emptyList(),
 )
 

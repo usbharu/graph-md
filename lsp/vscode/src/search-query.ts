@@ -9,8 +9,16 @@ export type SearchNodeType = {
   properties: SearchProperty[];
 };
 
+export type SearchRelationType = {
+  id: string;
+  sourceTypes: string[] | null;
+  targetTypes: string[] | null;
+  properties: SearchProperty[];
+};
+
 export type SearchMetadata = {
   nodeTypes: SearchNodeType[];
+  relationTypes: SearchRelationType[];
   timelines: string[];
 };
 
@@ -23,6 +31,23 @@ export type PropertyCondition = {
 
 export type SearchFormState = {
   nodeType: string;
+  keyword: string;
+  conditions: PropertyCondition[];
+  temporalMode: "anytime" | "at" | "overlaps";
+  timeline: string;
+  instant: string;
+  from: string;
+  to: string;
+  sort: "relevance" | "id-asc" | "id-desc";
+  limit: number;
+};
+
+export type LinkSearchFormState = {
+  relationType: string;
+  sourceType: string;
+  sourceId: string;
+  targetType: string;
+  targetId: string;
   keyword: string;
   conditions: PropertyCondition[];
   temporalMode: "anytime" | "at" | "overlaps";
@@ -82,6 +107,51 @@ export function buildFormQuery(state: SearchFormState): BuiltSearchQuery {
   return { query: lines.join("\n"), parameters };
 }
 
+export function buildLinkFormQuery(state: LinkSearchFormState): BuiltSearchQuery {
+  const parameters: Record<string, string> = {};
+  const predicates: string[] = [];
+  const sourceType = state.sourceType ? `:${quoteIdentifier(state.sourceType)}` : "";
+  const relationType = state.relationType ? `:${quoteIdentifier(state.relationType)}` : "";
+  const targetType = state.targetType ? `:${quoteIdentifier(state.targetType)}` : "";
+
+  if (state.sourceId.trim()) {
+    predicates.push("ID(source) = $sourceId");
+    parameters.sourceId = JSON.stringify(state.sourceId);
+  }
+  if (state.targetId.trim()) {
+    predicates.push("ID(target) = $targetId");
+    parameters.targetId = JSON.stringify(state.targetId);
+  }
+  if (state.keyword.trim()) {
+    predicates.push("FULLTEXT(link, $linkKeyword)");
+    parameters.linkKeyword = JSON.stringify(state.keyword);
+  }
+  state.conditions.forEach((condition, index) => {
+    if (!condition.property || !operators.has(condition.operator)) return;
+    const parameter = `linkProperty${index}`;
+    predicates.push(`link.${quoteIdentifier(condition.property)} ${condition.operator} $${parameter}`);
+    parameters[parameter] = encodeParameter(condition.value, condition.propertyType);
+  });
+
+  const temporal = buildTemporal(state, parameters);
+  const requestedLimit = Number.isFinite(state.limit) ? Math.trunc(state.limit) : 100;
+  const limit = Math.min(1000, Math.max(1, requestedLimit));
+  const orderBy = state.sort === "id-desc"
+    ? "id DESC"
+    : state.sort === "id-asc" || !state.keyword.trim()
+      ? "id ASC"
+      : "score DESC, id ASC";
+  const lines = [
+    `MATCH (source${sourceType})-[link${relationType}]->(target${targetType})`,
+    predicates.length ? `WHERE ${predicates.join("\n  AND ")}` : "",
+    temporal,
+    "RETURN ID(link) AS id, TYPE(link) AS type, ID(source) AS source, ID(target) AS target, SCORE() AS score, VALIDITY() AS validity",
+    `ORDER BY ${orderBy}`,
+    `LIMIT ${limit}`,
+  ].filter(Boolean);
+  return { query: lines.join("\n"), parameters };
+}
+
 export function quoteIdentifier(value: string): string {
   if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) return value;
   if (!value || value.includes("`")) {
@@ -90,7 +160,10 @@ export function quoteIdentifier(value: string): string {
   return `\`${value}\``;
 }
 
-function buildTemporal(state: SearchFormState, parameters: Record<string, string>): string {
+function buildTemporal(
+  state: Pick<SearchFormState, "temporalMode" | "timeline" | "instant" | "from" | "to">,
+  parameters: Record<string, string>,
+): string {
   if (state.temporalMode === "anytime") {
     return state.timeline
       ? `VALID ON ${quoteIdentifier(state.timeline)} ANYTIME`

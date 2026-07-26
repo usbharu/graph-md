@@ -1219,13 +1219,22 @@ private class GraphMdWorkspaceIndex {
             it.name.equals("id", ignoreCase = true) || it.name.equals("nodeId", ignoreCase = true)
         }
         val rows = result.rows.map { row ->
+            val relation = row.values.filterIsInstance<GmqlValue.RelationValue>().firstOrNull()
+                ?.id
+                ?.let { relationId -> engine.graph.relationAssertions.firstOrNull { it.id == relationId } }
             val nodeId = row.values.filterIsInstance<GmqlValue.NodeValue>().firstOrNull()?.id?.value
-                ?: idColumn.takeIf { it >= 0 }
-                    ?.let { row.values.getOrNull(it) as? GmqlValue.StringValue }
-                    ?.value
+            val idValue = idColumn.takeIf { it >= 0 }
+                ?.let { row.values.getOrNull(it) as? GmqlValue.StringValue }
+                ?.value
+            val relationByStableKey = idValue?.let { stableKey ->
+                engine.graph.relationAssertions.firstOrNull { it.stableKey.value == stableKey }
+            }
             GraphMdSearchRow(
                 values = row.values.map(GmqlValue::toWireValue),
-                location = nodeId?.let(::nodeLocation),
+                location = relation?.source?.let(::sourceLocation)
+                    ?: relationByStableKey?.source?.let(::sourceLocation)
+                    ?: nodeId?.let(::nodeLocation)
+                    ?: idValue?.let(::nodeLocation),
             )
         }
         return GraphMdSearchResponse(columns, rows, diagnostics)
@@ -1244,6 +1253,18 @@ private class GraphMdWorkspaceIndex {
                             .map { (name, schema) -> schema.toSearchProperty(name) },
                     )
                 },
+            relationTypes = compiled.relTypes
+                .sortedBy { it.id }
+                .map { type ->
+                    GraphMdSearchRelationType(
+                        id = type.id,
+                        sourceTypes = type.from?.sorted(),
+                        targetTypes = type.to?.sorted(),
+                        properties = type.props.entries
+                            .sortedBy { it.key }
+                            .map { (name, schema) -> schema.toSearchProperty(name) },
+                    )
+                },
             timelines = compiled.timelines.map { it.id }.distinct().sorted(),
         )
     }
@@ -1255,6 +1276,16 @@ private class GraphMdWorkspaceIndex {
                 definition.range(),
             )
         }
+    }
+
+    private fun sourceLocation(source: SourceInfo): GraphMdSearchLocation? = synchronized(this) {
+        val document = documents.values.firstOrNull { indexed ->
+            indexed.path.toString() == source.path
+        } ?: return@synchronized null
+        GraphMdSearchLocation(
+            document.uri,
+            document.rangeOf(source.range ?: SourceRange(0, 0)),
+        )
     }
 
     private fun sourceDocuments(): List<SourceDocument> =

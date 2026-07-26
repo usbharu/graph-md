@@ -20,7 +20,8 @@
   - validTime の逆転、許可されない Timeline、duration 境界、relation endpoint 制約の修正
 - `@props(validTime=...){...}` と `@link(validTime=...){...}[label](target relType)` のシンタックスハイライト
 - GraphMD サイドバーから利用できるワークスペース検索
-  - ノード型、全文、Property、時点・期間、並び順を指定する検索フォーム
+  - ノード型、全文、Property、時点・期間、並び順を指定するノード検索フォーム
+  - Link 型、始点・終点の型/ID、Link 全文・Property、時間条件を指定する Link 検索フォーム
   - 名前付きパラメータに対応した GMQL の直接実行
   - 型付きの表形式結果と、結果行から定義元 Markdown への移動
 - `core` の `GraphCompiler` による未定義参照や制約違反の診断
