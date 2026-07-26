@@ -32,7 +32,11 @@ sealed interface GmqlType {
 sealed interface GmqlValue {
     data class StringValue(val value: String) : GmqlValue
     data class IntegerValue(val value: Long) : GmqlValue
-    data class DecimalValue(val value: Double) : GmqlValue
+    data class DecimalValue(val value: Double) : GmqlValue {
+        init {
+            require(value.isFinite()) { "A GMQL Decimal must be finite." }
+        }
+    }
     data class BooleanValue(val value: Boolean) : GmqlValue
     data object NullValue : GmqlValue
     data class NodeValue(val id: NodeId) : GmqlValue

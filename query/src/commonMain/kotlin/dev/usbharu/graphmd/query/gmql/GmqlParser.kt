@@ -342,7 +342,11 @@ private class Parser(private val tokens: List<Token>) {
                 GmqlValue.IntegerValue(token.text.toLongOrNull() ?: fail("Integer is out of range", token)), token.range,
             )
             TokenKind.DECIMAL -> GmqlExpression.Literal(
-                GmqlValue.DecimalValue(token.text.toDoubleOrNull() ?: fail("Invalid decimal", token)), token.range,
+                GmqlValue.DecimalValue(
+                    token.text.toDoubleOrNull()?.takeIf(Double::isFinite)
+                        ?: fail("Decimal must be finite", token),
+                ),
+                token.range,
             )
             TokenKind.PARAMETER -> GmqlExpression.Parameter(token.text, token.range)
             TokenKind.IDENT -> when {

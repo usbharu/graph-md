@@ -371,6 +371,8 @@ internal class GmqlExecutor(
             GmqlQueryResult(
                 diagnostics = listOf(diagnostic("GMQL5001", limit.message ?: "Execution limit exceeded.", null, GmqlDiagnosticKind.LIMIT)),
             )
+        } catch (evaluation: GmqlEvaluationException) {
+            GmqlQueryResult(diagnostics = listOf(evaluation.diagnostic))
         }
     }
 
@@ -567,7 +569,7 @@ internal class GmqlExecutor(
                 left.truthTime(binding.validity) union right.truthTime(binding.validity),
                 maxOf(left.score, right.score),
             )
-            "+", "-", "*", "/", "%" -> arithmetic(left, right, binary.operator)
+            "+", "-", "*", "/", "%" -> arithmetic(left, right, binary.operator, binary.range)
             else -> predicate(left, right, binary.operator)
         }
     }
@@ -599,12 +601,21 @@ internal class GmqlExecutor(
         return Eval(GmqlValue.TemporalValue(entries), evaluatedTime, left.score + right.score)
     }
 
-    private fun arithmetic(left: Eval, right: Eval, operator: String): Eval {
+    private fun arithmetic(
+        left: Eval,
+        right: Eval,
+        operator: String,
+        range: GmqlSourceRange,
+    ): Eval {
         val entries = buildList {
             left.entries().forEach { l ->
                 right.entries().forEach { r ->
                     val time = l.validTime intersect r.validTime
-                    if (!time.isEmpty) numeric(l.value, r.value, operator)?.let { add(GmqlValue.TemporalEntry(it, time)) }
+                    if (!time.isEmpty) {
+                        numeric(l.value, r.value, operator, range)?.let { value ->
+                            add(GmqlValue.TemporalEntry(value, time))
+                        }
+                    }
                 }
             }
         }
@@ -738,7 +749,8 @@ internal class GmqlExecutor(
         if (scopedValidity.isEmpty) return null
         val window = when (valid.operator) {
             GmqlValidOperator.AT -> {
-                val instant = decimalValue(evaluate(checkNotNull(valid.instant), binding, parameters).value)
+                val expression = checkNotNull(valid.instant)
+                val instant = finiteTemporalBoundary(evaluate(expression, binding, parameters), expression.range)
                 IntervalSet.of(graph.timelineCatalog.normalize(
                     timeline, IntervalBoundary(instant, true), IntervalBoundary(instant, true),
                 ))
@@ -746,10 +758,16 @@ internal class GmqlExecutor(
             else -> {
                 val interval = checkNotNull(valid.interval)
                 val start = interval.start?.let {
-                    IntervalBoundary(decimalValue(evaluate(it, binding, parameters).value), interval.includeStart)
+                    IntervalBoundary(
+                        finiteTemporalBoundary(evaluate(it, binding, parameters), it.range),
+                        interval.includeStart,
+                    )
                 }
                 val end = interval.end?.let {
-                    IntervalBoundary(decimalValue(evaluate(it, binding, parameters).value), interval.includeEnd)
+                    IntervalBoundary(
+                        finiteTemporalBoundary(evaluate(it, binding, parameters), it.range),
+                        interval.includeEnd,
+                    )
                 }
                 if (start != null && end != null && TemporalInterval.isEmpty(start, end)) return null
                 IntervalSet.of(graph.timelineCatalog.normalize(timeline, start, end))
@@ -763,6 +781,21 @@ internal class GmqlExecutor(
             GmqlValidOperator.ANYTIME -> true
         }
         return if (accepts) binding.copy(validity = scopedValidity, matchedValidity = matched) else null
+    }
+
+    private fun finiteTemporalBoundary(evaluated: Eval, range: GmqlSourceRange): Double {
+        val value = decimalValue(evaluated.value)
+        if (!value.isFinite()) {
+            throw GmqlEvaluationException(
+                diagnostic(
+                    "GMQL4003",
+                    "Temporal boundary must evaluate to a finite Decimal.",
+                    range,
+                    GmqlDiagnosticKind.TEMPORAL,
+                ),
+            )
+        }
+        return value
     }
 
     private fun tick() {
@@ -841,6 +874,7 @@ private data class Eval(
     }
 }
 private class GmqlLimitException(message: String) : IllegalStateException(message)
+private class GmqlEvaluationException(val diagnostic: GmqlDiagnostic) : IllegalStateException(diagnostic.message)
 
 private fun QueryNode.matches(pattern: GmqlNodePattern): Boolean =
     pattern.type == null || typeId == NodeTypeId(pattern.type) || NodeTypeId(pattern.type) in ancestorTypeIds
@@ -996,7 +1030,12 @@ private fun negate(value: GmqlValue): GmqlValue = when (value) {
     else -> GmqlValue.NullValue
 }
 
-private fun numeric(left: GmqlValue, right: GmqlValue, operator: String): GmqlValue? {
+private fun numeric(
+    left: GmqlValue,
+    right: GmqlValue,
+    operator: String,
+    range: GmqlSourceRange,
+): GmqlValue? {
     if (left is GmqlValue.IntegerValue && right is GmqlValue.IntegerValue && operator != "/") {
         return when (operator) {
             "+" -> GmqlValue.IntegerValue(left.value + right.value)
@@ -1009,14 +1048,25 @@ private fun numeric(left: GmqlValue, right: GmqlValue, operator: String): GmqlVa
     val l = decimalValue(left)
     val r = decimalValue(right)
     if (!l.isFinite() || !r.isFinite()) return null
-    return when (operator) {
-        "+" -> GmqlValue.DecimalValue(l + r)
-        "-" -> GmqlValue.DecimalValue(l - r)
-        "*" -> GmqlValue.DecimalValue(l * r)
-        "/" -> if (r == 0.0) null else GmqlValue.DecimalValue(l / r)
-        "%" -> if (r == 0.0) null else GmqlValue.DecimalValue(l % r)
-        else -> null
+    val result = when (operator) {
+        "+" -> l + r
+        "-" -> l - r
+        "*" -> l * r
+        "/" -> if (r == 0.0) return null else l / r
+        "%" -> if (r == 0.0) return null else l % r
+        else -> return null
     }
+    if (!result.isFinite()) {
+        throw GmqlEvaluationException(
+            diagnostic(
+                "GMQL5003",
+                "Numeric expression must evaluate to a finite Decimal.",
+                range,
+                GmqlDiagnosticKind.TYPE,
+            ),
+        )
+    }
+    return GmqlValue.DecimalValue(result)
 }
 
 private fun compare(left: GmqlValue, right: GmqlValue, operator: String): Boolean {

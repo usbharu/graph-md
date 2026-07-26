@@ -374,6 +374,27 @@ class GmqlEngineTest {
         assertTrue(temporal.entries.all { it.value == GmqlValue.BooleanValue(false) })
     }
 
+    @Test
+    fun `non finite decimals are rejected or reported as diagnostics`() {
+        val literal = engine.compileGmql("""MATCH (n) RETURN 1e999 AS value""")
+        val overflow = runSuspend {
+            engine.queryGmql("""MATCH (n) RETURN 1e308 * 1e308 AS value""")
+        }
+        val invalidTemporalBoundary = runSuspend {
+            engine.queryGmql(
+                """MATCH (n:Person) VALID ON MainStory AT 1 / 0 RETURN ID(n)""",
+            )
+        }
+
+        assertFalse(literal.isSuccess)
+        assertEquals("GMQL1001", literal.diagnostics.single().code)
+        assertEquals("GMQL5003", overflow.diagnostics.single().code)
+        assertEquals("GMQL4003", invalidTemporalBoundary.diagnostics.single().code)
+        assertFailsWith<IllegalArgumentException> {
+            GmqlValue.DecimalValue(Double.POSITIVE_INFINITY)
+        }
+    }
+
     private fun source(path: String, text: String) = SourceDocument(text.trimIndent(), path)
 }
 
