@@ -66,6 +66,16 @@ export type BuiltSearchQuery = {
 
 const operators = new Set(["=", "!=", "<", "<=", ">", ">=", "CONTAINS", "STARTS WITH", "ENDS WITH"]);
 
+export function supportsPropertyCondition(propertyType: string): boolean {
+  return propertyType === "string" || propertyType === "number";
+}
+
+export function propertyConditionOperators(propertyType: string): string[] {
+  return propertyType === "number"
+    ? ["=", "!=", "<", "<=", ">", ">="]
+    : ["=", "!=", "CONTAINS", "STARTS WITH", "ENDS WITH"];
+}
+
 export function buildFormQuery(state: SearchFormState): BuiltSearchQuery {
   const parameters: Record<string, string> = {};
   const predicates: string[] = [];
@@ -78,7 +88,11 @@ export function buildFormQuery(state: SearchFormState): BuiltSearchQuery {
   }
 
   state.conditions.forEach((condition, index) => {
-    if (!condition.property || !operators.has(condition.operator)) return;
+    if (
+      !condition.property
+      || !supportsPropertyCondition(condition.propertyType)
+      || !operators.has(condition.operator)
+    ) return;
     const parameter = `property${index}`;
     predicates.push(
       `${variable}.${quoteIdentifier(condition.property)} ${condition.operator} $${parameter}`,
@@ -127,7 +141,11 @@ export function buildLinkFormQuery(state: LinkSearchFormState): BuiltSearchQuery
     parameters.linkKeyword = JSON.stringify(state.keyword);
   }
   state.conditions.forEach((condition, index) => {
-    if (!condition.property || !operators.has(condition.operator)) return;
+    if (
+      !condition.property
+      || !supportsPropertyCondition(condition.propertyType)
+      || !operators.has(condition.operator)
+    ) return;
     const parameter = `linkProperty${index}`;
     predicates.push(`link.${quoteIdentifier(condition.property)} ${condition.operator} $${parameter}`);
     parameters[parameter] = encodeParameter(condition.value, condition.propertyType);
@@ -183,7 +201,7 @@ function buildTemporal(
 }
 
 function encodeParameter(value: string, propertyType: string): string {
-  return ["number", "instant", "duration"].includes(propertyType)
+  return propertyType === "number"
     ? value.trim()
     : JSON.stringify(value);
 }

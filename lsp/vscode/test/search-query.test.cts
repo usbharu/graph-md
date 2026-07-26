@@ -1,6 +1,12 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { buildFormQuery, buildLinkFormQuery, quoteIdentifier } = require("../src/search-query.ts");
+const {
+  buildFormQuery,
+  buildLinkFormQuery,
+  propertyConditionOperators,
+  quoteIdentifier,
+  supportsPropertyCondition,
+} = require("../src/search-query.ts");
 
 function form(overrides = {}) {
   return {
@@ -92,6 +98,20 @@ test("encodes string-like property parameters to preserve their type", () => {
   }));
 
   assert.equal(result.parameters.property0, "\"true\"");
+});
+
+test("excludes property types that GMQL cannot compare", () => {
+  assert.equal(supportsPropertyCondition("string"), true);
+  assert.equal(supportsPropertyCondition("number"), true);
+  assert.equal(supportsPropertyCondition("instant"), false);
+  assert.equal(supportsPropertyCondition("duration"), false);
+  assert.deepEqual(propertyConditionOperators("number"), ["=", "!=", "<", "<=", ">", ">="]);
+
+  const result = buildFormQuery(form({
+    conditions: [{ property: "createdAt", propertyType: "instant", operator: ">=", value: "10" }],
+  }));
+  assert.doesNotMatch(result.query, /createdAt/);
+  assert.deepEqual(result.parameters, {});
 });
 
 test("builds a specialized Link query with endpoint and property filters", () => {

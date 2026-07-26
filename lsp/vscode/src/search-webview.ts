@@ -1,6 +1,8 @@
 import {
   buildFormQuery,
   buildLinkFormQuery,
+  propertyConditionOperators,
+  supportsPropertyCondition,
   type LinkSearchFormState,
   type PropertyCondition,
   type SearchFormState,
@@ -131,7 +133,7 @@ function fillPropertySelect(select: HTMLSelectElement, kind: FormKind, selected?
   const properties = (kind === "node"
     ? metadata.nodeTypes.find((type) => type.id === typeId)
     : metadata.relationTypes.find((type) => type.id === typeId))?.properties
-    .filter((property) => property.type !== "array" && property.type !== "text") ?? [];
+    .filter((property) => supportsPropertyCondition(property.type)) ?? [];
   select.replaceChildren(option("", "プロパティ"), ...properties.map((property) => {
     const item = option(property.name, property.name);
     item.dataset.propertyType = property.type;
@@ -160,9 +162,7 @@ function refreshOperator(row: HTMLElement, selected?: string): void {
   const operator = row.querySelector<HTMLSelectElement>(".condition-operator");
   if (!property || !operator) return;
   const type = property.selectedOptions[0]?.dataset.propertyType ?? "string";
-  const names = ["number", "instant", "duration"].includes(type)
-    ? ["=", "!=", "<", "<=", ">", ">="]
-    : ["=", "!=", "CONTAINS", "STARTS WITH", "ENDS WITH"];
+  const names = propertyConditionOperators(type);
   operator.replaceChildren(...names.map((name) => option(name, name)));
   if (selected && names.includes(selected)) operator.value = selected;
 }
