@@ -94,6 +94,7 @@ class SearchIndexBuilder {
             propertyValuePostings = values.mapValues { (_, postings) ->
                 postings.sortedWith(compareBy<PropertyValuePosting> { it.sortKey }.thenBy { it.assertionId.value })
             },
+            propertyIdsByOwnerAndPath = buildPropertyOwnerPathPostings(graph.propertyAssertions),
             relationIdsBySource = bySource.sortedPostingValues(),
             relationIdsByTarget = byTarget.sortedPostingValues(),
             relationIdsByTypeAndSource = byTypeSource.sortedPostingValues(),

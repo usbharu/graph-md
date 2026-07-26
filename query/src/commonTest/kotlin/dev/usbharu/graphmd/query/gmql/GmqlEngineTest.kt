@@ -3,7 +3,8 @@ package dev.usbharu.graphmd.query.gmql
 import dev.usbharu.graphmd.core.GraphCompiler
 import dev.usbharu.graphmd.core.model.SourceDocument
 import dev.usbharu.graphmd.query.GraphSearchEngine
-import dev.usbharu.graphmd.query.model.TimelineId
+import dev.usbharu.graphmd.query.ir.AssertionOwner
+import dev.usbharu.graphmd.query.model.*
 import kotlin.coroutines.*
 import kotlin.test.*
 
@@ -393,6 +394,32 @@ class GmqlEngineTest {
         assertFailsWith<IllegalArgumentException> {
             GmqlValue.DecimalValue(Double.POSITIVE_INFINITY)
         }
+    }
+
+    @Test
+    fun `indexed property lookup does not scan unrelated assertions for every binding`() {
+        val template = engine.graph.propertyAssertions.first()
+        val noisyGraph = engine.graph.copy(
+            propertyAssertions = engine.graph.propertyAssertions + (0 until 100).map { index ->
+                template.copy(
+                    id = AssertionId(10_000 + index),
+                    owner = AssertionOwner.Node(NodeId("unrelated-$index")),
+                    propertyId = PropertyId("unrelated"),
+                    path = PropertyPath("unrelated"),
+                )
+            },
+        )
+        val indexed = GraphSearchEngine.fromGraph(noisyGraph)
+
+        val result = runSuspend {
+            indexed.queryGmql(
+                """MATCH (n:Person) WHERE n.age >= 15 RETURN ID(n) AS id ORDER BY id""",
+                options = GmqlExecutionOptions(maxOperations = 50),
+            )
+        }
+
+        assertTrue(result.isSuccess, result.diagnostics.toString())
+        assertEquals(listOf("alice", "bob"), result.stringColumn())
     }
 
     private fun source(path: String, text: String) = SourceDocument(text.trimIndent(), path)

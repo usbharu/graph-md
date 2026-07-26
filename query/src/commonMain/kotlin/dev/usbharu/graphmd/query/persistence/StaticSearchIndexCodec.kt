@@ -260,6 +260,7 @@ object StaticSearchIndexCodec {
             nodeIdsByType = nodePostings,
             propertyExactPostings = exactPostings,
             propertyValuePostings = valuePostings,
+            propertyIdsByOwnerAndPath = buildPropertyOwnerPathPostings(properties),
             relationIdsBySource = relationPostings.source,
             relationIdsByTarget = relationPostings.target,
             relationIdsByTypeAndSource = relationPostings.typeSource,

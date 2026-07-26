@@ -1,11 +1,18 @@
 package dev.usbharu.graphmd.query.index
 
+import dev.usbharu.graphmd.query.ir.AssertionOwner
+import dev.usbharu.graphmd.query.ir.PropertyAssertion
 import dev.usbharu.graphmd.query.ir.QueryableGraph
 import dev.usbharu.graphmd.query.model.*
 
 data class PropertyExactKey(
     val propertyId: PropertyId,
     val valueKey: String,
+)
+
+data class PropertyOwnerPathKey(
+    val owner: AssertionOwner,
+    val path: PropertyPath,
 )
 
 data class PropertySortKey(
@@ -102,6 +109,7 @@ data class SearchIndex(
     val nodeIdsByType: Map<NodeTypeId, List<NodeId>>,
     val propertyExactPostings: Map<PropertyExactKey, List<AssertionId>>,
     val propertyValuePostings: Map<PropertyId, List<PropertyValuePosting>>,
+    val propertyIdsByOwnerAndPath: Map<PropertyOwnerPathKey, List<AssertionId>>,
     val relationIdsBySource: Map<NodeId, List<AssertionId>>,
     val relationIdsByTarget: Map<NodeId, List<AssertionId>>,
     val relationIdsByTypeAndSource: Map<RelationEndpointKey, List<AssertionId>>,
@@ -110,3 +118,12 @@ data class SearchIndex(
     val intervalIndex: IntervalIndex,
     val fullTextIndex: FullTextIndex,
 )
+
+internal fun buildPropertyOwnerPathPostings(
+    assertions: Iterable<PropertyAssertion>,
+): Map<PropertyOwnerPathKey, List<AssertionId>> =
+    assertions.groupByTo(
+        linkedMapOf(),
+        keySelector = { PropertyOwnerPathKey(it.owner, it.path) },
+        valueTransform = { it.id },
+    ).mapValues { (_, ids) -> ids.distinct().sortedBy(AssertionId::value) }

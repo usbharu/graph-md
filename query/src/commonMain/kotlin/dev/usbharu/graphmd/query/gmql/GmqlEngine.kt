@@ -347,6 +347,7 @@ internal class GmqlExecutor(
 ) {
     private val graph = index.graph
     private val nodeById = graph.nodes.associateBy { it.id }
+    private val propertyById = graph.propertyAssertions.associateBy { it.id }
     private val relationById = graph.relationAssertions.associateBy { it.id }
     private val textById = graph.textAssertions.associateBy { it.id }
     private var operations = 0L
@@ -531,12 +532,18 @@ internal class GmqlExecutor(
             null -> return Eval(GmqlValue.NullValue, IntervalSet.empty(), missing = true)
         }
         val path = PropertyPath(chain.second)
-        val entries = graph.propertyAssertions.asSequence()
-            .filter {
-                tick()
-                it.owner == owner && it.path == path
-            }
+        val candidates = if (useIndex) {
+            index.propertyIdsByOwnerAndPath[PropertyOwnerPathKey(owner, path)]
+                .orEmpty()
+                .asSequence()
+                .mapNotNull(propertyById::get)
+        } else {
+            graph.propertyAssertions.asSequence()
+        }
+        val entries = candidates
             .mapNotNull { assertion ->
+                tick()
+                if (assertion.owner != owner || assertion.path != path) return@mapNotNull null
                 val time = binding.validity intersect assertion.validTime
                 if (time.isEmpty) null else GmqlValue.TemporalEntry(assertion.value.toGmqlValue(), time)
             }.toList()
