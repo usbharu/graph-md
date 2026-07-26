@@ -101,9 +101,8 @@ class GraphMdLanguageServerTest {
                     ---
                 """.trimIndent(),
             )
-            Files.writeString(
-                node,
-                """
+            val relationText = "@link{since = 2021}[Bob](bob friendOf)"
+            val nodeText = """
                     ---
                     id: alice
                     kind: Node
@@ -112,9 +111,9 @@ class GraphMdLanguageServerTest {
                       age: 21
                     ---
                     Alice is a brave adventurer.
-                    @link{since = 2021}[Bob](bob friendOf)
-                """.trimIndent(),
-            )
+                    $relationText
+                """.trimIndent().replace("\n", "\r\n")
+            Files.writeString(node, nodeText)
             Files.writeString(
                 targetNode,
                 """
@@ -189,6 +188,10 @@ class GraphMdLanguageServerTest {
             assertEquals("alice", links.rows.single().values[2])
             assertEquals("bob", links.rows.single().values[3])
             assertEquals(node.toUri().toString(), links.rows.single().location?.uri)
+            assertEquals(
+                Range(Position(8, 0), Position(8, relationText.length)),
+                links.rows.single().location?.range,
+            )
         } finally {
             root.toFile().deleteRecursively()
         }

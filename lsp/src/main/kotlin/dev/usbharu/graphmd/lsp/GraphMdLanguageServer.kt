@@ -1284,7 +1284,7 @@ private class GraphMdWorkspaceIndex {
         } ?: return@synchronized null
         GraphMdSearchLocation(
             document.uri,
-            document.rangeOf(source.range ?: SourceRange(0, 0)),
+            source.range?.let(document::bodyRangeOf) ?: document.rangeOf(SourceRange(0, 0)),
         )
     }
 
@@ -2496,6 +2496,14 @@ private data class IndexedDocument(
         return Range(positionAt(sourceRange.start), positionAt(sourceRange.end))
     }
 
+    fun bodyRangeOf(sourceRange: SourceRange): Range {
+        val bodyOffset = analysis.frontMatterEndOffset
+        return Range(
+            normalizedPositionAt(bodyOffset + sourceRange.start),
+            normalizedPositionAt(bodyOffset + sourceRange.end),
+        )
+    }
+
     fun endRange(): Range = rangeOf(SourceRange(text.length, text.length))
 
     fun defaultId(): String = path.fileName.toString().substringBeforeLast('.').ifBlank { "node" }
@@ -2747,6 +2755,20 @@ private data class IndexedDocument(
         val safeOffset = offset.coerceIn(0, text.length)
         val line = lineStarts.indexOfLast { it <= safeOffset }.coerceAtLeast(0)
         return Position(line, safeOffset - lineStarts[line])
+    }
+
+    private fun normalizedPositionAt(offset: Int): Position {
+        val normalizedText = analysis.text
+        val safeOffset = offset.coerceIn(0, normalizedText.length)
+        var line = 0
+        var lineStart = 0
+        for (index in 0 until safeOffset) {
+            if (normalizedText[index] == '\n') {
+                line++
+                lineStart = index + 1
+            }
+        }
+        return Position(line, safeOffset - lineStart)
     }
 
     private fun sourceLines(): List<SourceLine> = buildList {
