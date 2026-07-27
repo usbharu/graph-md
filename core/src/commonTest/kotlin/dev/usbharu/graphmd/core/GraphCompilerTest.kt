@@ -694,6 +694,94 @@ class GraphCompilerTest {
     }
 
     @Test
+    fun `rejects unmapped duration endpoint timelines when duration timeline is omitted`() {
+        val result = compiler().compile(
+            listOf(
+                TimelineDocument("A", sourcePath = "/tmp/a.md"),
+                TimelineDocument("B", sourcePath = "/tmp/b.md"),
+                NodeTypeDocument(
+                    "Event",
+                    props = mapOf("during" to PropSchema(PropType.duration)),
+                    sourcePath = "/tmp/type.md",
+                ),
+                NodeDocument(
+                    "event",
+                    "Event",
+                    props = mapOf(
+                        "during" to RawObject(
+                            mapOf(
+                                "from" to RawObject(mapOf("timeline" to RawString("A"), "timecode" to RawInteger(1))),
+                                "to" to RawObject(mapOf("timeline" to RawString("B"), "timecode" to RawInteger(2))),
+                            ),
+                        ),
+                    ),
+                    sourcePath = "/tmp/event.md",
+                ),
+            ),
+        )
+
+        assertTrue(
+            result.diagnostics.any {
+                it.category == DiagnosticCategory.ConstraintError &&
+                    it.message == "during duration endpoint timelines A and B are not mapped"
+            },
+            result.diagnostics.joinToString("\n") { it.message },
+        )
+        val duration = result.nodes.single().props.getValue("during") as DurationValue
+        assertEquals("A", duration.from?.timeline)
+        assertEquals("B", duration.to?.timeline)
+    }
+
+    @Test
+    fun `accepts same and transitively mapped duration endpoint timelines in either order`() {
+        val durationProps = listOf("same", "direct", "transitive", "reverse", "subtype").associateWith {
+            PropSchema(PropType.duration)
+        }
+        fun duration(from: String, to: String) = RawObject(
+            mapOf(
+                "from" to RawObject(mapOf("timeline" to RawString(from), "timecode" to RawInteger(1))),
+                "to" to RawObject(mapOf("timeline" to RawString(to), "timecode" to RawInteger(2))),
+            ),
+        )
+        val result = compiler().compile(
+            listOf(
+                TimelineDocument("A", sourcePath = "/tmp/a.md"),
+                TimelineDocument(
+                    "B",
+                    timecode = TimecodeSchema(TimecodeType.number),
+                    mappings = listOf(OffsetTimelineMapping(from = "A", offset = 10.0)),
+                    sourcePath = "/tmp/b.md",
+                ),
+                TimelineDocument(
+                    "C",
+                    timecode = TimecodeSchema(TimecodeType.number),
+                    mappings = listOf(OffsetTimelineMapping(from = "B", offset = 20.0)),
+                    sourcePath = "/tmp/c.md",
+                ),
+                TimelineDocument("D", extends = listOf("C"), sourcePath = "/tmp/d.md"),
+                NodeTypeDocument("Event", props = durationProps, sourcePath = "/tmp/type.md"),
+                NodeDocument(
+                    "event",
+                    "Event",
+                    props = mapOf(
+                        "same" to duration("A", "A"),
+                        "direct" to duration("A", "B"),
+                        "transitive" to duration("A", "C"),
+                        "reverse" to duration("C", "A"),
+                        "subtype" to duration("D", "A"),
+                    ),
+                    sourcePath = "/tmp/event.md",
+                ),
+            ),
+        )
+
+        assertTrue(
+            result.diagnostics.none { "duration endpoint timeline" in it.message },
+            result.diagnostics.joinToString("\n") { it.message },
+        )
+    }
+
+    @Test
     fun `accepts inherited property timeline selector narrowed to a timeline subtype`() {
         val result = compiler().compile(
             listOf(

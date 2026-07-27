@@ -940,6 +940,16 @@ class GraphCompiler(
                 )
             }
         }
+        val fromTimeline = from?.timeline
+        val toTimeline = to?.timeline
+        if (timeline == null && fromTimeline != null && toTimeline != null &&
+            !timelinesMapped(fromTimeline, toTimeline, timelineById)
+        ) {
+            diagnostics += constraintError(
+                "$propName duration endpoint timelines $fromTimeline and $toTimeline are not mapped",
+                SourceInfo(sourcePath, documentId),
+            )
+        }
         val unknown = obj.values.keys - setOf("timeline", "from", "to")
         if (unknown.isNotEmpty()) diagnostics += typeError("$propName duration has unknown fields: ${unknown.joinToString()}", sourcePath, documentId)
         return DurationValue(timeline, from, to)
