@@ -8,7 +8,11 @@ import dev.usbharu.graphmd.query.gmql.GmqlExecutionOptions
 import dev.usbharu.graphmd.query.gmql.GmqlExecutionProfile
 import dev.usbharu.graphmd.query.gmql.GmqlValue
 import org.eclipse.lsp4j.*
+import org.eclipse.lsp4j.jsonrpc.ResponseErrorException
 import org.eclipse.lsp4j.jsonrpc.messages.Either
+import org.eclipse.lsp4j.jsonrpc.messages.Either3
+import org.eclipse.lsp4j.jsonrpc.messages.ResponseError
+import org.eclipse.lsp4j.jsonrpc.messages.ResponseErrorCode
 import org.eclipse.lsp4j.services.LanguageClient
 import org.eclipse.lsp4j.services.LanguageClientAware
 import org.eclipse.lsp4j.services.LanguageServer
@@ -25,6 +29,8 @@ import kotlin.coroutines.startCoroutine
 import kotlin.io.path.extension
 import kotlin.io.path.isRegularFile
 import kotlin.io.path.readText
+
+private val GRAPH_MD_ID_REGEX = Regex("[A-Za-z_][A-Za-z0-9_.:-]*")
 
 class GraphMdLanguageServer : LanguageServer, LanguageClientAware, GraphMdSearchService {
     private val workspaceIndex = GraphMdWorkspaceIndex()
@@ -48,7 +54,7 @@ class GraphMdLanguageServer : LanguageServer, LanguageClientAware, GraphMdSearch
                     definitionProvider = Either.forLeft(true)
                     referencesProvider = Either.forLeft(true)
                     hoverProvider = Either.forLeft(true)
-                    renameProvider = Either.forLeft(true)
+                    renameProvider = Either.forRight(RenameOptions(true))
                     codeActionProvider = Either.forRight(
                         CodeActionOptions(listOf(CodeActionKind.QuickFix)).apply {
                             resolveProvider = false
@@ -140,6 +146,16 @@ private class GraphMdTextDocumentService(
 
     override fun rename(params: RenameParams): CompletableFuture<WorkspaceEdit?> {
         return CompletableFuture.completedFuture(index.rename(params.textDocument.uri, params.position, params.newName))
+    }
+
+    override fun prepareRename(
+        params: PrepareRenameParams,
+    ): CompletableFuture<Either3<Range, PrepareRenameResult, PrepareRenameDefaultBehavior>?> {
+        return CompletableFuture.completedFuture(
+            index.prepareRename(params.textDocument.uri, params.position)?.let {
+                Either3.forSecond<Range, PrepareRenameResult, PrepareRenameDefaultBehavior>(it)
+            },
+        )
     }
 
     override fun codeAction(params: CodeActionParams): CompletableFuture<List<Either<Command, CodeAction>>> {
@@ -402,13 +418,16 @@ internal class GraphMdWorkspaceIndex(
     }
 
     fun rename(uri: String, position: Position, newName: String): WorkspaceEdit? {
-        if (newName.isBlank() || newName.any { it.isWhitespace() }) return null
+        if (!GRAPH_MD_ID_REGEX.matches(newName)) {
+            throw renameFailure("New name '$newName' is not a valid GraphMD ID; expected [A-Za-z_][A-Za-z0-9_.:-]*")
+        }
         val documents = documentsSnapshot()
         val document = documents.firstOrNull { it.uri == normalizeUri(uri) } ?: return null
         val offset = document.offsetAt(position)
         val symbol = analyzer.findReferenceAt(document.analysis, offset)?.let { it.kind to it.targetId }
             ?: analyzer.findDefinitionAt(document.analysis, offset)?.let { it.kind to it.id }
             ?: return null
+        validateRenameTarget(symbol, newName, documents)
         val changes = linkedMapOf<String, MutableList<TextEdit>>()
         documents.forEach { indexed ->
             indexed.analysis.definitions
@@ -420,6 +439,43 @@ internal class GraphMdWorkspaceIndex(
         }
         return WorkspaceEdit(changes)
     }
+
+    fun prepareRename(uri: String, position: Position): PrepareRenameResult? {
+        val documents = documentsSnapshot()
+        val document = documents.firstOrNull { it.uri == normalizeUri(uri) } ?: return null
+        val offset = document.offsetAt(position)
+        val symbolAtPosition = analyzer.findReferenceAt(document.analysis, offset)?.let {
+            Triple(it.kind, it.targetId, it.range)
+        } ?: analyzer.findDefinitionAt(document.analysis, offset)?.let {
+            Triple(it.kind, it.id, it.range)
+        } ?: return null
+        validateUnambiguousSource(symbolAtPosition.first to symbolAtPosition.second, documents)
+        return PrepareRenameResult(document.rangeOf(symbolAtPosition.third), symbolAtPosition.second)
+    }
+
+    private fun validateRenameTarget(
+        symbol: Pair<ReferenceTargetKind, String>,
+        newName: String,
+        documents: List<IndexedDocument>,
+    ) {
+        validateUnambiguousSource(symbol, documents)
+        if (newName == symbol.second) return
+        if (definitionsOf(symbol.first, documents).any { it.id == newName }) {
+            throw renameFailure("${symbol.first.displayName()} '$newName' is already defined")
+        }
+    }
+
+    private fun validateUnambiguousSource(
+        symbol: Pair<ReferenceTargetKind, String>,
+        documents: List<IndexedDocument>,
+    ) {
+        if (definitionsOf(symbol.first, documents).count { it.id == symbol.second } > 1) {
+            throw renameFailure("Cannot rename ambiguous ${symbol.first.displayName()} '${symbol.second}'")
+        }
+    }
+
+    private fun renameFailure(message: String): ResponseErrorException =
+        ResponseErrorException(ResponseError(ResponseErrorCode.RequestFailed, message, null))
 
     fun codeActions(uri: String, diagnostics: List<org.eclipse.lsp4j.Diagnostic>): List<CodeAction> {
         val document = documentSnapshot(normalizeUri(uri)) ?: return emptyList()
