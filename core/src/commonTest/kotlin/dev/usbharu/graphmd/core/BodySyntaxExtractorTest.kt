@@ -202,6 +202,40 @@ class BodySyntaxExtractorTest {
     }
 
     @Test
+    fun `ignores directive keywords followed by identifier characters`() {
+        val body = """
+            @linking @links @link_foo @link1 @link.foo @link:foo @link-foo @linké @link日本語
+            https://example.com/@link:section user@link.example
+            @propsExtra{name = "Ignored"} @props_foo{name = "Ignored"} @props1{name = "Ignored"}
+            @props.foo{name = "Ignored"} @props:foo{name = "Ignored"} @props-foo{name = "Ignored"}
+            @link[Bob](bob friendOf)
+            @props{name = "Alice"}
+        """.trimIndent()
+
+        val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
+
+        assertTrue(extracted.diagnostics.isEmpty(), extracted.diagnostics.joinToString("\n") { it.message })
+        assertEquals(1, extracted.propsBlocks.size)
+        assertEquals("Alice", (extracted.propsBlocks.single().props.getValue("name") as RawString).value)
+        assertEquals(1, extracted.relations.size)
+        assertEquals("bob", extracted.relations.single().target)
+    }
+
+    @Test
+    fun `recognizes standalone link keyword and boundaries before punctuation and whitespace`() {
+        val body = """
+            @link,
+            @link [Bob](bob friendOf)
+            @link
+        """.trimIndent()
+
+        val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
+
+        assertEquals(3, extracted.diagnostics.count { it.message == "@link must be followed immediately by a link" })
+        assertEquals(0, extracted.relations.size)
+    }
+
+    @Test
     fun `returns empty extraction for plain text`() {
         val extracted = extractor.extract("plain text only", "/tmp/plain.md", "plain")
 
