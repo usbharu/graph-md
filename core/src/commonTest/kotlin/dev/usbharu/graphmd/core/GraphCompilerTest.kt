@@ -810,6 +810,173 @@ class GraphCompilerTest {
     }
 
     @Test
+    fun `text members apply property timeline selector to inherited and overridden validTime`() {
+        fun rawValidTime(timeline: String) = RawArray(
+            listOf(RawObject(mapOf("timeline" to RawString(timeline)))),
+        )
+        fun member(value: String, timeline: String) = RawObject(
+            mapOf(
+                "value" to RawString(value),
+                "validTime" to rawValidTime(timeline),
+            ),
+        )
+
+        val result = compiler().compile(
+            listOf(
+                TimelineDocument("Allowed", sourcePath = "/tmp/allowed.md"),
+                TimelineDocument("Other", sourcePath = "/tmp/other.md"),
+                NodeTypeDocument(
+                    "Sample",
+                    props = mapOf(
+                        "label" to PropSchema(PropType.text, timeline = TimelineSelector.Id("Allowed")),
+                    ),
+                    sourcePath = "/tmp/type.md",
+                ),
+                NodeDocument(
+                    "valid",
+                    "Sample",
+                    validTime = listOf(ValidTime("Allowed")),
+                    props = mapOf(
+                        "label" to RawObject(
+                            mapOf(
+                                "inherited" to RawString("current"),
+                                "overridden" to member("also current", "Allowed"),
+                            ),
+                        ),
+                    ),
+                    sourcePath = "/tmp/valid.md",
+                ),
+                NodeDocument(
+                    "invalid",
+                    "Sample",
+                    validTime = listOf(ValidTime("Other")),
+                    props = mapOf(
+                        "label" to RawObject(
+                            mapOf(
+                                "inheritedFirst" to RawString("old"),
+                                "inheritedSecond" to RawString("also old"),
+                                "allowedOverride" to member("current", "Allowed"),
+                                "otherOverride" to member("old override", "Other"),
+                                "unknownOverride" to member("unknown", "Missing"),
+                            ),
+                        ),
+                    ),
+                    sourcePath = "/tmp/invalid.md",
+                ),
+            ),
+        )
+
+        val invalidConstraints = result.diagnostics
+            .filter { it.category == DiagnosticCategory.ConstraintError && it.source?.documentId == "invalid" }
+            .map { it.message }
+        assertEquals(
+            setOf(
+                "label.inheritedFirst validTime timeline Other is not allowed",
+                "label.inheritedSecond validTime timeline Other is not allowed",
+                "label.otherOverride validTime timeline Other is not allowed",
+            ),
+            invalidConstraints.toSet(),
+        )
+        assertTrue(result.diagnostics.none {
+            it.category == DiagnosticCategory.ConstraintError && it.source?.documentId == "valid"
+        })
+        assertTrue(result.diagnostics.any {
+            it.category == DiagnosticCategory.ReferenceError &&
+                it.source?.documentId == "invalid" &&
+                it.message == "Unknown Timeline: Missing"
+        })
+        assertTrue(invalidConstraints.none { "unknownOverride" in it })
+    }
+
+    @Test
+    fun `array text items validate only their effective member timelines`() {
+        fun rawValidTime(timeline: String) = RawArray(
+            listOf(RawObject(mapOf("timeline" to RawString(timeline)))),
+        )
+        fun timed(value: RawValue, timeline: String) = RawObject(
+            mapOf(
+                "value" to value,
+                "validTime" to rawValidTime(timeline),
+            ),
+        )
+
+        val result = compiler().compile(
+            listOf(
+                TimelineDocument("Allowed", sourcePath = "/tmp/allowed.md"),
+                TimelineDocument("Other", sourcePath = "/tmp/other.md"),
+                NodeTypeDocument(
+                    "Sample",
+                    props = mapOf(
+                        "labels" to PropSchema(
+                            PropType.array,
+                            items = PropSchema(PropType.text, timeline = TimelineSelector.Id("Allowed")),
+                        ),
+                    ),
+                    sourcePath = "/tmp/type.md",
+                ),
+                NodeDocument(
+                    "valid",
+                    "Sample",
+                    validTime = listOf(ValidTime("Allowed")),
+                    props = mapOf(
+                        "labels" to RawArray(
+                            listOf(
+                                RawString("current"),
+                                RawObject(mapOf("ja" to RawString("現在"), "en" to RawString("current"))),
+                                RawObject(emptyMap()),
+                            ),
+                        ),
+                    ),
+                    sourcePath = "/tmp/valid.md",
+                ),
+                NodeDocument(
+                    "invalid",
+                    "Sample",
+                    validTime = listOf(ValidTime("Other")),
+                    props = mapOf(
+                        "labels" to RawArray(
+                            listOf(
+                                RawString("old"),
+                                RawObject(
+                                    mapOf(
+                                        "inheritedJa" to RawString("旧名"),
+                                        "inheritedEn" to RawString("Old"),
+                                        "allowedOverride" to timed(RawString("current"), "Allowed"),
+                                        "otherOverride" to timed(RawString("old override"), "Other"),
+                                    ),
+                                ),
+                                RawObject(emptyMap()),
+                                timed(
+                                    RawObject(mapOf("elementOverride" to RawString("current"))),
+                                    "Allowed",
+                                ),
+                            ),
+                        ),
+                    ),
+                    sourcePath = "/tmp/invalid.md",
+                ),
+            ),
+        )
+
+        val invalidConstraints = result.diagnostics
+            .filter { it.category == DiagnosticCategory.ConstraintError && it.source?.documentId == "invalid" }
+            .map { it.message }
+        assertEquals(
+            setOf(
+                "labels[] validTime timeline Other is not allowed",
+                "labels[].inheritedJa validTime timeline Other is not allowed",
+                "labels[].inheritedEn validTime timeline Other is not allowed",
+                "labels[].otherOverride validTime timeline Other is not allowed",
+            ),
+            invalidConstraints.toSet(),
+        )
+        assertTrue(invalidConstraints.none { it == "labels[] validTime timeline Allowed is not allowed" })
+        assertTrue(result.diagnostics.none {
+            it.category == DiagnosticCategory.ConstraintError && it.source?.documentId == "valid"
+        })
+    }
+
+    @Test
     fun `covers inheritance intersections and compatible refinements`() {
         val result = compiler().compile(
             listOf(
@@ -1029,6 +1196,220 @@ class GraphCompilerTest {
         )
 
         assertTrue(result.diagnostics.any { "plain timeline ThirdAge is not allowed" in it.message })
+    }
+
+    @Test
+    fun `property validTime selectors apply to scalar array and nested array assertions`() {
+        fun validTime(timeline: String) = listOf(ValidTime(timeline))
+        fun rawValidTime(timeline: String) = RawArray(
+            listOf(RawObject(mapOf("timeline" to RawString(timeline)))),
+        )
+
+        val result = compiler().compile(
+            listOf(
+                TimelineDocument("Allowed", sourcePath = "/tmp/allowed.md"),
+                TimelineDocument("AllowedChild", extends = listOf("Allowed"), sourcePath = "/tmp/allowed-child.md"),
+                TimelineDocument("Other", sourcePath = "/tmp/other.md"),
+                NodeTypeDocument(
+                    id = "Sample",
+                    props = mapOf(
+                        "number" to PropSchema(PropType.number, timeline = TimelineSelector.Id("Allowed")),
+                        "string" to PropSchema(PropType.string, timeline = TimelineSelector.Id("Allowed")),
+                        "text" to PropSchema(PropType.text, timeline = TimelineSelector.Id("Allowed")),
+                        "array" to PropSchema(
+                            PropType.array,
+                            timeline = TimelineSelector.Id("Allowed"),
+                            items = PropSchema(PropType.number, timeline = TimelineSelector.Id("Allowed")),
+                        ),
+                        "free" to PropSchema(PropType.number),
+                        "unknownTimeline" to PropSchema(PropType.number, timeline = TimelineSelector.Id("Allowed")),
+                    ),
+                    sourcePath = "/tmp/sample-type.md",
+                ),
+                NodeDocument(
+                    id = "valid",
+                    type = "Sample",
+                    validTime = validTime("AllowedChild"),
+                    props = mapOf(
+                        "number" to RawInteger(1),
+                        "string" to RawString("value"),
+                        "text" to RawString("value"),
+                        "array" to RawArray(listOf(RawInteger(1))),
+                        "free" to RawInteger(1),
+                    ),
+                    sourcePath = "/tmp/valid.md",
+                ),
+                NodeDocument(
+                    id = "invalid",
+                    type = "Sample",
+                    validTime = validTime("Other"),
+                    props = mapOf(
+                        "number" to RawInteger(1),
+                        "string" to RawString("value"),
+                        "text" to RawString("value"),
+                        "array" to RawArray(
+                            listOf(
+                                RawObject(
+                                    mapOf(
+                                        "value" to RawInteger(1),
+                                        "validTime" to rawValidTime("Other"),
+                                    ),
+                                ),
+                            ),
+                        ),
+                        "free" to RawInteger(1),
+                        "schemaless" to RawInteger(1),
+                        "unknownTimeline" to RawArray(
+                            listOf(
+                                RawObject(
+                                    mapOf(
+                                        "value" to RawInteger(1),
+                                        "validTime" to rawValidTime("Missing"),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                    sourcePath = "/tmp/invalid.md",
+                ),
+            ),
+        )
+
+        val invalidMessages = result.diagnostics
+            .filter { it.category == DiagnosticCategory.ConstraintError && it.source?.documentId == "invalid" }
+            .map { it.message }
+        assertTrue(invalidMessages.any { "number validTime timeline Other is not allowed" in it })
+        assertTrue(invalidMessages.any { "string validTime timeline Other is not allowed" in it })
+        assertTrue(invalidMessages.any { "text validTime timeline Other is not allowed" in it })
+        assertTrue(invalidMessages.any { "array validTime timeline Other is not allowed" in it })
+        assertTrue(invalidMessages.any { "array[] validTime timeline Other is not allowed" in it })
+        assertTrue(invalidMessages.none { "free" in it || "schemaless" in it })
+        assertTrue(invalidMessages.none { "Missing" in it })
+        assertTrue(result.diagnostics.any {
+            it.category == DiagnosticCategory.ReferenceError &&
+                it.source?.documentId == "invalid" &&
+                it.message == "Unknown Timeline: Missing"
+        })
+        assertTrue(result.diagnostics.none {
+            it.category == DiagnosticCategory.ConstraintError && it.source?.documentId == "valid"
+        })
+    }
+
+    @Test
+    fun `property validTime selector supports OR subtype and mapped timelines`() {
+        fun rawAssertion(value: Long, vararg timelines: String) = RawObject(
+            mapOf(
+                "value" to RawInteger(value),
+                "validTime" to RawArray(
+                    timelines.map { timeline ->
+                        RawObject(mapOf("timeline" to RawString(timeline)))
+                    },
+                ),
+            ),
+        )
+
+        val result = compiler().compile(
+            listOf(
+                TimelineDocument("Base", sourcePath = "/tmp/base-time.md"),
+                TimelineDocument("Child", extends = listOf("Base"), sourcePath = "/tmp/child-time.md"),
+                TimelineDocument(
+                    "Mapped",
+                    timecode = TimecodeSchema(TimecodeType.number),
+                    mappings = listOf(OffsetTimelineMapping(from = "Child", offset = 1.0)),
+                    sourcePath = "/tmp/mapped.md",
+                ),
+                TimelineDocument("Other", sourcePath = "/tmp/other.md"),
+                NodeTypeDocument(
+                    id = "Sample",
+                    props = mapOf(
+                        "plain" to PropSchema(PropType.number, timeline = TimelineSelector.Id("Base")),
+                        "mapped" to PropSchema(PropType.number, timeline = TimelineSelector.Mapped("Base")),
+                    ),
+                    sourcePath = "/tmp/sample-type.md",
+                ),
+                NodeDocument(
+                    id = "sample",
+                    type = "Sample",
+                    props = mapOf(
+                        "plain" to RawArray(listOf(rawAssertion(1, "Child"), rawAssertion(2, "Child", "Other"))),
+                        "mapped" to RawArray(listOf(rawAssertion(1, "Mapped"), rawAssertion(2, "Other"))),
+                    ),
+                    sourcePath = "/tmp/sample.md",
+                ),
+            ),
+        )
+
+        val constraintMessages = result.diagnostics
+            .filter { it.category == DiagnosticCategory.ConstraintError }
+            .map { it.message }
+        assertEquals(1, constraintMessages.count { it == "plain validTime timeline Other is not allowed" })
+        assertEquals(1, constraintMessages.count { it == "mapped validTime timeline Other is not allowed" })
+        assertTrue(constraintMessages.none { "Child is not allowed" in it || "Mapped is not allowed" in it })
+    }
+
+    @Test
+    fun `instant and duration implicit and explicit timelines obey property selector`() {
+        fun rawValidTime(timeline: String) = RawArray(
+            listOf(RawObject(mapOf("timeline" to RawString(timeline)))),
+        )
+        fun assertion(value: RawValue, timeline: String) = RawArray(
+            listOf(
+                RawObject(
+                    mapOf(
+                        "value" to value,
+                        "validTime" to rawValidTime(timeline),
+                    ),
+                ),
+            ),
+        )
+
+        val result = compiler().compile(
+            listOf(
+                TimelineDocument("Allowed", sourcePath = "/tmp/allowed.md"),
+                TimelineDocument("Other", sourcePath = "/tmp/other.md"),
+                NodeTypeDocument(
+                    id = "Event",
+                    props = mapOf(
+                        "implicitInstant" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("Allowed")),
+                        "implicitDuration" to PropSchema(PropType.duration, timeline = TimelineSelector.Id("Allowed")),
+                        "explicitInstant" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("Allowed")),
+                        "explicitDuration" to PropSchema(PropType.duration, timeline = TimelineSelector.Id("Allowed")),
+                        "absentInstant" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("Allowed")),
+                        "absentDuration" to PropSchema(PropType.duration, timeline = TimelineSelector.Id("Allowed")),
+                    ),
+                    sourcePath = "/tmp/event-type.md",
+                ),
+                NodeDocument(
+                    id = "event",
+                    type = "Event",
+                    props = mapOf(
+                        "implicitInstant" to assertion(RawInteger(1), "Other"),
+                        "implicitDuration" to assertion(
+                            RawObject(mapOf("from" to RawInteger(1), "to" to RawInteger(2))),
+                            "Other",
+                        ),
+                        "explicitInstant" to RawObject(
+                            mapOf("timeline" to RawString("Other"), "timecode" to RawInteger(1)),
+                        ),
+                        "explicitDuration" to RawObject(
+                            mapOf("timeline" to RawString("Other"), "from" to RawInteger(1)),
+                        ),
+                        "absentInstant" to RawInteger(1),
+                        "absentDuration" to RawObject(mapOf("from" to RawInteger(1))),
+                    ),
+                    sourcePath = "/tmp/event.md",
+                ),
+            ),
+        )
+
+        val constraintMessages = result.diagnostics
+            .filter { it.category == DiagnosticCategory.ConstraintError }
+            .map { it.message }
+        assertTrue(constraintMessages.any { it == "implicitInstant validTime timeline Other is not allowed" })
+        assertTrue(constraintMessages.any { it == "implicitDuration validTime timeline Other is not allowed" })
+        assertTrue(constraintMessages.any { it == "explicitInstant timeline Other is not allowed" })
+        assertTrue(constraintMessages.any { it == "explicitDuration timeline Other is not allowed" })
+        assertTrue(constraintMessages.none { "absent" in it })
     }
 
     private fun timeline() = TimelineDocument(

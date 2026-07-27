@@ -629,6 +629,17 @@ class GraphCompiler(
                 )
             }
             val candidates = propertyEntryCandidates(rawValue, propSchema, inheritedValidTime, diagnostics, sourcePath, documentId, key)
+            if (propSchema != null && propSchema.type != PropType.text) {
+                validatePropertyTimelineSelector(
+                    candidates.flatMap { it.validTime },
+                    propSchema,
+                    timelineById,
+                    sourcePath,
+                    documentId,
+                    key,
+                    diagnostics,
+                )
+            }
             val normalized = candidates.mapNotNull { candidate ->
                 val value = if (propSchema != null) {
                     normalizeValue(
@@ -825,12 +836,41 @@ class GraphCompiler(
         return when (schema.type) {
             PropType.string -> (rawValue as? RawString)?.let { StringValue(it.value) } ?: fail("$propName must be string")
             PropType.text -> when (rawValue) {
-                is RawString -> TextValue(
-                    mapOf("default" to NormalizedPropEntry(StringValue(rawValue.value), inheritedValidTime, inheritedFallback)),
-                )
+                is RawString -> {
+                    validatePropertyTimelineSelector(
+                        inheritedValidTime,
+                        schema,
+                        timelineById,
+                        sourcePath,
+                        documentId,
+                        propName,
+                        diagnostics,
+                    )
+                    TextValue(
+                        mapOf("default" to NormalizedPropEntry(StringValue(rawValue.value), inheritedValidTime, inheritedFallback)),
+                    )
+                }
                 is RawObject -> {
                     val textMap = rawValue.values.mapValues { (key, value) ->
-                        normalizeSchemalessEntry(value, inheritedValidTime, sourcePath, documentId, "$propName.$key", diagnostics)
+                        val memberPath = "$propName.$key"
+                        normalizeSchemalessEntry(
+                            value,
+                            inheritedValidTime,
+                            sourcePath,
+                            documentId,
+                            memberPath,
+                            diagnostics,
+                        ).also { member ->
+                            validatePropertyTimelineSelector(
+                                member.validTime,
+                                schema,
+                                timelineById,
+                                sourcePath,
+                                documentId,
+                                memberPath,
+                                diagnostics,
+                            )
+                        }
                     }
                     TextValue(textMap)
                 }
@@ -853,6 +893,17 @@ class GraphCompiler(
                         } ?: inheritedValidTime
                     } else inheritedValidTime
                     val normalized = schema.items?.let {
+                        if (it.type != PropType.text) {
+                            validatePropertyTimelineSelector(
+                                elementValidTime,
+                                it,
+                                timelineById,
+                                sourcePath,
+                                documentId,
+                                "$propName[]",
+                                diagnostics,
+                            )
+                        }
                         normalizeValue(
                             elementRaw, it, sourcePath, documentId, timelineById, diagnostics, "$propName[]",
                             elementValidTime, inheritedFallback = !isTimedEntry || "validTime" !in entry.values,
@@ -1009,6 +1060,34 @@ class GraphCompiler(
         }
         val selectors = schema.timelines ?: schema.timeline?.let(::listOf)
         return selectors.isNullOrEmpty() || selectors.any { it.matches() }
+    }
+
+    private fun validatePropertyTimelineSelector(
+        validTimes: List<ValidTime>,
+        schema: ResolvedPropSchema,
+        timelineById: Map<String, NormalizedTimeline>,
+        sourcePath: String,
+        documentId: String,
+        propName: String,
+        diagnostics: MutableList<Diagnostic>,
+    ) {
+        validTimes.asSequence()
+            .map { it.timeline }
+            .distinct()
+            .filter { it in timelineById }
+            .filterNot { timelineAllowed(it, schema, timelineById) }
+            .forEach { timeline ->
+                val message = "$propName validTime timeline $timeline is not allowed"
+                if (diagnostics.none {
+                        it.category == DiagnosticCategory.ConstraintError &&
+                            it.message == message &&
+                            it.source?.path == sourcePath &&
+                            it.source.documentId == documentId
+                    }
+                ) {
+                    diagnostics += constraintError(message, SourceInfo(sourcePath, documentId))
+                }
+            }
     }
 
     private fun mappingTarget(mapping: TimelineMapping): String? =
