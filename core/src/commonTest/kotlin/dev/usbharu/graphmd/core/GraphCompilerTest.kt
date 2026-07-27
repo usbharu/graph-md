@@ -278,6 +278,89 @@ class GraphCompilerTest {
     }
 
     @Test
+    fun `drops invalid typed array elements without affecting valid schemaless nested or timed elements`() {
+        val validTime = RawArray(listOf(RawObject(mapOf("timeline" to RawString("CommonEra")))))
+        val result = compiler().compile(
+            listOf(
+                timeline(),
+                NodeTypeDocument(
+                    id = "Metric",
+                    props = mapOf(
+                        "tags" to PropSchema(PropType.array, items = PropSchema(PropType.string)),
+                        "matrix" to PropSchema(
+                            PropType.array,
+                            items = PropSchema(PropType.array, items = PropSchema(PropType.number)),
+                        ),
+                        "anything" to PropSchema(PropType.array),
+                    ),
+                    sourcePath = "/tmp/metric-type.md",
+                ),
+                NodeDocument(
+                    id = "m1",
+                    type = "Metric",
+                    props = mapOf(
+                        "tags" to RawArray(
+                            listOf(
+                                RawString("plain"),
+                                RawInteger(1),
+                                RawObject(
+                                    mapOf(
+                                        "value" to RawString("timed"),
+                                        "validTime" to validTime,
+                                    ),
+                                ),
+                                RawObject(
+                                    mapOf(
+                                        "value" to RawBoolean(false),
+                                        "validTime" to validTime,
+                                    ),
+                                ),
+                            ),
+                        ),
+                        "matrix" to RawArray(
+                            listOf(
+                                RawArray(listOf(RawInteger(1), RawString("bad"), RawNumber(2.5))),
+                                RawString("not-an-array"),
+                                RawArray(listOf(RawInteger(3))),
+                            ),
+                        ),
+                        "anything" to RawArray(
+                            listOf(
+                                RawBoolean(true),
+                                RawArray(listOf(RawString("nested"), RawInteger(4))),
+                            ),
+                        ),
+                    ),
+                    sourcePath = "/tmp/m1.md",
+                ),
+            ),
+        )
+
+        val node = result.nodes.single()
+        val tags = node.props.getValue("tags") as ArrayValue
+        assertEquals(listOf(StringValue("plain"), StringValue("timed")), tags.values)
+        assertTrue(tags.elements[0].validTime.isEmpty())
+        assertEquals("CommonEra", tags.elements[1].validTime.single().timeline)
+
+        val matrix = node.props.getValue("matrix") as ArrayValue
+        assertEquals(2, matrix.values.size)
+        assertEquals(listOf(NumberValue(1.0), NumberValue(2.5)), (matrix.values[0] as ArrayValue).values)
+        assertEquals(listOf(NumberValue(3.0)), (matrix.values[1] as ArrayValue).values)
+
+        val anything = node.props.getValue("anything") as ArrayValue
+        assertTrue(anything.values[0] is BooleanValue)
+        assertEquals(
+            listOf(StringValue("nested"), IntegerValue(4)),
+            (anything.values[1] as ArrayValue).values,
+        )
+
+        assertEquals(2, result.diagnostics.count { it.message == "tags[] must be string" })
+        assertEquals(1, result.diagnostics.count { it.message == "matrix[][] must be number" })
+        assertEquals(1, result.diagnostics.count { it.message == "matrix[] must be array" })
+        assertEquals(4, result.diagnostics.count { it.category == DiagnosticCategory.TypeError })
+    }
+
+    @Test
     fun `does not report required prop missing when its inline block has a syntax error`() {
         val result = compiler().compile(
             listOf(

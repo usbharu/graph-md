@@ -852,12 +852,14 @@ class GraphCompiler(
                             parseRawValidTimes(it, "$propName[].validTime", sourcePath, documentId, diagnostics)
                         } ?: inheritedValidTime
                     } else inheritedValidTime
-                    val normalized = schema.items?.let {
+                    val normalized = if (schema.items != null) {
                         normalizeValue(
-                            elementRaw, it, sourcePath, documentId, timelineById, diagnostics, "$propName[]",
+                            elementRaw, schema.items, sourcePath, documentId, timelineById, diagnostics, "$propName[]",
                             elementValidTime, inheritedFallback = !isTimedEntry || "validTime" !in entry.values,
                         )
-                    } ?: normalizeSchemalessTimed(elementRaw, elementValidTime, sourcePath, documentId, "$propName[]", diagnostics)
+                    } else {
+                        normalizeSchemalessTimed(elementRaw, elementValidTime, sourcePath, documentId, "$propName[]", diagnostics)
+                    } ?: return@mapNotNull null
                     NormalizedArrayElement(
                         normalized,
                         elementValidTime,
