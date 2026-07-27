@@ -798,6 +798,15 @@ private fun parseTimelineSelectors(
     return when (value) {
         is YamlList -> value.values.mapNotNull {
             parseTimelineSelector(it, sourcePath, diagnostics, documentId, fieldName)
+        }.also {
+            if (value.values.isEmpty()) {
+                diagnostics += Diagnostic(
+                    DiagnosticCategory.SchemaError,
+                    Severity.Error,
+                    "$fieldName MUST be a non-empty list",
+                    SourceInfo(sourcePath, documentId),
+                )
+            }
         }
         else -> parseTimelineSelector(value, sourcePath, diagnostics, documentId, fieldName)?.let(::listOf)
     }

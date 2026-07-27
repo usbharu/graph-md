@@ -379,6 +379,7 @@ class GraphCompiler(
         val byId = docs.associateBy { it.id }
         val timelineById = timelines.associateBy { it.id }
         val resolved = mutableMapOf<String, NormalizedNodeType>()
+        val resolvedPropConstraints = mutableMapOf<String, Map<String, List<ResolvedPropSchema>>>()
         val visiting = mutableSetOf<String>()
 
         fun resolve(id: String): NormalizedNodeType? {
@@ -389,6 +390,7 @@ class GraphCompiler(
                 return null
             }
             val props = linkedMapOf<String, ResolvedPropSchema>()
+            val parentConstraintBatches = mutableListOf<Map<String, List<ResolvedPropSchema>>>()
             val parents = mutableListOf<NormalizedNodeType>()
             doc.extends.forEach { parentId ->
                 val parent = resolve(parentId)
@@ -396,25 +398,36 @@ class GraphCompiler(
                     diagnostics += referenceError("Unknown parent NodeType: $parentId", doc.sourcePath, id)
                 } else {
                     parents += parent
+                    parentConstraintBatches += resolvedPropConstraints[parent.id].orEmpty()
                     parent.props.forEach { (name, schema) ->
                         val existing = props[name]
-                        if (existing != null && existing.type != schema.type) {
-                            diagnostics += schemaWarning("Incompatible inherited prop schemas for $name", doc.sourcePath, id)
-                        } else {
-                            props[name] = existing?.copy(required = existing.required && schema.required) ?: schema
-                        }
+                        props[name] = existing?.copy(required = existing.required && schema.required) ?: schema
                     }
                 }
+            }
+            val propConstraints = mergeParentPropConstraintBatches(parentConstraintBatches, timelineById) { name ->
+                diagnostics += schemaWarning("Incompatible inherited prop schemas for $name", doc.sourcePath, id)
             }
             doc.props.forEach { (name, schema) ->
                 val parent = props[name]
                 val resolvedSchema = resolveSchema(schema, timelineById, diagnostics, doc.sourcePath, id, name)
-                if (parent != null && !isCompatibleRefinement(parent, resolvedSchema, timelineById)) {
+                val inheritedConstraints = propConstraints[name].orEmpty()
+                val validRefinement = inheritedConstraints.all {
+                    isCompatibleRefinement(it, resolvedSchema, timelineById)
+                }
+                if (!validRefinement) {
                     diagnostics += schemaError("Invalid refinement for prop $name", doc.sourcePath, id)
                 }
                 props[name] = parent?.copy(required = parent.required && resolvedSchema.required) ?: resolvedSchema
+                if (validRefinement) {
+                    val constraints = propConstraints.getOrPut(name) { mutableListOf() }
+                    if (constraints.none { areEquivalentSchemas(it, resolvedSchema, timelineById) }) {
+                        constraints += resolvedSchema
+                    }
+                }
             }
             visiting.remove(id)
+            resolvedPropConstraints[id] = propConstraints.mapValues { it.value.toList() }
             return NormalizedNodeType(
                 doc.id,
                 props,
@@ -437,6 +450,7 @@ class GraphCompiler(
         val timelineById = timelines.associateBy { it.id }
         val nodeTypeById = nodeTypes.associateBy { it.id }
         val resolved = mutableMapOf<String, NormalizedRelType>()
+        val resolvedPropConstraints = mutableMapOf<String, Map<String, List<ResolvedPropSchema>>>()
         val visiting = mutableSetOf<String>()
 
         fun resolve(id: String): NormalizedRelType? {
@@ -447,6 +461,7 @@ class GraphCompiler(
                 return null
             }
             val inheritedProps = linkedMapOf<String, ResolvedPropSchema>()
+            val parentConstraintBatches = mutableListOf<Map<String, List<ResolvedPropSchema>>>()
             var inheritedFrom: List<String>? = null
             var inheritedTo: List<String>? = null
             doc.extends.forEach { parentId ->
@@ -454,11 +469,9 @@ class GraphCompiler(
                 if (parent == null) {
                     diagnostics += referenceError("Unknown parent RelType: $parentId", doc.sourcePath, id)
                 } else {
+                    parentConstraintBatches += resolvedPropConstraints[parent.id].orEmpty()
                     parent.props.forEach { (name, schema) ->
                         val existing = inheritedProps[name]
-                        if (existing != null && !isCompatibleRefinement(existing, schema, timelineById)) {
-                            diagnostics += schemaWarning("Incompatible inherited prop schemas for $name", doc.sourcePath, id)
-                        }
                         inheritedProps[name] = existing?.copy(required = existing.required && schema.required) ?: schema
                     }
                     val previousFrom = inheritedFrom
@@ -473,17 +486,31 @@ class GraphCompiler(
                     }
                 }
             }
+            val propConstraints = mergeParentPropConstraintBatches(parentConstraintBatches, timelineById) { name ->
+                diagnostics += schemaWarning("Incompatible inherited prop schemas for $name", doc.sourcePath, id)
+            }
             doc.props.forEach { (name, schema) ->
                 val resolvedSchema = resolveSchema(schema, timelineById, diagnostics, doc.sourcePath, id, name)
                 val parent = inheritedProps[name]
-                if (parent != null && !isCompatibleRefinement(parent, resolvedSchema, timelineById)) {
+                val inheritedConstraints = propConstraints[name].orEmpty()
+                val validRefinement = inheritedConstraints.all {
+                    isCompatibleRefinement(it, resolvedSchema, timelineById)
+                }
+                if (!validRefinement) {
                     diagnostics += schemaError("Invalid refinement for prop $name", doc.sourcePath, id)
                 }
                 inheritedProps[name] = parent?.copy(required = parent.required && resolvedSchema.required) ?: resolvedSchema
+                if (validRefinement) {
+                    val constraints = propConstraints.getOrPut(name) { mutableListOf() }
+                    if (constraints.none { areEquivalentSchemas(it, resolvedSchema, timelineById) }) {
+                        constraints += resolvedSchema
+                    }
+                }
             }
             val finalFrom = combineConstraint(inheritedFrom, doc.from, nodeTypeById, diagnostics, doc.sourcePath, id, "from")
             val finalTo = combineConstraint(inheritedTo, doc.to, nodeTypeById, diagnostics, doc.sourcePath, id, "to")
             visiting.remove(id)
+            resolvedPropConstraints[id] = propConstraints.mapValues { it.value.toList() }
             return NormalizedRelType(
                 id = doc.id,
                 from = finalFrom,
@@ -496,6 +523,45 @@ class GraphCompiler(
 
         docs.forEach { resolve(it.id) }
         return docs.mapNotNull { resolved[it.id] }
+    }
+
+    private fun mergeParentPropConstraintBatches(
+        parentBatches: List<Map<String, List<ResolvedPropSchema>>>,
+        timelineById: Map<String, NormalizedTimeline>,
+        onIncompatiblePair: (String) -> Unit,
+    ): LinkedHashMap<String, MutableList<ResolvedPropSchema>> {
+        val result = linkedMapOf<String, MutableList<ResolvedPropSchema>>()
+        val propNames = parentBatches.flatMapTo(linkedSetOf()) { it.keys }
+        propNames.forEach { name ->
+            val schemas = mutableListOf<ResolvedPropSchema>()
+            val parentIndexes = mutableListOf<MutableSet<Int>>()
+            parentBatches.forEachIndexed { parentIndex, batch ->
+                batch[name].orEmpty().forEach { schema ->
+                    val schemaIndex = schemas.indexOfFirst {
+                        areEquivalentSchemas(it, schema, timelineById)
+                    }
+                    if (schemaIndex >= 0) {
+                        parentIndexes[schemaIndex] += parentIndex
+                    } else {
+                        schemas += schema
+                        parentIndexes += mutableSetOf(parentIndex)
+                    }
+                }
+            }
+            schemas.indices.forEach { leftIndex ->
+                ((leftIndex + 1) until schemas.size).forEach { rightIndex ->
+                    val alreadyCoexistedInParent =
+                        parentIndexes[leftIndex].any { it in parentIndexes[rightIndex] }
+                    if (!alreadyCoexistedInParent &&
+                        !areInheritedSchemasCompatible(schemas[leftIndex], schemas[rightIndex], timelineById)
+                    ) {
+                        onIncompatiblePair(name)
+                    }
+                }
+            }
+            result[name] = schemas
+        }
+        return result
     }
 
     private fun narrowConstraint(current: List<String>?, next: List<String>?): List<String>? {
@@ -565,12 +631,15 @@ class GraphCompiler(
         }
         schema.timeline?.let(::checkSelector)
         schema.timelines.orEmpty().forEach(::checkSelector)
+        val resolvedItems = schema.items?.let {
+            resolveSchema(it, timelineById, diagnostics, sourcePath, documentId, "$propName[]")
+        }
         return ResolvedPropSchema(
             type = schema.type,
             required = schema.required,
             timeline = schema.timeline,
             timelines = schema.timelines,
-            items = schema.items?.let { resolveSchema(it, timelineById, diagnostics, sourcePath, documentId, "$propName[]") },
+            items = resolvedItems.takeIf { schema.type == PropType.array },
         )
     }
 
@@ -578,7 +647,29 @@ class GraphCompiler(
         parent: ResolvedPropSchema,
         child: ResolvedPropSchema,
         timelineById: Map<String, NormalizedTimeline>,
-    ): Boolean = parent.type == child.type && timelineSelectorsCompatible(parent, child, timelineById)
+    ): Boolean {
+        if (parent.type != child.type || !timelineSelectorsCompatible(parent, child, timelineById)) return false
+        if (parent.type != PropType.array) return true
+        val parentItems = parent.items ?: return true
+        val childItems = child.items ?: return false
+        return isCompatibleRefinement(parentItems, childItems, timelineById)
+    }
+
+    private fun areInheritedSchemasCompatible(
+        left: ResolvedPropSchema,
+        right: ResolvedPropSchema,
+        timelineById: Map<String, NormalizedTimeline>,
+    ): Boolean =
+        isCompatibleRefinement(left, right, timelineById) ||
+            isCompatibleRefinement(right, left, timelineById)
+
+    private fun areEquivalentSchemas(
+        left: ResolvedPropSchema,
+        right: ResolvedPropSchema,
+        timelineById: Map<String, NormalizedTimeline>,
+    ): Boolean =
+        isCompatibleRefinement(left, right, timelineById) &&
+            isCompatibleRefinement(right, left, timelineById)
 
     private fun timelineSelectorsCompatible(
         parent: ResolvedPropSchema,
@@ -586,24 +677,38 @@ class GraphCompiler(
         timelineById: Map<String, NormalizedTimeline>,
     ): Boolean {
         val parentSelectors = parent.timelines ?: parent.timeline?.let(::listOf) ?: return true
-        val childSelectors = child.timelines ?: child.timeline?.let(::listOf) ?: return true
-        return childSelectors.all { childSelector ->
-            parentSelectors.any { parentSelector ->
-                when (parentSelector) {
-                    is TimelineSelector.Id -> when (childSelector) {
-                        is TimelineSelector.Id -> childSelector.id == parentSelector.id ||
-                            timelineById[childSelector.id]?.ancestorIds?.contains(parentSelector.id) == true
-                        is TimelineSelector.Mapped -> false
-                    }
-                    is TimelineSelector.Mapped -> when (childSelector) {
-                        is TimelineSelector.Id -> childSelector.id == parentSelector.to ||
-                            timelineById[childSelector.id]?.ancestorIds?.contains(parentSelector.to) == true ||
-                            timelineById[childSelector.id]?.mappedOffsets?.containsKey(parentSelector.to) == true
-                        is TimelineSelector.Mapped -> childSelector.to == parentSelector.to
+        val childSelectors = child.timelines ?: child.timeline?.let(::listOf) ?: return false
+
+        data class TimelineConstraint(
+            val allowedIds: Set<String>,
+            val unresolvedSelectors: Set<TimelineSelector>,
+        )
+
+        fun constraint(selectors: List<TimelineSelector>): TimelineConstraint {
+            val allowedIds = timelineById.keys.filterTo(mutableSetOf()) { timelineId ->
+                selectors.any { selector ->
+                    when (selector) {
+                        is TimelineSelector.Id -> selector.id == timelineId ||
+                            timelineById[timelineId]?.ancestorIds?.contains(selector.id) == true
+                        is TimelineSelector.Mapped -> selector.to == timelineId ||
+                            timelineById[timelineId]?.ancestorIds?.contains(selector.to) == true ||
+                            timelineById[timelineId]?.mappedOffsets?.containsKey(selector.to) == true
                     }
                 }
             }
+            val unresolvedSelectors = selectors.filterTo(mutableSetOf()) { selector ->
+                when (selector) {
+                    is TimelineSelector.Id -> selector.id !in timelineById
+                    is TimelineSelector.Mapped -> selector.to !in timelineById
+                }
+            }
+            return TimelineConstraint(allowedIds, unresolvedSelectors)
         }
+
+        val parentConstraint = constraint(parentSelectors)
+        val childConstraint = constraint(childSelectors)
+        return childConstraint.allowedIds.all { it in parentConstraint.allowedIds } &&
+            childConstraint.unresolvedSelectors.all { it in parentConstraint.unresolvedSelectors }
     }
 
     private fun normalizePropEntries(
@@ -1008,7 +1113,7 @@ class GraphCompiler(
                 timelineById[timeline]?.mappedOffsets?.containsKey(to) == true
         }
         val selectors = schema.timelines ?: schema.timeline?.let(::listOf)
-        return selectors.isNullOrEmpty() || selectors.any { it.matches() }
+        return selectors == null || selectors.any { it.matches() }
     }
 
     private fun mappingTarget(mapping: TimelineMapping): String? =
