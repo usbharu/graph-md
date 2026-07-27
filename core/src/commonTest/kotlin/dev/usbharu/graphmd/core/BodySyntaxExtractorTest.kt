@@ -107,6 +107,94 @@ class BodySyntaxExtractorTest {
     }
 
     @Test
+    fun `ignores CommonMark fenced code variants and preserves surrounding syntax`() {
+        val body = """
+            @link[Before](before friendOf)
+              ~~~ graph-md
+            @props{name = "tilde"}
+            @link[Tilde](tilde friendOf)
+              ~~~~~
+            > ```
+            > @link[Quote](quote friendOf)
+            > ```
+            - ````
+              @link[List](list friendOf)
+              ```
+              @props{name = "still fenced"}
+              `````
+            @link[After](after friendOf)
+        """.trimIndent()
+
+        val extracted = extractor.extract(body, "/tmp/fences.md", "fences")
+
+        assertEquals(listOf("before", "after"), extracted.relations.map { it.target })
+        assertTrue(extracted.propsBlocks.isEmpty())
+        assertEquals(
+            body.indexOf("@link[After]"),
+            extracted.relations.last().range.start,
+            "masking must retain source offsets",
+        )
+    }
+
+    @Test
+    fun `honors fence indentation variable runs and unclosed fences`() {
+        val body = """
+              @link[One](one friendOf)
+               @link[Two](two friendOf)
+                @link[Three](three friendOf)
+
+                 @link[Indented](indented friendOf)
+             ````
+             @link[LongFence](long-fence friendOf)
+             ```
+             @link[ShortClose](short-close friendOf)
+             `````
+             @link[Visible](visible friendOf)
+             ~~~
+             @link[Unclosed](unclosed friendOf)
+        """.trimIndent()
+
+        val extracted = extractor.extract(body, "/tmp/boundaries.md", "boundaries")
+
+        assertEquals(listOf("one", "two", "three", "visible"), extracted.relations.map { it.target })
+    }
+
+    @Test
+    fun `does not treat paragraph continuation indentation as a code block`() {
+        val body = """
+            paragraph
+                @link[Continuation](continuation friendOf)
+
+                @link[Code](code friendOf)
+            @link[Visible](visible friendOf)
+        """.trimIndent()
+
+        val extracted = extractor.extract(body, "/tmp/indented.md", "indented")
+
+        assertEquals(listOf("continuation", "visible"), extracted.relations.map { it.target })
+    }
+
+    @Test
+    fun `handles tabs and CommonMark backtick span delimiters`() {
+        val body = buildString {
+            append("\t@link[Tab](tab friendOf)\n")
+            append("``@link[Double](double friendOf) ` inner``` ``\n")
+            append("`@link[AdjacentOne](adjacent-one friendOf)``")
+            append("@link[AdjacentTwo](adjacent-two friendOf)`\n")
+            append("\\` @link[Escaped](escaped friendOf)\n")
+            append("` unmatched @link[Unmatched](unmatched friendOf)\n")
+            append("@link[Visible](visible friendOf)")
+        }
+
+        val extracted = extractor.extract(body, "/tmp/spans.md", "spans")
+
+        assertEquals(
+            listOf("escaped", "unmatched", "visible"),
+            extracted.relations.map { it.target },
+        )
+    }
+
+    @Test
     fun `reports unclosed relation label and target`() {
         val body = """
             @link{}[Bob(bob friendOf)

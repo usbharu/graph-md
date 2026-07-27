@@ -15,7 +15,7 @@ class BodySyntaxExtractor {
         val propsBlocks = mutableListOf<ExtractedPropsBlock>()
         val relations = mutableListOf<ExtractedRelation>()
         var propsSyntaxValid = true
-        val masked = maskCodeRegions(body)
+        val masked = CommonMarkCodeMasker.mask(body)
         var index = 0
         while (index < masked.length) {
             if (masked[index] == '@' && !isEscaped(masked, index)) {
@@ -258,42 +258,6 @@ class BodySyntaxExtractor {
             emptyMap()
         }
         return ExtractedRelation(parts.first, parts.second, label, props, SourceRange(start, end)) to end
-    }
-
-    private fun maskCodeRegions(body: String): String {
-        val chars = body.toCharArray()
-        var i = 0
-        var lineStart = true
-        while (i < chars.size) {
-            if (lineStart && body.startsWith("```", i)) {
-                val end = body.indexOf("\n```", i + 3).let { if (it >= 0) it + 4 else chars.size }
-                for (j in i until minOf(end, chars.size)) chars[j] = ' '
-                i = end
-                lineStart = true
-                continue
-            }
-            if (lineStart && body.startsWith("    ", i)) {
-                var j = i
-                while (j < chars.size && chars[j] != '\n') {
-                    chars[j] = ' '
-                    j++
-                }
-                i = j
-                lineStart = true
-                continue
-            }
-            if (chars[i] == '`') {
-                val end = body.indexOf('`', i + 1)
-                val actualEnd = if (end >= 0) end else chars.size - 1
-                for (j in i..actualEnd) chars[j] = ' '
-                i = actualEnd + 1
-                lineStart = false
-                continue
-            }
-            lineStart = chars[i] == '\n'
-            i++
-        }
-        return chars.concatToString()
     }
 
     private fun readBalanced(text: String, start: Int, open: Char, close: Char): SourceRange? {

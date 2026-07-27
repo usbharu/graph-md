@@ -169,6 +169,82 @@ class GraphDocumentAnalyzerTest {
     }
 
     @Test
+    fun `does not index GraphMD syntax in CommonMark code regions`() {
+        val text = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            ---
+              ~~~
+            @link[Tilde](tilde friendOf)
+            @props{codedProperty = "ignored"}
+              ~~~~
+            > ````
+            > @link[Quote](quote friendOf)
+            > ```
+            > @link[StillQuote](still-quote friendOf)
+            > `````
+            - ```
+              @link[List](list friendOf)
+              ```
+            # top-level code boundaries
+                @link[Spaces](spaces friendOf)
+            ${'\t'}@link[Tab](tab friendOf)
+            ``@link[Span](span friendOf) ` inner``` ``
+            @link(validTime=VisibleTimeline){visibleProperty=1}[Visible](visible friendOf)
+        """.trimIndent()
+
+        val analysis = analyzer.analyze(text, "/tmp/alice.md")
+
+        assertEquals(
+            listOf("visible"),
+            analysis.references.filter { it.field == "relation.target" }.map { it.targetId },
+        )
+        assertEquals(
+            listOf("friendOf"),
+            analysis.references.filter { it.field == "relation.type" }.map { it.targetId },
+        )
+        assertTrue(analysis.references.none { it.targetId in setOf("tilde", "quote", "still-quote", "list", "spaces", "tab", "span") })
+        assertEquals(
+            text.lastIndexOf("visible"),
+            analysis.references.single { it.field == "relation.target" }.range.start,
+        )
+        assertEquals(
+            text.indexOf("visibleProperty"),
+            analysis.propertyReferences.single { it.name == "visibleProperty" }.range.start,
+        )
+    }
+
+    @Test
+    fun `indexes syntax around unmatched and escaped backticks but not unclosed fences`() {
+        val text = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            ---
+            \` @link[Escaped](escaped friendOf)
+            ` unmatched @link[Unmatched](unmatched friendOf)
+            > ```
+            > @link[QuoteCode](quote-code friendOf)
+            @link[AfterQuote](after-quote friendOf)
+            - ```
+              @link[ListCode](list-code friendOf)
+            @link[AfterList](after-list friendOf)
+            ~~~
+            @link[Hidden](hidden friendOf)
+        """.trimIndent()
+
+        val analysis = analyzer.analyze(text, "/tmp/alice.md")
+
+        assertEquals(
+            listOf("escaped", "unmatched", "after-quote", "after-list"),
+            analysis.references.filter { it.field == "relation.target" }.map { it.targetId },
+        )
+    }
+
+    @Test
     fun `skips malformed body relations gracefully`() {
         val text = """
             ---

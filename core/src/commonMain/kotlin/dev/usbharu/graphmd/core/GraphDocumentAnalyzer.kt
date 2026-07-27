@@ -294,7 +294,7 @@ class GraphDocumentAnalyzer {
 
     private fun extractBodyReferences(body: String, baseOffset: Int): List<SymbolReference> {
         val refs = mutableListOf<SymbolReference>()
-        val masked = maskCodeRegions(body)
+        val masked = CommonMarkCodeMasker.mask(body)
         var index = 0
         while (index < masked.length) {
             if (masked[index] == '@' && !isEscaped(masked, index)) {
@@ -364,31 +364,6 @@ class GraphDocumentAnalyzer {
             }
         }
         return null
-    }
-
-    private fun maskCodeRegions(body: String): String {
-        val chars = body.toCharArray()
-        var index = 0
-        var lineStart = true
-        while (index < chars.size) {
-            if (lineStart && body.startsWith("```", index)) {
-                val end = body.indexOf("\n```", index + 3).let { if (it >= 0) it + 4 else chars.size }
-                for (position in index until minOf(end, chars.size)) chars[position] = ' '
-                index = end
-                lineStart = true
-                continue
-            }
-            if (chars[index] == '`') {
-                val end = body.indexOf('`', index + 1).let { if (it >= 0) it else chars.size - 1 }
-                for (position in index..end) chars[position] = ' '
-                index = end + 1
-                lineStart = false
-                continue
-            }
-            lineStart = chars[index] == '\n'
-            index += 1
-        }
-        return chars.concatToString()
     }
 
     private fun findUnescaped(text: String, target: Char, start: Int): Int? {
@@ -468,7 +443,7 @@ class GraphDocumentAnalyzer {
 
     private fun extractInlineTimelineReferences(body: String, baseOffset: Int): List<SymbolReference> {
         val references = mutableListOf<SymbolReference>()
-        val masked = maskCodeRegions(body)
+        val masked = CommonMarkCodeMasker.mask(body)
         Regex("""validTime\s*=\s*""").findAll(masked).forEach { marker ->
             var cursor = marker.range.last + 1
             val end = when (masked.getOrNull(cursor)) {
@@ -556,7 +531,7 @@ class GraphDocumentAnalyzer {
         nodeTypeId: String,
     ): List<PropertyReference> {
         val references = mutableListOf<PropertyReference>()
-        val masked = maskCodeRegions(body)
+        val masked = CommonMarkCodeMasker.mask(body)
         var index = 0
         while (index < masked.length) {
             when {
