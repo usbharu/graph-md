@@ -20,6 +20,7 @@ data class ArrayValue(
 data class NormalizedArrayElement(
     val value: NormalizedValue,
     val validTime: List<ValidTime> = emptyList(),
+    val isFallback: Boolean = false,
 )
 data class ObjectValue(
     val values: Map<String, NormalizedValue>,
@@ -45,4 +46,5 @@ data class TemporalPoint(
 data class NormalizedPropEntry(
     val value: NormalizedValue,
     val validTime: List<ValidTime> = emptyList(),
+    val isFallback: Boolean = false,
 )

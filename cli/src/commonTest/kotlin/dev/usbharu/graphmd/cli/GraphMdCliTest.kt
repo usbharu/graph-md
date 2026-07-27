@@ -426,6 +426,49 @@ class GraphMdCliTest {
         assertFalse(result.stdout.contains("Unknown NodeType"))
     }
 
+    @Test
+    fun `search executes inline GMQL with typed parameters and JSON rows`() {
+        val cli = GraphMdCli(searchFixture())
+        val query = """
+            MATCH (n:Person)
+            WHERE n.age >= ${'$'}minimum
+            RETURN ID(n) AS id, n.age AS age
+            ORDER BY id
+        """.trimIndent()
+
+        val result = cli.run(
+            listOf("search", query, "/workspace", "--param", "minimum=15", "--json"),
+        )
+
+        assertEquals(0, result.exitCode, result.stderr)
+        assertTrue(result.stdout.contains("\"id\":\"alice\""))
+        assertTrue(result.stdout.contains("\"age\":["))
+        assertFalse(result.stdout.contains("\"id\":\"bob\""))
+    }
+
+    @Test
+    fun `search reads a query file and renders tab separated output`() {
+        val result = GraphMdCli(searchFixture()).run(
+            listOf("search", "--query-file", "/queries/find.gmql", "/workspace"),
+        )
+
+        assertEquals(0, result.exitCode, result.stderr)
+        assertTrue(result.stdout.startsWith("id\n"))
+        assertTrue(result.stdout.contains("alice\n"))
+        assertTrue(result.stdout.contains("bob\n"))
+    }
+
+    @Test
+    fun `search returns GMQL diagnostics on stderr`() {
+        val result = GraphMdCli(searchFixture()).run(
+            listOf("search", "MATCH (n:NoSuch) RETURN n", "/workspace", "--json"),
+        )
+
+        assertEquals(1, result.exitCode)
+        assertEquals("[]\n", result.stdout)
+        assertTrue(result.stderr.contains("\"code\":\"GMQL2001\""), result.stderr)
+    }
+
     private fun fixtureCli(): GraphMdCli = GraphMdCli(
         FakeFileSystem(
             files = mapOf(
@@ -477,6 +520,39 @@ class GraphMdCliTest {
                 @link{}[Bob](bob friend)
             """.trimIndent(),
             "/workspace/bob.md" to node("bob", "Person"),
+        ),
+    )
+
+    private fun searchFixture(): FakeFileSystem = FakeFileSystem(
+        files = mapOf(
+            "/workspace/Person.md" to """
+                ---
+                id: Person
+                kind: NodeType
+                props:
+                  age:
+                    type: number
+                ---
+            """.trimIndent(),
+            "/workspace/alice.md" to """
+                ---
+                id: alice
+                kind: Node
+                type: Person
+                props:
+                  age: 20
+                ---
+            """.trimIndent(),
+            "/workspace/bob.md" to """
+                ---
+                id: bob
+                kind: Node
+                type: Person
+                props:
+                  age: 10
+                ---
+            """.trimIndent(),
+            "/queries/find.gmql" to "MATCH (n:Person) RETURN ID(n) AS id ORDER BY id",
         ),
     )
 

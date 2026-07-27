@@ -631,11 +631,14 @@ class GraphCompiler(
             val candidates = propertyEntryCandidates(rawValue, propSchema, inheritedValidTime, diagnostics, sourcePath, documentId, key)
             val normalized = candidates.mapNotNull { candidate ->
                 val value = if (propSchema != null) {
-                    normalizeValue(candidate.first, propSchema, sourcePath, documentId, timelineById, diagnostics, key, candidate.second)
+                    normalizeValue(
+                        candidate.value, propSchema, sourcePath, documentId, timelineById, diagnostics, key,
+                        candidate.validTime, candidate.isFallback,
+                    )
                 } else {
-                    normalizeSchemalessTimed(candidate.first, candidate.second, sourcePath, documentId, key, diagnostics)
+                    normalizeSchemalessTimed(candidate.value, candidate.validTime, sourcePath, documentId, key, diagnostics)
                 }
-                value?.let { NormalizedPropEntry(it, candidate.second) }
+                value?.let { NormalizedPropEntry(it, candidate.validTime, candidate.isFallback) }
             }
             if (normalized.isNotEmpty()) result[key] = normalized
         }
@@ -686,6 +689,12 @@ class GraphCompiler(
         return if (merged.size == 1 && signature(merged.single()) == "<fallback>") merged.single() else RawArray(merged)
     }
 
+    private data class PropertyCandidate(
+        val value: RawValue,
+        val validTime: List<ValidTime>,
+        val isFallback: Boolean,
+    )
+
     private fun propertyEntryCandidates(
         rawValue: RawValue,
         schema: ResolvedPropSchema?,
@@ -694,8 +703,10 @@ class GraphCompiler(
         sourcePath: String,
         documentId: String,
         propName: String,
-    ): List<Pair<RawValue, List<ValidTime>>> {
-        if (rawValue !is RawArray || schema?.type == PropType.array) return listOf(rawValue to inheritedValidTime)
+    ): List<PropertyCandidate> {
+        if (rawValue !is RawArray || schema?.type == PropType.array) {
+            return listOf(PropertyCandidate(rawValue, inheritedValidTime, isFallback = true))
+        }
         val explicitEntries = rawValue.values.all { value -> value is RawObject && "value" in value.values }
         if (explicitEntries && rawValue.values.count { value ->
                 value is RawObject && "validTime" !in value.values
@@ -711,10 +722,14 @@ class GraphCompiler(
                 SourceInfo(sourcePath, documentId),
             )
         }
-        if (schema != null && !explicitEntries) return listOf(rawValue to inheritedValidTime)
+        if (schema != null && !explicitEntries) {
+            return listOf(PropertyCandidate(rawValue, inheritedValidTime, isFallback = true))
+        }
         return rawValue.values.map { entry ->
             val obj = entry as? RawObject
-            if (obj == null || "value" !in obj.values) return@map entry to inheritedValidTime
+            if (obj == null || "value" !in obj.values) {
+                return@map PropertyCandidate(entry, inheritedValidTime, isFallback = true)
+            }
             val unknown = obj.values.keys - setOf("value", "validTime")
             if (unknown.isNotEmpty()) {
                 diagnostics += typeError("$propName entry has unknown fields: ${unknown.joinToString()}", sourcePath, documentId)
@@ -722,7 +737,11 @@ class GraphCompiler(
             val validTime = obj.values["validTime"]?.let {
                 parseRawValidTimes(it, "$propName.validTime", sourcePath, documentId, diagnostics)
             } ?: inheritedValidTime
-            obj.values.getValue("value") to validTime
+            PropertyCandidate(
+                obj.values.getValue("value"),
+                validTime,
+                isFallback = "validTime" !in obj.values,
+            )
         }
     }
 
@@ -796,6 +815,7 @@ class GraphCompiler(
         diagnostics: MutableList<Diagnostic>,
         propName: String,
         inheritedValidTime: List<ValidTime> = emptyList(),
+        inheritedFallback: Boolean = false,
     ): NormalizedValue? {
         fun fail(message: String): NormalizedValue? {
             diagnostics += typeError(message, sourcePath, documentId)
@@ -805,7 +825,9 @@ class GraphCompiler(
         return when (schema.type) {
             PropType.string -> (rawValue as? RawString)?.let { StringValue(it.value) } ?: fail("$propName must be string")
             PropType.text -> when (rawValue) {
-                is RawString -> TextValue(mapOf("default" to NormalizedPropEntry(StringValue(rawValue.value), inheritedValidTime)))
+                is RawString -> TextValue(
+                    mapOf("default" to NormalizedPropEntry(StringValue(rawValue.value), inheritedValidTime, inheritedFallback)),
+                )
                 is RawObject -> {
                     val textMap = rawValue.values.mapValues { (key, value) ->
                         normalizeSchemalessEntry(value, inheritedValidTime, sourcePath, documentId, "$propName.$key", diagnostics)
@@ -831,9 +853,16 @@ class GraphCompiler(
                         } ?: inheritedValidTime
                     } else inheritedValidTime
                     val normalized = schema.items?.let {
-                        normalizeValue(elementRaw, it, sourcePath, documentId, timelineById, diagnostics, "$propName[]", elementValidTime)
+                        normalizeValue(
+                            elementRaw, it, sourcePath, documentId, timelineById, diagnostics, "$propName[]",
+                            elementValidTime, inheritedFallback = !isTimedEntry || "validTime" !in entry.values,
+                        )
                     } ?: normalizeSchemalessTimed(elementRaw, elementValidTime, sourcePath, documentId, "$propName[]", diagnostics)
-                    NormalizedArrayElement(normalized, elementValidTime)
+                    NormalizedArrayElement(
+                        normalized,
+                        elementValidTime,
+                        isFallback = !isTimedEntry || "validTime" !in entry.values,
+                    )
                 }
                 ArrayValue(elements.map { it.value }, elements)
             }
@@ -1017,7 +1046,10 @@ class GraphCompiler(
             val entries = rawValue.values.map { value ->
                 normalizeSchemalessEntry(value, inheritedValidTime, sourcePath, documentId, "$field[]", diagnostics)
             }
-            ArrayValue(entries.map { it.value }, entries.map { NormalizedArrayElement(it.value, it.validTime) })
+            ArrayValue(
+                entries.map { it.value },
+                entries.map { NormalizedArrayElement(it.value, it.validTime, it.isFallback) },
+            )
         }
         is RawObject -> {
             val members = rawValue.values.mapValues { (key, value) ->
@@ -1042,6 +1074,7 @@ class GraphCompiler(
             return NormalizedPropEntry(
                 normalizeSchemalessTimed(rawValue, inheritedValidTime, sourcePath, documentId, field, diagnostics),
                 inheritedValidTime,
+                isFallback = true,
             )
         }
         val validTime = wrapper.values["validTime"]?.let {
@@ -1050,6 +1083,7 @@ class GraphCompiler(
         return NormalizedPropEntry(
             normalizeSchemalessTimed(wrapper.values.getValue("value"), validTime, sourcePath, documentId, field, diagnostics),
             validTime,
+            isFallback = "validTime" !in wrapper.values,
         )
     }
 

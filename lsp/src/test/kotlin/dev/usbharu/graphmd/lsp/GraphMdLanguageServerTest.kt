@@ -38,10 +38,14 @@ import org.eclipse.lsp4j.TextDocumentItem
 import org.eclipse.lsp4j.VersionedTextDocumentIdentifier
 import org.eclipse.lsp4j.WorkspaceFolder
 import org.eclipse.lsp4j.services.LanguageClient
+import org.eclipse.lsp4j.jsonrpc.services.ServiceEndpoints
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -56,6 +60,233 @@ class GraphMdLanguageServerTest {
 
         assertNotNull(capabilities.codeActionProvider)
         assertTrue(CodeActionKind.QuickFix in capabilities.codeActionProvider.right.codeActionKinds)
+    }
+
+    @Test
+    fun `server registers GraphMD search requests`() {
+        val methods = ServiceEndpoints.getSupportedMethods(GraphMdLanguageServer::class.java)
+
+        assertTrue("graphmd/search" in methods)
+        assertTrue("graphmd/searchMetadata" in methods)
+    }
+
+    @Test
+    fun `search exposes metadata parameters results and document locations`() {
+        val root = Files.createTempDirectory("graphmd-search")
+        try {
+            val type = root.resolve("Person.md")
+            val relationType = root.resolve("friendOf.md")
+            val node = root.resolve("alice.md")
+            val targetNode = root.resolve("bob.md")
+            Files.writeString(
+                type,
+                """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    props:
+                      age:
+                        type: number
+                    ---
+                """.trimIndent(),
+            )
+            Files.writeString(
+                relationType,
+                """
+                    ---
+                    id: friendOf
+                    kind: RelType
+                    from: [Person]
+                    to: [Person]
+                    props:
+                      since:
+                        type: number
+                    ---
+                """.trimIndent(),
+            )
+            val relationText = "@link{since = 2021}[Bob](bob friendOf)"
+            val nodeText = """
+                    ---
+                    id: alice
+                    kind: Node
+                    type: Person
+                    props:
+                      age: 21
+                    ---
+                    Alice is a brave adventurer.
+                    $relationText
+                """.trimIndent().replace("\n", "\r\n")
+            Files.writeString(node, nodeText)
+            Files.writeString(
+                targetNode,
+                """
+                    ---
+                    id: bob
+                    kind: Node
+                    type: Person
+                    props:
+                      age: 22
+                    ---
+                    Bob is Alice's friend.
+                """.trimIndent(),
+            )
+            val server = GraphMdLanguageServer()
+            server.initialize(
+                InitializeParams().apply {
+                    workspaceFolders = listOf(WorkspaceFolder(root.toUri().toString(), "search"))
+                },
+            ).get()
+
+            val metadata = server.searchMetadata().get()
+            val person = metadata.nodeTypes.single { it.id == "Person" }
+            assertEquals("number", person.properties.single { it.name == "age" }.type)
+            val friendOf = metadata.relationTypes.single { it.id == "friendOf" }
+            assertEquals(listOf("Person"), friendOf.sourceTypes)
+            assertEquals(listOf("Person"), friendOf.targetTypes)
+            assertEquals("number", friendOf.properties.single { it.name == "since" }.type)
+
+            val result = server.search(
+                GraphMdSearchParams(
+                    """
+                        MATCH (node:Person)
+                        WHERE FULLTEXT(node, ${'$'}keyword)
+                          AND node.age >= ${'$'}minimum
+                        VALID ANYTIME
+                        RETURN ID(node) AS id, TYPE(node) AS type, SCORE() AS score, VALIDITY() AS validity
+                        ORDER BY score DESC, id ASC
+                        LIMIT 100
+                    """.trimIndent(),
+                    mapOf("keyword" to "\"brave\"", "minimum" to "18"),
+                ),
+            ).get()
+
+            assertTrue(result.diagnostics.isEmpty())
+            assertEquals(listOf("id", "type", "score", "validity"), result.columns.map { it.name })
+            assertEquals("alice", result.rows.single().values.first())
+            assertEquals(node.toUri().toString(), result.rows.single().location?.uri)
+
+            val links = server.search(
+                GraphMdSearchParams(
+                    """
+                        MATCH (source:Person)-[link:friendOf]->(target:Person)
+                        WHERE ID(source) = ${'$'}sourceId
+                          AND ID(target) = ${'$'}targetId
+                          AND link.since >= ${'$'}since
+                          AND FULLTEXT(link, ${'$'}keyword)
+                        VALID ANYTIME
+                        RETURN ID(link) AS id, TYPE(link) AS type, ID(source) AS source, ID(target) AS target, SCORE() AS score, VALIDITY() AS validity
+                        ORDER BY score DESC, id ASC
+                    """.trimIndent(),
+                    mapOf(
+                        "sourceId" to "\"alice\"",
+                        "targetId" to "\"bob\"",
+                        "since" to "2020",
+                        "keyword" to "\"Bob\"",
+                    ),
+                ),
+            ).get()
+
+            assertTrue(links.diagnostics.isEmpty())
+            assertEquals(listOf("id", "type", "source", "target", "score", "validity"), links.columns.map { it.name })
+            assertEquals("alice", links.rows.single().values[2])
+            assertEquals("bob", links.rows.single().values[3])
+            assertEquals(node.toUri().toString(), links.rows.single().location?.uri)
+            assertEquals(
+                Range(Position(8, 0), Position(8, relationText.length)),
+                links.rows.single().location?.range,
+            )
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `search reports query errors and observes unsaved document changes`() {
+        val root = Files.createTempDirectory("graphmd-search-change")
+        try {
+            val node = root.resolve("alice.md")
+            val original = "---\nid: alice\nkind: Node\ntype: Person\n---\nOriginal body"
+            Files.writeString(root.resolve("Person.md"), "---\nid: Person\nkind: NodeType\n---")
+            Files.writeString(node, original)
+            val server = GraphMdLanguageServer()
+            server.initialize(
+                InitializeParams().apply {
+                    workspaceFolders = listOf(WorkspaceFolder(root.toUri().toString(), "search"))
+                },
+            ).get()
+            val invalid = server.search(GraphMdSearchParams("MATCH broken")).get()
+            assertTrue(invalid.diagnostics.any { it.code.startsWith("GMQL") })
+
+            val uri = node.toUri().toString()
+            server.textDocumentService.didOpen(
+                DidOpenTextDocumentParams(TextDocumentItem(uri, "markdown", 1, original)),
+            )
+            server.textDocumentService.didChange(
+                DidChangeTextDocumentParams(
+                    VersionedTextDocumentIdentifier(uri, 2),
+                    listOf(TextDocumentContentChangeEvent(original.replace("Original", "Updated"))),
+                ),
+            )
+            val updated = server.search(
+                GraphMdSearchParams(
+                    """MATCH (node) WHERE FULLTEXT(node, "Updated") RETURN ID(node) AS id""",
+                ),
+            ).get()
+
+            assertEquals("alice", updated.rows.single().values.single())
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `document change while search compiles cannot populate stale caches`() {
+        val compilationStarted = CountDownLatch(1)
+        val releaseCompilation = CountDownLatch(1)
+        val compilationCount = AtomicInteger()
+        val compiler = GraphCompiler()
+        val index = GraphMdWorkspaceIndex { sources ->
+            if (compilationCount.incrementAndGet() == 1) {
+                compilationStarted.countDown()
+                check(releaseCompilation.await(5, TimeUnit.SECONDS))
+            }
+            compiler.compileSources(sources)
+        }
+        val typeUri = "file:///workspace/Person.md"
+        val nodeUri = "file:///workspace/alice.md"
+        index.upsert(typeUri, "---\nid: Person\nkind: NodeType\n---")
+        index.upsert(nodeUri, "---\nid: alice\nkind: Node\ntype: Person\n---\nOriginal body")
+
+        val concurrentSearch = CompletableFuture.supplyAsync {
+            index.search(
+                GraphMdSearchParams(
+                    """MATCH (node) WHERE FULLTEXT(node, "Original") RETURN ID(node) AS id""",
+                ),
+            )
+        }
+        try {
+            assertTrue(compilationStarted.await(5, TimeUnit.SECONDS))
+            index.upsert(nodeUri, "---\nid: alice\nkind: Node\ntype: Person\n---\nUpdated body")
+        } finally {
+            releaseCompilation.countDown()
+        }
+        val concurrentResult = concurrentSearch.get(5, TimeUnit.SECONDS)
+
+        val updated = index.search(
+            GraphMdSearchParams(
+                """MATCH (node) WHERE FULLTEXT(node, "Updated") RETURN ID(node) AS id""",
+            ),
+        )
+        val original = index.search(
+            GraphMdSearchParams(
+                """MATCH (node) WHERE FULLTEXT(node, "Original") RETURN ID(node) AS id""",
+            ),
+        )
+
+        assertTrue(concurrentResult.rows.isEmpty())
+        assertEquals("alice", updated.rows.single().values.single())
+        assertTrue(original.rows.isEmpty())
+        assertTrue(compilationCount.get() >= 2)
     }
 
     @Test

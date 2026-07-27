@@ -2,6 +2,9 @@ package dev.usbharu.graphmd.cli
 
 import dev.usbharu.graphmd.core.GraphCompiler
 import dev.usbharu.graphmd.core.model.*
+import dev.usbharu.graphmd.query.GraphSearchEngine
+import dev.usbharu.graphmd.query.gmql.*
+import kotlin.coroutines.*
 
 data class CliResult(
     val stdout: String = "",
@@ -48,6 +51,55 @@ class GraphMdCli internal constructor(
             is CliCommand.Links -> links(compilation, command, invocation.json)
             is CliCommand.Lint -> lint(compilation, command, invocation.json)
             is CliCommand.Stats -> stats(compilation, command, invocation.json)
+            is CliCommand.Search -> search(compilation, sources, command, invocation.json)
+        }
+    }
+
+    private fun search(
+        graph: GraphCompilationResult,
+        sources: List<SourceDocument>,
+        command: CliCommand.Search,
+        json: Boolean,
+    ): CliResult {
+        val query = command.query ?: readQueryFile(checkNotNull(command.queryFile))
+        val parameters = try {
+            command.parameters.mapValues { (name, value) -> parseGmqlParameter(name, value) }
+        } catch (exception: GmqlParameterException) {
+            return usageError(exception.message ?: "Invalid parameter")
+        }
+        val result = runCliSuspend {
+            GraphSearchEngine.build(graph, sources).queryGmql(query, parameters)
+        }
+        val graphDiagnostics = graph.diagnostics.filter { it.severity == Severity.Error }
+        val output = if (json) {
+            jsonArray(result.rows.map { row ->
+                JsonValue.Object(
+                    result.columns.mapIndexed { index, column ->
+                        column.name to row.values[index].toJson()
+                    }.toMap(linkedMapOf()),
+                )
+            }).encode() + "\n"
+        } else {
+            renderSearchResult(result)
+        }
+        val hasErrors = graphDiagnostics.isNotEmpty() || result.diagnostics.isNotEmpty()
+        val stderr = when {
+            !hasErrors -> ""
+            json -> jsonArray(
+                graphDiagnostics.map(Diagnostic::toJson) + result.diagnostics.map(GmqlDiagnostic::toJson),
+            ).encode() + "\n"
+            else -> graphDiagnostics.joinToString(separator = "", transform = ::renderDiagnostic) +
+                result.diagnostics.joinToString(separator = "", transform = ::renderGmqlDiagnostic)
+        }
+        return CliResult(output, stderr, if (hasErrors) 1 else 0)
+    }
+
+    private fun readQueryFile(path: String): String {
+        if (fileSystem.kind(path) != FileKind.File) throw CliIoException("Query file does not exist: $path")
+        return try {
+            fileSystem.readText(fileSystem.canonical(path))
+        } catch (exception: Throwable) {
+            throw CliIoException("Cannot read query file $path: ${exception.message ?: "I/O error"}")
         }
     }
 
@@ -604,6 +656,104 @@ private val diagnosticComparator = compareBy<Diagnostic>(
 )
 
 private fun List<Diagnostic>.exitCode(): Int = if (any { it.severity == Severity.Error }) 1 else 0
+
+private class GmqlParameterException(message: String) : IllegalArgumentException(message)
+
+private fun parseGmqlParameter(name: String, encoded: String): GmqlValue {
+    val value = encoded.trim()
+    return when {
+        value == "null" -> GmqlValue.NullValue
+        value.equals("true", ignoreCase = true) -> GmqlValue.BooleanValue(true)
+        value.equals("false", ignoreCase = true) -> GmqlValue.BooleanValue(false)
+        INTEGER_PARAMETER.matches(value) -> value.toLongOrNull()?.let(GmqlValue::IntegerValue)
+            ?: throw GmqlParameterException("Parameter '$name' is outside the Integer range")
+        DECIMAL_PARAMETER.matches(value) -> value.toDoubleOrNull()?.takeIf(Double::isFinite)
+            ?.let(GmqlValue::DecimalValue)
+            ?: throw GmqlParameterException("Parameter '$name' is not a finite Decimal")
+        value.startsWith('"') -> GmqlValue.StringValue(
+            decodeParameterString(value)
+                ?: throw GmqlParameterException("Parameter '$name' contains an invalid quoted string"),
+        )
+        else -> GmqlValue.StringValue(encoded)
+    }
+}
+
+private fun decodeParameterString(encoded: String): String? {
+    if (encoded.length < 2 || encoded.last() != '"') return null
+    var index = 1
+    return buildString {
+        while (index < encoded.lastIndex) {
+            when (val character = encoded[index++]) {
+                '\\' -> {
+                    if (index >= encoded.lastIndex) return null
+                    append(
+                        when (val escaped = encoded[index++]) {
+                            '"', '\\', '/' -> escaped
+                            'b' -> '\b'
+                            'f' -> '\u000c'
+                            'n' -> '\n'
+                            'r' -> '\r'
+                            't' -> '\t'
+                            'u' -> {
+                                if (index + 4 > encoded.lastIndex) return null
+                                encoded.substring(index, index + 4).toIntOrNull(16)?.toChar()
+                                    ?.also { index += 4 } ?: return null
+                            }
+                            else -> return null
+                        },
+                    )
+                }
+                '"' -> return null
+                else -> append(character)
+            }
+        }
+    }
+}
+
+private fun renderSearchResult(result: GmqlQueryResult): String {
+    if (result.columns.isEmpty()) return ""
+    return buildString {
+        append(result.columns.joinToString("\t") { it.name }).append('\n')
+        result.rows.forEach { row ->
+            append(row.values.joinToString("\t", transform = ::renderSearchValue)).append('\n')
+        }
+    }
+}
+
+private fun renderSearchValue(value: GmqlValue): String = when (value) {
+    is GmqlValue.StringValue -> value.value.replace("\t", "\\t").replace("\n", "\\n")
+    is GmqlValue.IntegerValue -> value.value.toString()
+    is GmqlValue.DecimalValue -> value.value.toString()
+    is GmqlValue.BooleanValue -> value.value.toString()
+    GmqlValue.NullValue -> "null"
+    is GmqlValue.NodeValue -> value.id.value
+    is GmqlValue.RelationValue -> value.id.value.toString()
+    is GmqlValue.TypeRefValue -> value.name
+    else -> value.toJson().encode()
+}
+
+private fun renderGmqlDiagnostic(diagnostic: GmqlDiagnostic): String = buildString {
+    append("error[").append(diagnostic.code).append("]: ").append(diagnostic.message)
+    diagnostic.range?.let { append(" (").append(it.start).append("..").append(it.end).append(')') }
+    append('\n')
+}
+
+private fun <T> runCliSuspend(block: suspend () -> T): T {
+    var outcome: Result<T>? = null
+    block.startCoroutine(
+        object : Continuation<T> {
+            override val context: CoroutineContext = EmptyCoroutineContext
+            override fun resumeWith(result: Result<T>) {
+                outcome = result
+            }
+        },
+    )
+    return checkNotNull(outcome) { "CLI query execution suspended unexpectedly" }.getOrThrow()
+}
+
+private val INTEGER_PARAMETER = Regex("""[-+]?[0-9]+""")
+private val DECIMAL_PARAMETER =
+    Regex("""[-+]?(?:(?:[0-9]+\.[0-9]*|[0-9]*\.[0-9]+)(?:[eE][-+]?[0-9]+)?|[0-9]+[eE][-+]?[0-9]+)""")
 
 private fun cliDiagnostic(message: String): Diagnostic =
     Diagnostic(DiagnosticCategory.ReferenceError, Severity.Error, message)

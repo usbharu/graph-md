@@ -16,7 +16,37 @@ This is the suggested way to use Gradle in production projects.
 
 [Learn more about Gradle tasks](https://docs.gradle.org/current/userguide/command_line_interface.html#common_tasks).
 
-The Gradle build consists of the `core`, `lsp`, and `cli` subprojects.
+The Gradle build consists of the `core`, `query`, `lsp`, and `cli` subprojects.
+
+## Graph search engine
+
+The `query` Kotlin Multiplatform module turns `GraphCompilationResult` into an
+assertion-based searchable IR, keeps valid-time intervals on every binding, and
+provides both a scan reference executor and a physical indexed executor.
+
+```kotlin
+val compilation = GraphCompiler().compileSources(sources)
+val engine = GraphSearchEngine.build(compilation, sources)
+
+val result = engine.search(
+    GraphQuery(
+        root = NodePattern(typeId = NodeTypeId("Person")),
+        temporalWindow = TemporalWindow.At(TimelineId("CommonEra"), 150.0),
+        expression = GraphQueryExpression.Property(
+            PropertyPredicate(
+                PropertyPath("age"),
+                ValueOperator.GREATER_THAN_OR_EQUALS,
+                NumberValue(15.0),
+            ),
+        ),
+    ),
+)
+```
+
+The index supports typed property lookup, relation traversal, mapped timelines,
+Japanese N-grams, identifier terms, BM25 scoring, deterministic JSON sharding,
+and checksum-verified static loading. See [the query module guide](query/README.md)
+for its query and distribution APIs.
 
 ## GraphMD CLI
 
@@ -29,7 +59,15 @@ The `graphmd` CLI is implemented in the `cli` multiplatform module.
 ./gradlew :cli:run --args="show alice ./documents --valid-time 'CommonEra(from=10,to=20)'"
 ./gradlew :cli:run --args="lint ./documents --strict"
 ./gradlew :cli:run --args="stats ./documents"
+./gradlew :cli:run --args='search "MATCH (person:Person) WHERE person.age >= $minimumAge RETURN person" ./documents --param minimumAge=18 --json'
+./gradlew :cli:run --args="search --query-file queries/people.gmql ./documents --param minimumAge=18"
 ```
+
+`search` executes GMQL against the documents found at the supplied paths.
+Inline queries and `--query-file` are supported. Repeat `--param NAME=VALUE`
+for prepared-query parameters; `null`, booleans, integers, decimals, and
+quoted JSON strings are inferred, while other values are strings. Results are
+tab-separated by default, or JSON row objects with `--json`.
 
 Release archives are built with `jvmReleaseJar`, `jsReleaseArchive`,
 `macosArm64ReleaseArchive`, `macosX64ReleaseArchive`,
