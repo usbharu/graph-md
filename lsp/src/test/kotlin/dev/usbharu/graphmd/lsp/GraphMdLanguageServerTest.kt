@@ -43,6 +43,9 @@ import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -234,6 +237,56 @@ class GraphMdLanguageServerTest {
         } finally {
             root.toFile().deleteRecursively()
         }
+    }
+
+    @Test
+    fun `document change while search compiles cannot populate stale caches`() {
+        val compilationStarted = CountDownLatch(1)
+        val releaseCompilation = CountDownLatch(1)
+        val compilationCount = AtomicInteger()
+        val compiler = GraphCompiler()
+        val index = GraphMdWorkspaceIndex { sources ->
+            if (compilationCount.incrementAndGet() == 1) {
+                compilationStarted.countDown()
+                check(releaseCompilation.await(5, TimeUnit.SECONDS))
+            }
+            compiler.compileSources(sources)
+        }
+        val typeUri = "file:///workspace/Person.md"
+        val nodeUri = "file:///workspace/alice.md"
+        index.upsert(typeUri, "---\nid: Person\nkind: NodeType\n---")
+        index.upsert(nodeUri, "---\nid: alice\nkind: Node\ntype: Person\n---\nOriginal body")
+
+        val concurrentSearch = CompletableFuture.supplyAsync {
+            index.search(
+                GraphMdSearchParams(
+                    """MATCH (node) WHERE FULLTEXT(node, "Original") RETURN ID(node) AS id""",
+                ),
+            )
+        }
+        try {
+            assertTrue(compilationStarted.await(5, TimeUnit.SECONDS))
+            index.upsert(nodeUri, "---\nid: alice\nkind: Node\ntype: Person\n---\nUpdated body")
+        } finally {
+            releaseCompilation.countDown()
+        }
+        val concurrentResult = concurrentSearch.get(5, TimeUnit.SECONDS)
+
+        val updated = index.search(
+            GraphMdSearchParams(
+                """MATCH (node) WHERE FULLTEXT(node, "Updated") RETURN ID(node) AS id""",
+            ),
+        )
+        val original = index.search(
+            GraphMdSearchParams(
+                """MATCH (node) WHERE FULLTEXT(node, "Original") RETURN ID(node) AS id""",
+            ),
+        )
+
+        assertTrue(concurrentResult.rows.isEmpty())
+        assertEquals("alice", updated.rows.single().values.single())
+        assertTrue(original.rows.isEmpty())
+        assertTrue(compilationCount.get() >= 2)
     }
 
     @Test

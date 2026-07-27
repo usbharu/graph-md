@@ -190,7 +190,13 @@ private class ExpressionChecker(
             }
             is GmqlExpression.Property -> propertyType(expression)
             is GmqlExpression.Call -> callType(expression)
-            is GmqlExpression.IsTest -> GmqlType.Boolean
+            is GmqlExpression.IsTest -> {
+                if (typeOf(expression.operand) is GmqlType.Temporal) {
+                    GmqlType.Temporal(GmqlType.Boolean)
+                } else {
+                    GmqlType.Boolean
+                }
+            }
             is GmqlExpression.Unary -> {
                 val operand = typeOf(expression.operand)
                 if (expression.operator == "NOT") {
@@ -310,7 +316,13 @@ private class ExpressionChecker(
         return when (name) {
             "SCORE" -> GmqlType.Decimal
             "VALIDITY", "MATCHED_VALIDITY" -> GmqlType.TemporalExtent
-            "FULLTEXT", "EXISTS" -> GmqlType.Boolean
+            "FULLTEXT", "EXISTS" -> {
+                if (argumentTypes.firstOrNull() is GmqlType.Temporal) {
+                    GmqlType.Temporal(GmqlType.Boolean)
+                } else {
+                    GmqlType.Boolean
+                }
+            }
             "ID", "KIND", "TITLE", "SOURCE" -> GmqlType.String
             "TYPE", "TYPE_REF", "REL_TYPE_REF" -> GmqlType.TypeRef
             "START_NODE", "END_NODE" -> GmqlType.Node
@@ -380,9 +392,17 @@ internal class GmqlExecutor(
     private val propertyById = graph.propertyAssertions.associateBy { it.id }
     private val relationById = graph.relationAssertions.associateBy { it.id }
     private val textById = graph.textAssertions.associateBy { it.id }
+    private val timelineUniverse = IntervalSet.of(
+        graph.timelineCatalog.timelines
+            .map { it.canonicalId }
+            .distinct()
+            .map(::TemporalInterval),
+    )
+    private lateinit var expressionTypes: Map<GmqlExpression, GmqlType>
     private var operations = 0L
 
     fun execute(query: GmqlCompiledQuery, parameters: Map<String, GmqlValue>): GmqlQueryResult {
+        expressionTypes = query.expressionTypes
         val parameterError = query.parameterTypes.entries.firstNotNullOfOrNull { (name, type) ->
             val value = parameters[name]
             when {
@@ -528,18 +548,23 @@ internal class GmqlExecutor(
             is GmqlExpression.Property -> evaluateProperty(expression, binding)
             is GmqlExpression.IsTest -> {
                 val operand = evaluate(expression.operand, binding, parameters)
+                val evaluatedTime = evaluationTime(binding.validity)
                 val time = if (expression.missing) {
-                    if (operand.missing) binding.validity else binding.validity.subtract(operand.presenceTime())
+                    if (operand.missing) evaluatedTime else evaluatedTime.subtract(operand.presenceTime())
                 } else {
                     operand.entries().filter { it.value == GmqlValue.NullValue }
                         .fold(IntervalSet.empty()) { result, entry -> result union entry.validTime }
                 }
                 val selected = when {
                     !expression.negated -> time
-                    expression.missing -> binding.validity.subtract(time)
+                    expression.missing -> evaluatedTime.subtract(time)
                     else -> operand.presenceTime().subtract(time)
                 }
-                Eval(GmqlValue.BooleanValue(true), selected)
+                booleanResult(
+                    trueTime = selected,
+                    evaluatedTime = evaluatedTime,
+                    temporal = expressionTypes[expression] is GmqlType.Temporal,
+                )
             }
             is GmqlExpression.Unary -> {
                 val operand = evaluate(expression.operand, binding, parameters)
@@ -549,7 +574,7 @@ internal class GmqlExecutor(
                         evaluatedTime = binding.validity,
                         temporal = operand.value is GmqlValue.TemporalValue,
                     )
-                    "-" -> Eval(negate(operand.value), operand.time)
+                    "-" -> Eval(negate(operand.value, expression.range), operand.time)
                     else -> operand
                 }
             }
@@ -699,7 +724,11 @@ internal class GmqlExecutor(
         )
         "EXISTS" -> {
             val value = evaluate(call.arguments.first(), binding, parameters)
-            Eval(GmqlValue.BooleanValue(true), value.presenceTime())
+            booleanResult(
+                trueTime = value.presenceTime(),
+                evaluatedTime = evaluationTime(binding.validity),
+                temporal = expressionTypes[call] is GmqlType.Temporal,
+            )
         }
         "FULLTEXT" -> evaluateFullText(call, binding, parameters)
         "TYPE_REF" -> Eval(
@@ -749,12 +778,17 @@ internal class GmqlExecutor(
     ): Eval {
         val query = stringValue(evaluate(call.arguments[1], binding, parameters).value)
         val scope = call.arguments[0]
+        val temporal = expressionTypes[call] is GmqlType.Temporal
         val chain = (scope as? GmqlExpression.Property)?.propertyChain()
         val variable = chain?.first ?: (scope as? GmqlExpression.Variable)?.name
         val owner = when (val entity = variable?.let(binding.entities::get)) {
             is Entity.Node -> AssertionOwner.Node(entity.id)
             is Entity.Relation -> AssertionOwner.Relation(entity.id)
-            null -> return Eval(GmqlValue.BooleanValue(true), IntervalSet.empty())
+            null -> return booleanResult(
+                trueTime = IntervalSet.empty(),
+                evaluatedTime = evaluationTime(binding.validity),
+                temporal = temporal,
+            )
         }
         val path = chain?.second?.let(::PropertyPath)
         var time = IntervalSet.empty()
@@ -782,7 +816,12 @@ internal class GmqlExecutor(
                     }
                 }
             }
-        return Eval(GmqlValue.BooleanValue(true), time, score)
+        return booleanResult(
+            trueTime = time,
+            evaluatedTime = evaluationTime(binding.validity),
+            score = score,
+            temporal = temporal,
+        )
     }
 
     private fun applyValid(
@@ -867,6 +906,9 @@ internal class GmqlExecutor(
             throw GmqlLimitException("The query exceeded the intermediate binding limit.")
         }
     }
+
+    private fun evaluationTime(bindingTime: IntervalSet): IntervalSet =
+        if (bindingTime.isUniversal && !timelineUniverse.isEmpty) timelineUniverse else bindingTime
 }
 
 internal data class GmqlPhysicalPlan(
@@ -1084,8 +1126,11 @@ private fun decimalValue(value: GmqlValue): Double = when (value) {
     is GmqlValue.DecimalValue -> value.value
     else -> Double.NaN
 }
-private fun negate(value: GmqlValue): GmqlValue = when (value) {
-    is GmqlValue.IntegerValue -> GmqlValue.IntegerValue(-value.value)
+private fun negate(value: GmqlValue, range: GmqlSourceRange): GmqlValue = when (value) {
+    is GmqlValue.IntegerValue -> {
+        if (value.value == Long.MIN_VALUE) integerOverflow(range)
+        GmqlValue.IntegerValue(-value.value)
+    }
     is GmqlValue.DecimalValue -> GmqlValue.DecimalValue(-value.value)
     else -> GmqlValue.NullValue
 }
@@ -1098,9 +1143,9 @@ private fun numeric(
 ): GmqlValue? {
     if (left is GmqlValue.IntegerValue && right is GmqlValue.IntegerValue && operator != "/") {
         return when (operator) {
-            "+" -> GmqlValue.IntegerValue(left.value + right.value)
-            "-" -> GmqlValue.IntegerValue(left.value - right.value)
-            "*" -> GmqlValue.IntegerValue(left.value * right.value)
+            "+" -> GmqlValue.IntegerValue(checkedAdd(left.value, right.value, range))
+            "-" -> GmqlValue.IntegerValue(checkedSubtract(left.value, right.value, range))
+            "*" -> GmqlValue.IntegerValue(checkedMultiply(left.value, right.value, range))
             "%" -> if (right.value == 0L) null else GmqlValue.IntegerValue(left.value % right.value)
             else -> null
         }
@@ -1127,6 +1172,47 @@ private fun numeric(
         )
     }
     return GmqlValue.DecimalValue(result)
+}
+
+private fun checkedAdd(left: Long, right: Long, range: GmqlSourceRange): Long {
+    if (right > 0 && left > Long.MAX_VALUE - right ||
+        right < 0 && left < Long.MIN_VALUE - right
+    ) {
+        integerOverflow(range)
+    }
+    return left + right
+}
+
+private fun checkedSubtract(left: Long, right: Long, range: GmqlSourceRange): Long {
+    if (right > 0 && left < Long.MIN_VALUE + right ||
+        right < 0 && left > Long.MAX_VALUE + right
+    ) {
+        integerOverflow(range)
+    }
+    return left - right
+}
+
+private fun checkedMultiply(left: Long, right: Long, range: GmqlSourceRange): Long {
+    val overflow = when {
+        left > 0 && right > 0 -> left > Long.MAX_VALUE / right
+        left > 0 && right < 0 -> right < Long.MIN_VALUE / left
+        left < 0 && right > 0 -> left < Long.MIN_VALUE / right
+        left < 0 && right < 0 -> left < Long.MAX_VALUE / right
+        else -> false
+    }
+    if (overflow) integerOverflow(range)
+    return left * right
+}
+
+private fun integerOverflow(range: GmqlSourceRange): Nothing {
+    throw GmqlEvaluationException(
+        diagnostic(
+            "GMQL5003",
+            "Integer expression is out of range.",
+            range,
+            GmqlDiagnosticKind.TYPE,
+        ),
+    )
 }
 
 private fun compare(left: GmqlValue, right: GmqlValue, operator: String): Boolean {

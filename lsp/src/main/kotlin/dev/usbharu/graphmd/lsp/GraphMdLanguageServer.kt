@@ -160,24 +160,43 @@ private class GraphMdWorkspaceService(
     }
 }
 
-private class GraphMdWorkspaceIndex {
+internal class GraphMdWorkspaceIndex(
+    private val compileSources: (List<SourceDocument>) -> GraphCompilationResult = GraphCompiler()::compileSources,
+) {
+    private data class WorkspaceSnapshot(
+        val generation: Long,
+        val documents: List<IndexedDocument>,
+    )
+
+    private data class CompiledWorkspace(
+        val generation: Long,
+        val documents: List<IndexedDocument>,
+        val compilation: GraphCompilationResult,
+    )
+
+    private data class CachedSearchEngine(
+        val generation: Long,
+        val engine: GraphSearchEngine,
+    )
+
     private val analyzer = GraphDocumentAnalyzer()
-    private val compiler = GraphCompiler()
     private var roots: List<Path> = emptyList()
     private val documents = linkedMapOf<String, IndexedDocument>()
     private val openDocuments = mutableSetOf<String>()
-    private var compiledCache: GraphCompilationResult? = null
-    private var searchEngineCache: GraphSearchEngine? = null
+    private var workspaceGeneration = 0L
+    private var compiledCache: CompiledWorkspace? = null
+    private var searchEngineCache: CachedSearchEngine? = null
 
     fun setWorkspaceRoots(roots: List<Path>) {
-        this.roots = roots
+        synchronized(this) {
+            this.roots = roots
+        }
     }
 
     fun loadWorkspace() {
-        documents.clear()
-        openDocuments.clear()
-        invalidateCompilation()
-        roots.forEach { root ->
+        val loadedDocuments = linkedMapOf<String, IndexedDocument>()
+        val workspaceRoots = synchronized(this) { roots.toList() }
+        workspaceRoots.forEach { root ->
             if (!Files.exists(root)) return@forEach
             Files.walk(root).use { paths ->
                 paths.filter { it.isRegularFile() && it.extension == "md" }
@@ -190,41 +209,64 @@ private class GraphMdWorkspaceIndex {
                     }
                     .forEach { file ->
                         val uri = file.toUri().toString()
-                        upsert(uri, file.readText())
+                        loadedDocuments[uri] = indexedDocument(uri, file.readText())
                     }
             }
+        }
+        synchronized(this) {
+            documents.clear()
+            documents.putAll(loadedDocuments)
+            openDocuments.clear()
+            invalidateCompilation()
         }
     }
 
     fun open(uri: String, text: String) {
         val normalizedUri = normalizeUri(uri)
-        openDocuments += normalizedUri
-        upsertNormalized(normalizedUri, text)
+        val document = indexedDocument(normalizedUri, text)
+        synchronized(this) {
+            openDocuments += normalizedUri
+            upsertNormalized(document)
+        }
     }
 
     fun close(uri: String) {
         val normalizedUri = normalizeUri(uri)
-        openDocuments -= normalizedUri
-        reloadNormalized(normalizedUri)
+        val document = readDocument(normalizedUri)
+        synchronized(this) {
+            openDocuments -= normalizedUri
+            replaceNormalized(normalizedUri, document)
+        }
     }
 
     fun updateFromDisk(change: FileEvent) {
         val normalizedUri = normalizeUri(change.uri)
-        if (normalizedUri in openDocuments) return
-        when (change.type) {
-            FileChangeType.Deleted -> removeNormalized(normalizedUri)
-            else -> reloadNormalized(normalizedUri)
+        if (synchronized(this) { normalizedUri in openDocuments }) return
+        val document = when (change.type) {
+            FileChangeType.Deleted -> null
+            else -> readDocument(normalizedUri)
+        }
+        synchronized(this) {
+            if (normalizedUri in openDocuments) return
+            replaceNormalized(normalizedUri, document)
         }
     }
 
     fun upsert(uri: String, text: String) {
-        upsertNormalized(normalizeUri(uri), text)
+        val document = indexedDocument(normalizeUri(uri), text)
+        synchronized(this) {
+            upsertNormalized(document)
+        }
     }
 
-    private fun upsertNormalized(uri: String, text: String) {
+    private fun indexedDocument(uri: String, text: String): IndexedDocument {
         val path = Paths.get(URI.create(uri))
         val analysis = analyzer.analyze(text, path.toString())
-        documents[uri] = IndexedDocument(uri, path, text, analysis)
+        return IndexedDocument(uri, path, text, analysis)
+    }
+
+    private fun upsertNormalized(document: IndexedDocument) {
+        documents[document.uri] = document
         invalidateCompilation()
     }
 
@@ -233,12 +275,15 @@ private class GraphMdWorkspaceIndex {
     }
 
     private fun reloadNormalized(uri: String) {
-        val path = Paths.get(URI.create(uri))
-        if (!Files.exists(path)) {
-            removeNormalized(uri)
-            return
+        val document = readDocument(uri)
+        synchronized(this) {
+            replaceNormalized(uri, document)
         }
-        upsertNormalized(uri, path.readText())
+    }
+
+    private fun readDocument(uri: String): IndexedDocument? {
+        val path = Paths.get(URI.create(uri))
+        return if (Files.exists(path)) indexedDocument(uri, path.readText()) else null
     }
 
     fun remove(uri: String) {
@@ -246,12 +291,28 @@ private class GraphMdWorkspaceIndex {
     }
 
     private fun removeNormalized(uri: String) {
-        documents.remove(uri)
+        synchronized(this) {
+            replaceNormalized(uri, null)
+        }
+    }
+
+    private fun replaceNormalized(uri: String, document: IndexedDocument?) {
+        if (document == null) {
+            documents.remove(uri)
+        } else {
+            documents[uri] = document
+        }
         invalidateCompilation()
     }
 
+    private fun documentSnapshot(uri: String): IndexedDocument? =
+        synchronized(this) { documents[uri] }
+
+    private fun documentsSnapshot(): List<IndexedDocument> =
+        synchronized(this) { documents.values.toList() }
+
     fun completions(uri: String, position: Position): List<CompletionItem> {
-        val document = documents[normalizeUri(uri)] ?: return emptyList()
+        val document = documentSnapshot(normalizeUri(uri)) ?: return emptyList()
         yamlFrontMatterCompletions(document, position)?.let { return it }
         exactPropsCompletions(document, position)?.let { return it }
         exactRelationPropsCompletions(document, position)?.let { return it }
@@ -268,11 +329,12 @@ private class GraphMdWorkspaceIndex {
     }
 
     fun definitions(uri: String, position: Position): List<Location> {
-        val document = documents[normalizeUri(uri)] ?: return emptyList()
+        val documents = documentsSnapshot()
+        val document = documents.firstOrNull { it.uri == normalizeUri(uri) } ?: return emptyList()
         val offset = document.offsetAt(position)
         val reference = analyzer.findReferenceAt(document.analysis, offset)
         if (reference != null) {
-            return resolve(reference.kind, reference.targetId).map { resolved ->
+            return resolve(reference.kind, reference.targetId, documents).map { resolved ->
                 Location(resolved.uri, resolved.range())
             }
         }
@@ -281,20 +343,21 @@ private class GraphMdWorkspaceIndex {
                 PropertyReference(it.name, it.ownerId, it.ownerKind, it.range)
             }
             ?: return emptyList()
-        return resolveProperty(propertyReference).map { resolved ->
+        return resolveProperty(propertyReference, documents).map { resolved ->
             Location(resolved.document.uri, resolved.document.rangeOf(resolved.definition.range))
         }
     }
 
     fun references(uri: String, position: Position): List<Location> {
-        val document = documents[normalizeUri(uri)] ?: return emptyList()
+        val documents = documentsSnapshot()
+        val document = documents.firstOrNull { it.uri == normalizeUri(uri) } ?: return emptyList()
         val offset = document.offsetAt(position)
         val reference = analyzer.findReferenceAt(document.analysis, offset)?.let { it.kind to it.targetId }
             ?: analyzer.findDefinitionAt(document.analysis, offset)?.let { it.kind to it.id }
             ?: return emptyList()
 
         val locations = mutableListOf<Location>()
-        documents.values.forEach { indexed ->
+        documents.forEach { indexed ->
             indexed.analysis.definitions
                 .filter { it.kind == reference.first && it.id == reference.second }
                 .forEach { locations += Location(indexed.uri, indexed.rangeOf(it.range)) }
@@ -306,12 +369,13 @@ private class GraphMdWorkspaceIndex {
     }
 
     fun hover(uri: String, position: Position): Hover? {
-        val document = documents[normalizeUri(uri)] ?: return null
+        val documents = documentsSnapshot()
+        val document = documents.firstOrNull { it.uri == normalizeUri(uri) } ?: return null
         val offset = document.offsetAt(position)
         val symbol = analyzer.findReferenceAt(document.analysis, offset)?.let { it.kind to it.targetId }
             ?: analyzer.findDefinitionAt(document.analysis, offset)?.let { it.kind to it.id }
             ?: return null
-        val first = resolve(symbol.first, symbol.second).firstOrNull()
+        val first = resolve(symbol.first, symbol.second, documents).firstOrNull()
         val contents = MarkupContent().apply {
             kind = MarkupKind.MARKDOWN
             value = buildString {
@@ -339,13 +403,14 @@ private class GraphMdWorkspaceIndex {
 
     fun rename(uri: String, position: Position, newName: String): WorkspaceEdit? {
         if (newName.isBlank() || newName.any { it.isWhitespace() }) return null
-        val document = documents[normalizeUri(uri)] ?: return null
+        val documents = documentsSnapshot()
+        val document = documents.firstOrNull { it.uri == normalizeUri(uri) } ?: return null
         val offset = document.offsetAt(position)
         val symbol = analyzer.findReferenceAt(document.analysis, offset)?.let { it.kind to it.targetId }
             ?: analyzer.findDefinitionAt(document.analysis, offset)?.let { it.kind to it.id }
             ?: return null
         val changes = linkedMapOf<String, MutableList<TextEdit>>()
-        documents.values.forEach { indexed ->
+        documents.forEach { indexed ->
             indexed.analysis.definitions
                 .filter { it.kind == symbol.first && it.id == symbol.second }
                 .forEach { changes.getOrPut(indexed.uri) { mutableListOf() } += TextEdit(indexed.rangeOf(it.range), newName) }
@@ -357,7 +422,7 @@ private class GraphMdWorkspaceIndex {
     }
 
     fun codeActions(uri: String, diagnostics: List<org.eclipse.lsp4j.Diagnostic>): List<CodeAction> {
-        val document = documents[normalizeUri(uri)] ?: return emptyList()
+        val document = documentSnapshot(normalizeUri(uri)) ?: return emptyList()
         return diagnostics
             .filter { it.source == null || it.source == "graphmd" }
             .flatMap { diagnostic -> codeActionsForDiagnostic(document, diagnostic) }
@@ -942,7 +1007,8 @@ private class GraphMdWorkspaceIndex {
             ReferenceTargetKind.Timeline -> "timelines"
             ReferenceTargetKind.Node -> "nodes"
         }
-        val base = roots.firstOrNull { document.path.startsWith(it) }
+        val workspaceRoots = synchronized(this) { roots.toList() }
+        val base = workspaceRoots.firstOrNull { document.path.startsWith(it) }
             ?: document.path.parent?.takeUnless { it.fileName?.toString() in setOf("types", "timelines", "nodes") }
             ?: document.path.parent?.parent
             ?: return null
@@ -950,7 +1016,7 @@ private class GraphMdWorkspaceIndex {
         val definitionDirectory = preferredDirectory.takeIf { Files.isDirectory(it) } ?: base
         val newPath = definitionDirectory.resolve("${target.id}.md")
         val newUri = newPath.toUri().toString()
-        if (newUri in documents || Files.exists(newPath)) return null
+        if (documentSnapshot(newUri) != null || Files.exists(newPath)) return null
         val sourceType = (document.analysis.parsed.document as? NodeDocument)?.type
             ?: completionIds(ReferenceTargetKind.NodeType).firstOrNull()
             ?: "NodeType"
@@ -995,7 +1061,7 @@ private class GraphMdWorkspaceIndex {
             }
             else -> null
         } ?: return null
-        val schemaDocument = documents.values.firstOrNull { it.path.toString() == targetSource } ?: return null
+        val schemaDocument = documentsSnapshot().firstOrNull { it.path.toString() == targetSource } ?: return null
         val insertion = schemaDocument.propSchemaInsertion(key)
         return quickFix(
             "Declare '$key' in ${schemaDocument.analysis.parsed.document?.id ?: "schema"}",
@@ -1044,7 +1110,9 @@ private class GraphMdWorkspaceIndex {
     }
 
     fun diagnosticsByUri(): Map<String, MutableList<org.eclipse.lsp4j.Diagnostic>> {
-        val compiled = compiledWorkspace()
+        val workspace = compiledWorkspaceSnapshot()
+        val compiled = workspace.compilation
+        val documents = workspace.documents.associateBy { it.uri }
         val diagnostics = linkedMapOf<String, MutableList<org.eclipse.lsp4j.Diagnostic>>()
         compiled.diagnostics.forEach { diagnostic ->
             val sourcePath = diagnostic.source?.path ?: return@forEach
@@ -1190,14 +1258,8 @@ private class GraphMdWorkspaceIndex {
                 ),
             )
         }
-        val (compilation, engine) = synchronized(this) {
-            val compiled = compiledWorkspace()
-            val cachedEngine = searchEngineCache ?: GraphSearchEngine.build(
-                compiled,
-                sourceDocuments(),
-            ).also { searchEngineCache = it }
-            compiled to cachedEngine
-        }
+        val (workspace, engine) = stableSearchWorkspace()
+        val compilation = workspace.compilation
         val result = runSearchSuspend {
             engine.queryGmql(
                 params.query,
@@ -1231,17 +1293,17 @@ private class GraphMdWorkspaceIndex {
             }
             GraphMdSearchRow(
                 values = row.values.map(GmqlValue::toWireValue),
-                location = relation?.source?.let(::sourceLocation)
-                    ?: relationByStableKey?.source?.let(::sourceLocation)
-                    ?: nodeId?.let(::nodeLocation)
-                    ?: idValue?.let(::nodeLocation),
+                location = relation?.source?.let { sourceLocation(it, workspace.documents) }
+                    ?: relationByStableKey?.source?.let { sourceLocation(it, workspace.documents) }
+                    ?: nodeId?.let { nodeLocation(it, workspace.documents) }
+                    ?: idValue?.let { nodeLocation(it, workspace.documents) },
             )
         }
         return GraphMdSearchResponse(columns, rows, diagnostics)
     }
 
     fun searchMetadata(): GraphMdSearchMetadata {
-        val compiled = synchronized(this) { compiledWorkspace() }
+        val compiled = compiledWorkspace()
         return GraphMdSearchMetadata(
             nodeTypes = compiled.nodeTypes
                 .sortedBy { it.id }
@@ -1269,39 +1331,102 @@ private class GraphMdWorkspaceIndex {
         )
     }
 
-    private fun nodeLocation(nodeId: String): GraphMdSearchLocation? = synchronized(this) {
-        resolve(ReferenceTargetKind.Node, nodeId).firstOrNull()?.let { definition ->
+    private fun nodeLocation(
+        nodeId: String,
+        documents: List<IndexedDocument>,
+    ): GraphMdSearchLocation? =
+        resolve(ReferenceTargetKind.Node, nodeId, documents).firstOrNull()?.let { definition ->
             GraphMdSearchLocation(
                 definition.uri,
                 definition.range(),
             )
         }
-    }
 
-    private fun sourceLocation(source: SourceInfo): GraphMdSearchLocation? = synchronized(this) {
-        val document = documents.values.firstOrNull { indexed ->
+    private fun sourceLocation(
+        source: SourceInfo,
+        documents: List<IndexedDocument>,
+    ): GraphMdSearchLocation? {
+        val document = documents.firstOrNull { indexed ->
             indexed.path.toString() == source.path
-        } ?: return@synchronized null
-        GraphMdSearchLocation(
+        } ?: return null
+        return GraphMdSearchLocation(
             document.uri,
             source.range?.let(document::bodyRangeOf) ?: document.rangeOf(SourceRange(0, 0)),
         )
     }
 
-    private fun sourceDocuments(): List<SourceDocument> =
-        documents.values
+    private fun List<IndexedDocument>.toSourceDocuments(): List<SourceDocument> =
+        this
             .filter { it.isGraphDocumentCandidate() }
             .map { SourceDocument(it.text, it.path.toString()) }
 
     private fun invalidateCompilation() {
+        workspaceGeneration++
         compiledCache = null
         searchEngineCache = null
     }
 
-    private fun compiledWorkspace(): GraphCompilationResult {
-        compiledCache?.let { return it }
-        return compiler.compileSources(sourceDocuments())
-            .also { compiledCache = it }
+    private fun compiledWorkspace(): GraphCompilationResult =
+        compiledWorkspaceSnapshot().compilation
+
+    private fun compiledWorkspaceSnapshot(): CompiledWorkspace {
+        while (true) {
+            val snapshot = synchronized(this) {
+                compiledCache
+                    ?.takeIf { it.generation == workspaceGeneration }
+                    ?.let { return it }
+                WorkspaceSnapshot(workspaceGeneration, documents.values.toList())
+            }
+            val candidate = CompiledWorkspace(
+                generation = snapshot.generation,
+                documents = snapshot.documents,
+                compilation = compileSources(snapshot.documents.toSourceDocuments()),
+            )
+            val current = synchronized(this) {
+                if (workspaceGeneration != snapshot.generation) {
+                    null
+                } else {
+                    compiledCache
+                        ?.takeIf { it.generation == snapshot.generation }
+                        ?: candidate.also { compiledCache = it }
+                }
+            }
+            if (current != null) return current
+        }
+    }
+
+    private fun stableSearchWorkspace(): Pair<CompiledWorkspace, GraphSearchEngine> {
+        while (true) {
+            val workspace = compiledWorkspaceSnapshot()
+            val engine = searchEngine(workspace)
+            if (synchronized(this) { workspaceGeneration == workspace.generation }) {
+                return workspace to engine
+            }
+        }
+    }
+
+    private fun searchEngine(workspace: CompiledWorkspace): GraphSearchEngine {
+        synchronized(this) {
+            searchEngineCache
+                ?.takeIf { it.generation == workspace.generation }
+                ?.let { return it.engine }
+        }
+        val candidate = GraphSearchEngine.build(
+            workspace.compilation,
+            workspace.documents.toSourceDocuments(),
+        )
+        return synchronized(this) {
+            if (workspaceGeneration != workspace.generation) {
+                candidate
+            } else {
+                searchEngineCache
+                    ?.takeIf { it.generation == workspace.generation }
+                    ?.engine
+                    ?: candidate.also {
+                        searchEngineCache = CachedSearchEngine(workspace.generation, it)
+                    }
+            }
+        }
     }
 
     private fun frontMatterScalar(text: String, key: String): String? {
@@ -1330,13 +1455,27 @@ private class GraphMdWorkspaceIndex {
         return definitionsOf(kind).filter { it.id == id }
     }
 
-    private fun resolveProperty(reference: PropertyReference): List<IndexedPropertyDefinition> {
+    private fun resolve(
+        kind: ReferenceTargetKind,
+        id: String,
+        documents: List<IndexedDocument>,
+    ): List<IndexedDefinition> {
+        return definitionsOf(kind, documents).filter { it.id == id }
+    }
+
+    private fun resolveProperty(reference: PropertyReference): List<IndexedPropertyDefinition> =
+        resolveProperty(reference, documentsSnapshot())
+
+    private fun resolveProperty(
+        reference: PropertyReference,
+        documents: List<IndexedDocument>,
+    ): List<IndexedPropertyDefinition> {
         fun resolveOwner(
             ownerId: String,
             visited: Set<String>,
         ): List<IndexedPropertyDefinition> {
             if (ownerId in visited) return emptyList()
-            val ownerDocuments = documents.values.filter { indexed ->
+            val ownerDocuments = documents.filter { indexed ->
                 val parsed = indexed.analysis.parsed.document
                 when (reference.ownerKind) {
                     PropertyOwnerKind.NodeType -> parsed is NodeTypeDocument && parsed.id == ownerId
@@ -1389,7 +1528,15 @@ private class GraphMdWorkspaceIndex {
     }
 
     private fun definitionsOf(kind: ReferenceTargetKind): List<IndexedDefinition> {
-        return documents.values.flatMap { indexed ->
+        val snapshot = synchronized(this) { documents.values.toList() }
+        return definitionsOf(kind, snapshot)
+    }
+
+    private fun definitionsOf(
+        kind: ReferenceTargetKind,
+        documents: List<IndexedDocument>,
+    ): List<IndexedDefinition> {
+        return documents.flatMap { indexed ->
             indexed.analysis.definitions
                 .filter { it.kind == kind }
                 .map { IndexedDefinition(indexed.uri, indexed.path, it.id, it.range, indexed) }

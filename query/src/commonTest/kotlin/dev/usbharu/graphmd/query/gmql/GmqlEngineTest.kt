@@ -376,6 +376,52 @@ class GmqlEngineTest {
     }
 
     @Test
+    fun `is exists and fulltext projections preserve false and temporal values`() {
+        val result = runSuspend {
+            engine.queryGmql(
+                """MATCH (n:Person) WHERE ID(n) = "alice"
+                   RETURN NULL IS NOT NULL AS notNull,
+                          NULL IS MISSING AS isMissing,
+                          EXISTS(n.nickname) AS exists,
+                          FULLTEXT(n, "not-present") AS fulltext,
+                          n.age IS NULL AS temporalNull,
+                          EXISTS(n.age) AS temporalExists,
+                          FULLTEXT(n.biography, "not-present") AS temporalFulltext""",
+            )
+        }
+
+        assertTrue(result.isSuccess, result.diagnostics.toString())
+        assertEquals(
+            listOf(
+                GmqlType.Boolean,
+                GmqlType.Boolean,
+                GmqlType.Temporal(GmqlType.Boolean),
+                GmqlType.Boolean,
+                GmqlType.Temporal(GmqlType.Boolean),
+                GmqlType.Temporal(GmqlType.Boolean),
+                GmqlType.Temporal(GmqlType.Boolean),
+            ),
+            result.columns.map { it.type },
+        )
+        val values = result.rows.single().values
+        assertEquals(GmqlValue.BooleanValue(false), values[0])
+        assertEquals(GmqlValue.BooleanValue(false), values[1])
+        val missingExists = assertIs<GmqlValue.TemporalValue>(values[2])
+        assertTrue(missingExists.entries.isNotEmpty())
+        assertTrue(missingExists.entries.all { it.value == GmqlValue.BooleanValue(false) })
+        assertEquals(GmqlValue.BooleanValue(false), values[3])
+        val temporalNull = assertIs<GmqlValue.TemporalValue>(values[4])
+        assertTrue(temporalNull.entries.isNotEmpty())
+        assertTrue(temporalNull.entries.all { it.value == GmqlValue.BooleanValue(false) })
+        val temporalExists = assertIs<GmqlValue.TemporalValue>(values[5])
+        assertTrue(temporalExists.entries.isNotEmpty())
+        assertTrue(temporalExists.entries.all { it.value == GmqlValue.BooleanValue(true) })
+        val temporalFulltext = assertIs<GmqlValue.TemporalValue>(values[6])
+        assertTrue(temporalFulltext.entries.isNotEmpty())
+        assertTrue(temporalFulltext.entries.all { it.value == GmqlValue.BooleanValue(false) })
+    }
+
+    @Test
     fun `non finite decimals are rejected or reported as diagnostics`() {
         val literal = engine.compileGmql("""MATCH (n) RETURN 1e999 AS value""")
         val overflow = runSuspend {
@@ -393,6 +439,25 @@ class GmqlEngineTest {
         assertEquals("GMQL4003", invalidTemporalBoundary.diagnostics.single().code)
         assertFailsWith<IllegalArgumentException> {
             GmqlValue.DecimalValue(Double.POSITIVE_INFINITY)
+        }
+    }
+
+    @Test
+    fun `integer overflow is reported as a diagnostic`() {
+        val expressions = listOf(
+            "9223372036854775807 + 1",
+            "-9223372036854775807 - 2",
+            "3037000500 * 3037000500",
+            "-(-9223372036854775807 - 1)",
+        )
+
+        expressions.forEach { expression ->
+            val result = runSuspend {
+                engine.queryGmql("""MATCH (n) RETURN $expression AS value""")
+            }
+
+            assertEquals("GMQL5003", result.diagnostics.single().code, expression)
+            assertEquals(GmqlDiagnosticKind.TYPE, result.diagnostics.single().kind, expression)
         }
     }
 
