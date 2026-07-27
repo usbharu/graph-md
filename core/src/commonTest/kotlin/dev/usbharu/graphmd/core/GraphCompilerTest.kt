@@ -561,6 +561,105 @@ class GraphCompilerTest {
     }
 
     @Test
+    fun `body array props overwrite identical validTime and retain other elements`() {
+        val commonTime = RawArray(listOf(RawObject(mapOf("timeline" to RawString("CommonEra")))))
+        val branchTime = RawArray(listOf(RawObject(mapOf("timeline" to RawString("Branch")))))
+        val result = compiler().compile(
+            listOf(
+                TimelineDocument("CommonEra", sourcePath = "/tmp/common.md"),
+                TimelineDocument("Branch", sourcePath = "/tmp/branch.md"),
+                TimelineDocument("Future", sourcePath = "/tmp/future.md"),
+                NodeTypeDocument(
+                    "Sample",
+                    props = mapOf("values" to PropSchema(PropType.array, items = PropSchema(PropType.number))),
+                    sourcePath = "/tmp/type.md",
+                ),
+                NodeDocument(
+                    id = "sample",
+                    type = "Sample",
+                    props = mapOf(
+                        "values" to RawArray(
+                            listOf(
+                                RawInteger(1),
+                                RawObject(mapOf("value" to RawInteger(2), "validTime" to commonTime)),
+                                RawObject(mapOf("value" to RawInteger(3), "validTime" to branchTime)),
+                            ),
+                        ),
+                    ),
+                    body = "@props{values(validTime=CommonEra)=20,values(validTime=Future)=4}",
+                    sourcePath = "/tmp/node.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.diagnostics.none { it.severity == Severity.Error }, result.diagnostics.joinToString("\n") { it.message })
+        val values = result.nodes.single().props.getValue("values") as ArrayValue
+        assertEquals(listOf(1.0, 20.0, 3.0, 4.0), values.values.map { (it as NumberValue).value })
+        assertTrue(values.elements[0].validTime.isEmpty())
+        assertEquals("CommonEra", values.elements[1].validTime.single().timeline)
+        assertEquals("Branch", values.elements[2].validTime.single().timeline)
+        assertEquals("Future", values.elements[3].validTime.single().timeline)
+    }
+
+    @Test
+    fun `body array props canonicalize numeric timecodes and duplicate OR entries when merging`() {
+        fun validTime(timeline: String, timecode: RawValue? = null): RawObject =
+            RawObject(
+                buildMap {
+                    put("timeline", RawString(timeline))
+                    timecode?.let { put("from", RawObject(mapOf("timecode" to it))) }
+                },
+            )
+
+        val result = compiler().compile(
+            listOf(
+                TimelineDocument("A", sourcePath = "/tmp/a.md"),
+                TimelineDocument("B", sourcePath = "/tmp/b.md"),
+                NodeTypeDocument(
+                    "Sample",
+                    props = mapOf("values" to PropSchema(PropType.array, items = PropSchema(PropType.number))),
+                    sourcePath = "/tmp/type.md",
+                ),
+                NodeDocument(
+                    id = "sample",
+                    type = "Sample",
+                    props = mapOf(
+                        "values" to RawArray(
+                            listOf(
+                                RawObject(
+                                    mapOf(
+                                        "value" to RawInteger(1),
+                                        "validTime" to RawArray(listOf(validTime("A", RawNumber(1.0)))),
+                                    ),
+                                ),
+                                RawObject(
+                                    mapOf(
+                                        "value" to RawInteger(3),
+                                        "validTime" to RawArray(listOf(validTime("B"))),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                    body = """
+                        @props{
+                          values(validTime=A(from=1))=2,
+                          values(validTime=[B,B])=4
+                        }
+                    """.trimIndent(),
+                    sourcePath = "/tmp/node.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.diagnostics.none { it.severity == Severity.Error }, result.diagnostics.joinToString("\n") { it.message })
+        val values = result.nodes.single().props.getValue("values") as ArrayValue
+        assertEquals(listOf(2.0, 4.0), values.values.map { (it as NumberValue).value })
+        assertEquals(listOf("A"), values.elements[0].validTime.map { it.timeline })
+        assertEquals(listOf("B", "B"), values.elements[1].validTime.map { it.timeline })
+    }
+
+    @Test
     fun `body props keep fallback and timed assertions for the same property`() {
         val result = compiler().compile(
             listOf(

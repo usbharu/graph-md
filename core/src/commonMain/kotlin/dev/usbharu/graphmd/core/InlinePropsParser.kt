@@ -103,17 +103,8 @@ class InlinePropsParser(private val input: String) {
         }
     }
 
-    private fun validTimeSignature(validTime: RawArray): String =
-        validTime.values.map { entry ->
-            val time = entry as? RawObject ?: return@map rawValueToJsonString(entry)
-            fun point(name: String): String {
-                val point = time.values[name] as? RawObject ?: return ""
-                return listOf("value", "timecode").joinToString(";") { key ->
-                    point.values[key]?.let(::rawValueToJsonString) ?: ""
-                }
-            }
-            "${(time.values["timeline"] as? RawString)?.value}|${point("from")}|${point("to")}"
-        }.sorted().joinToString("||")
+    private fun validTimeSignature(validTime: RawArray): RawValidTimeKey =
+        rawValidTimeKey(validTime)
 
     private fun parseKeyAnnotation(): KeyAnnotation {
         expect('(')
