@@ -33,6 +33,22 @@ class GraphDocumentAnalyzerTest {
     }
 
     @Test
+    fun `normalizes CRLF and lone CR without adding logical lines`() {
+        val text = "---\r\nkind: NodeType\r\rid: Person\n---"
+        val analysis = analyzer.analyze(text, "/tmp/Person.md")
+
+        assertEquals("---\nkind: NodeType\n\nid: Person\n---", analysis.text)
+        assertEquals("Person", analysis.definitions.single().id)
+        assertEquals(
+            "Person",
+            analysis.text.substring(
+                analysis.definitions.single().range.start,
+                analysis.definitions.single().range.end,
+            ),
+        )
+    }
+
+    @Test
     fun `extracts node definitions and type references and body relation references`() {
         val text = """
             ---
