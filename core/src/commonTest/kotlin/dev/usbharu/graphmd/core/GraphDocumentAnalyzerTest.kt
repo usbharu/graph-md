@@ -246,6 +246,103 @@ class GraphDocumentAnalyzerTest {
     }
 
     @Test
+    fun `extracts only timeline value tokens from inline GraphMD syntax`() {
+        val text = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            ---
+            @props(validTime=[
+              CommonEra,
+              Branch(from={value="today",timecode=1},to={timeline=Endpoint,timecode=2})
+            ]){
+              born={timeline="QuotedEra",timecode=1},
+              active={from={timeline=Past,timecode=1},to={timeline=Future,timecode=2}},
+              note="validTime=today and timeline=Fake",
+              escaped="say \"timeline=AlsoFake\"",
+              invalidSingleQuoted='timeline=SingleFake'
+            }
+        """.trimIndent()
+
+        val analysis = analyzer.analyze(text, "/tmp/alice.md")
+        val timelines = analysis.references.filter { it.kind == ReferenceTargetKind.Timeline }
+
+        assertEquals(
+            setOf("CommonEra", "Branch", "Endpoint", "QuotedEra", "Past", "Future"),
+            timelines.map { it.targetId }.toSet(),
+        )
+        assertEquals(timelines.size, timelines.map { it.range }.distinct().size)
+        assertTrue(timelines.none { it.targetId in setOf("today", "Fake", "AlsoFake", "SingleFake", "from", "to", "timecode") })
+        timelines.forEach { reference ->
+            assertEquals(reference.targetId, text.substring(reference.range.start, reference.range.end))
+        }
+    }
+
+    @Test
+    fun `keeps parsed timeline references before incomplete inline syntax`() {
+        val text = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            ---
+            @props{first={timeline=CommonEra,timecode=1}, second={timeline=}}
+        """.trimIndent()
+
+        val timelines = analyzer.analyze(text, "/tmp/alice.md").references
+            .filter { it.kind == ReferenceTargetKind.Timeline }
+
+        assertEquals(listOf("CommonEra"), timelines.map { it.targetId })
+    }
+
+    @Test
+    fun `recovers timeline tokens from unclosed directives without consuming following prose`() {
+        val text = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            ---
+            @props(validTime=[First, Second(
+            ordinary prose timeline=Fake
+            @props(validTime=Real){age=1}
+            @props{born={timeline=ObjectEra,timecode=1}
+            more prose timeline=AlsoFake
+            @link(validTime=LinkEra
+            final prose timeline=LastFake
+            @link(validTime=SameLine @props(validTime=AfterSame){x=1}
+        """.trimIndent()
+
+        val timelines = analyzer.analyze(text, "/tmp/alice.md").references
+            .filter { it.kind == ReferenceTargetKind.Timeline }
+
+        assertEquals(
+            listOf("First", "Real", "ObjectEra", "LinkEra", "SameLine", "AfterSame"),
+            timelines.map { it.targetId },
+        )
+    }
+
+    @Test
+    fun `ignores timeline-looking syntax in indented fenced and inline code`() {
+        val body = listOf(
+            "    @props(validTime=SpaceFake){x={timeline=SpaceObjectFake}}",
+            "\t@link(validTime=TabFake)[Bob](bob friendOf)",
+            "`@props(validTime=SpanFake){x=1}`",
+            "```",
+            "@link(validTime=FenceFake)[Bob](bob friendOf)",
+            "```",
+            "@props(validTime=Real){x=1}",
+        ).joinToString("\n")
+        val text = "---\nid: alice\nkind: Node\ntype: Person\n---\n$body"
+
+        val timelines = analyzer.analyze(text, "/tmp/alice.md").references
+            .filter { it.kind == ReferenceTargetKind.Timeline }
+
+        assertEquals(listOf("Real"), timelines.map { it.targetId })
+    }
+
+    @Test
     fun `resets current list field when a non indented non mapping line appears`() {
         val text = """
             ---

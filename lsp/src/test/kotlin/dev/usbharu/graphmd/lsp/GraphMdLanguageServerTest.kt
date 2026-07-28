@@ -29,7 +29,10 @@ import org.eclipse.lsp4j.InsertTextFormat
 import org.eclipse.lsp4j.MessageActionItem
 import org.eclipse.lsp4j.MessageParams
 import org.eclipse.lsp4j.PublishDiagnosticsParams
+import org.eclipse.lsp4j.ReferenceContext
+import org.eclipse.lsp4j.ReferenceParams
 import org.eclipse.lsp4j.Range
+import org.eclipse.lsp4j.RenameParams
 import org.eclipse.lsp4j.Position
 import org.eclipse.lsp4j.ShowMessageRequestParams
 import org.eclipse.lsp4j.TextDocumentContentChangeEvent
@@ -673,6 +676,64 @@ class GraphMdLanguageServerTest {
         assertTrue(analysis.references.any { it.kind == ReferenceTargetKind.Node && it.targetId == "bob" })
         assertTrue(analysis.references.any { it.kind == ReferenceTargetKind.RelType && it.targetId == "friendOf" })
         assertEquals(2, analysis.references.count { it.kind == ReferenceTargetKind.Timeline && it.targetId == "CommonEra" })
+    }
+
+    @Test
+    fun `inline timeline token supports definition references rename and exact unknown diagnostic ranges`() {
+        val timelineUri = "file:///workspace/timelines/CommonEra.md"
+        val missingUri = "file:///workspace/missing.md"
+        val quotedUri = "file:///workspace/quoted.md"
+        val missingText = """
+            ---
+            id: missing
+            kind: Node
+            type: Person
+            ---
+            @props{born={timeline=MissingEra,timecode=1},note="validTime=today timeline=Fake"}
+        """.trimIndent()
+        val quotedText = """
+            ---
+            id: quoted
+            kind: Node
+            type: Person
+            ---
+            😀 @props{born={timeline="CommonEra",timecode=1}}
+        """.trimIndent()
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/Person.md" to """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    props:
+                      born:
+                        type: instant
+                        timeline: "*"
+                      note:
+                        type: string
+                    ---
+                """.trimIndent(),
+                timelineUri to "---\nid: CommonEra\nkind: Timeline\ntimecode:\n  type: number\n---",
+                missingUri to missingText,
+                quotedUri to quotedText,
+            ),
+        )
+
+        val quotedOffset = quotedText.indexOf("CommonEra") + 1
+        assertEquals(timelineUri, fixture.definitions(quotedUri, quotedOffset).single().uri)
+
+        val references = fixture.references(quotedUri, quotedOffset)
+        assertEquals(2, references.size)
+        assertTrue(references.any { it.uri == timelineUri && it.range.start == Position(1, 4) })
+        assertTrue(references.any { it.uri == quotedUri && it.range.start == Position(5, 26) && it.range.end == Position(5, 35) })
+
+        val rename = fixture.rename(quotedUri, quotedOffset, "ModernEra")!!
+        assertEquals("ModernEra", rename.changes.getValue(quotedUri).single().newText)
+        assertEquals(Range(Position(5, 26), Position(5, 35)), rename.changes.getValue(quotedUri).single().range)
+
+        val unknown = fixture.diagnostics.getValue(missingUri).single { it.message == "Unknown Timeline: MissingEra" }
+        assertEquals(Range(Position(5, 22), Position(5, 32)), unknown.range)
+        assertTrue(fixture.diagnostics.getValue(missingUri).none { "today" in it.message || "Fake" in it.message })
     }
 
     @Test
@@ -1926,12 +1987,27 @@ class GraphMdLanguageServerTest {
         val documents: Map<String, String>,
     ) {
         fun definitions(uri: String, offset: Int): List<org.eclipse.lsp4j.Location> {
+            return server.textDocumentService.definition(
+                DefinitionParams(TextDocumentIdentifier(uri), position(uri, offset)),
+            ).get().left.orEmpty()
+        }
+
+        fun references(uri: String, offset: Int): List<org.eclipse.lsp4j.Location> {
+            return server.textDocumentService.references(
+                ReferenceParams(TextDocumentIdentifier(uri), position(uri, offset), ReferenceContext(true)),
+            ).get().orEmpty()
+        }
+
+        fun rename(uri: String, offset: Int, newName: String) =
+            server.textDocumentService.rename(
+                RenameParams(TextDocumentIdentifier(uri), position(uri, offset), newName),
+            ).get()
+
+        private fun position(uri: String, offset: Int): Position {
             val text = documents.getValue(uri)
             val line = text.substring(0, offset).count { it == '\n' }
             val lineStart = text.lastIndexOf('\n', offset - 1).let { if (it < 0) 0 else it + 1 }
-            return server.textDocumentService.definition(
-                DefinitionParams(TextDocumentIdentifier(uri), Position(line, offset - lineStart)),
-            ).get().left.orEmpty()
+            return Position(line, offset - lineStart)
         }
 
         fun actions(uri: String, message: String): List<CodeAction> {

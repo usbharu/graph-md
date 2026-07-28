@@ -294,7 +294,7 @@ class GraphDocumentAnalyzer {
 
     private fun extractBodyReferences(body: String, baseOffset: Int): List<SymbolReference> {
         val refs = mutableListOf<SymbolReference>()
-        val masked = maskCodeRegions(body)
+        val masked = maskMarkdownCodeRegions(body)
         var index = 0
         while (index < masked.length) {
             if (masked[index] == '@' && !isEscaped(masked, index)) {
@@ -364,31 +364,6 @@ class GraphDocumentAnalyzer {
             }
         }
         return null
-    }
-
-    private fun maskCodeRegions(body: String): String {
-        val chars = body.toCharArray()
-        var index = 0
-        var lineStart = true
-        while (index < chars.size) {
-            if (lineStart && body.startsWith("```", index)) {
-                val end = body.indexOf("\n```", index + 3).let { if (it >= 0) it + 4 else chars.size }
-                for (position in index until minOf(end, chars.size)) chars[position] = ' '
-                index = end
-                lineStart = true
-                continue
-            }
-            if (chars[index] == '`') {
-                val end = body.indexOf('`', index + 1).let { if (it >= 0) it else chars.size - 1 }
-                for (position in index..end) chars[position] = ' '
-                index = end + 1
-                lineStart = false
-                continue
-            }
-            lineStart = chars[index] == '\n'
-            index += 1
-        }
-        return chars.concatToString()
     }
 
     private fun findUnescaped(text: String, target: Char, start: Int): Int? {
@@ -468,50 +443,123 @@ class GraphDocumentAnalyzer {
 
     private fun extractInlineTimelineReferences(body: String, baseOffset: Int): List<SymbolReference> {
         val references = mutableListOf<SymbolReference>()
-        val masked = maskCodeRegions(body)
-        Regex("""validTime\s*=\s*""").findAll(masked).forEach { marker ->
-            var cursor = marker.range.last + 1
-            val end = when (masked.getOrNull(cursor)) {
-                '[' -> readBalancedEnd(masked, cursor, '[', ']') ?: cursor
-                else -> {
-                    var depth = 0
-                    var index = cursor
-                    while (index < masked.length) {
-                        val char = masked[index]
-                        if (char == '(') depth++
-                        if (char == ')' && depth-- == 0) break
-                        if (depth == 0 && char in setOf(',', '}', '\n')) break
-                        index++
-                    }
-                    index
+        val masked = maskMarkdownCodeRegions(body)
+        var index = 0
+        while (index < masked.length) {
+            val directive = when {
+                masked.startsWith("@props", index) &&
+                    !isEscaped(masked, index) &&
+                    !isIdentifierPart(masked.getOrNull(index + "@props".length)) -> "@props"
+                masked.startsWith("@link", index) &&
+                    !isEscaped(masked, index) &&
+                    !isIdentifierPart(masked.getOrNull(index + "@link".length)) -> "@link"
+                else -> null
+            }
+            if (directive == null) {
+                index += 1
+                continue
+            }
+
+            var cursor = index + directive.length
+            if (masked.getOrNull(cursor) == '(') {
+                val closedArgumentsEnd = readBalancedEnd(masked, cursor, '(', ')')
+                val argumentsEnd = closedArgumentsEnd ?: incompleteInlineSyntaxEnd(masked, cursor + 1)
+                collectParsedTimelineReferences(
+                    parser = InlinePropsParser(
+                        body.substring(cursor + 1, if (closedArgumentsEnd != null) argumentsEnd - 1 else argumentsEnd),
+                    ),
+                    baseOffset = baseOffset + cursor + 1,
+                    references = references,
+                    parse = InlinePropsParser::parseValidTimeArgument,
+                )
+                if (closedArgumentsEnd == null) {
+                    index = argumentsEnd.coerceAtLeast(index + 1)
+                    continue
                 }
+                cursor = argumentsEnd
             }
-            val expression = body.substring(cursor, end.coerceAtMost(body.length))
-            Regex("""[A-Za-z_][A-Za-z0-9_.:-]*""").findAll(expression).forEach { token ->
-                if (token.value in setOf("from", "to", "timecode", "value")) return@forEach
-                val absoluteStart = baseOffset + cursor + token.range.first
-                references += SymbolReference(
-                    token.value,
-                    ReferenceTargetKind.Timeline,
-                    "validTime.timeline",
-                    SourceRange(absoluteStart, absoluteStart + token.value.length),
+
+            if (masked.getOrNull(cursor) == '{') {
+                val objectEnd = readBalancedEnd(masked, cursor, '{', '}')
+                    ?: incompleteInlineSyntaxEnd(masked, cursor + 1)
+                collectParsedTimelineReferences(
+                    parser = InlinePropsParser(body.substring(cursor, objectEnd)),
+                    baseOffset = baseOffset + cursor,
+                    references = references,
+                    parse = { parseObject() },
                 )
+                if (masked.getOrNull(objectEnd - 1) != '}') {
+                    index = objectEnd.coerceAtLeast(index + 1)
+                    continue
+                }
+                cursor = objectEnd
             }
-        }
-        Regex("""\btimeline\s*=\s*([A-Za-z_][A-Za-z0-9_.:-]*)""").findAll(masked).forEach { match ->
-            val token = match.groups[1] ?: return@forEach
-            val tokenStart = match.range.first + match.value.lastIndexOf(token.value)
-            val absoluteStart = baseOffset + tokenStart
-            if (references.none { it.range.start == absoluteStart }) {
-                references += SymbolReference(
-                    token.value,
-                    ReferenceTargetKind.Timeline,
-                    "timeline",
-                    SourceRange(absoluteStart, absoluteStart + token.value.length),
-                )
-            }
+            index = cursor.coerceAtLeast(index + 1)
         }
         return references
+    }
+
+    private fun incompleteInlineSyntaxEnd(masked: String, contentStart: Int): Int {
+        var index = contentStart
+        var nextLineStart = masked.indexOf('\n', contentStart).let { if (it >= 0) it + 1 else masked.length }
+        var inString = false
+        var escaped = false
+        while (index < masked.length) {
+            val char = masked[index]
+            if (inString) {
+                when {
+                    escaped -> escaped = false
+                    char == '\\' -> escaped = true
+                    char == '"' -> inString = false
+                }
+            } else {
+                if (char == '"') {
+                    inString = true
+                } else if (
+                    char == '@' &&
+                    !isEscaped(masked, index) &&
+                    (
+                        masked.startsWith("@props", index) &&
+                            !isIdentifierPart(masked.getOrNull(index + "@props".length)) ||
+                            masked.startsWith("@link", index) &&
+                            !isIdentifierPart(masked.getOrNull(index + "@link".length))
+                        )
+                ) {
+                    return index
+                }
+            }
+            if (index == nextLineStart) {
+                val lineEnd = masked.indexOf('\n', index).let { if (it >= 0) it else masked.length }
+                val line = masked.substring(index, lineEnd)
+                if (line.isNotBlank() && line.firstOrNull()?.isWhitespace() == false) {
+                    return index
+                }
+                nextLineStart = if (lineEnd < masked.length) lineEnd + 1 else masked.length
+            }
+            index += 1
+        }
+        return masked.length
+    }
+
+    private fun collectParsedTimelineReferences(
+        parser: InlinePropsParser,
+        baseOffset: Int,
+        references: MutableList<SymbolReference>,
+        parse: InlinePropsParser.() -> Unit,
+    ) {
+        try {
+            parser.parse()
+        } catch (_: InlinePropsParseException) {
+            // Keep references parsed before an incomplete/invalid editor token.
+        }
+        parser.timelineReferences.forEach { parsed ->
+            references += SymbolReference(
+                parsed.targetId,
+                ReferenceTargetKind.Timeline,
+                parsed.field,
+                parsed.range.shiftedBy(baseOffset),
+            )
+        }
     }
 
     private fun extractYamlPropertyKeys(
@@ -556,7 +604,7 @@ class GraphDocumentAnalyzer {
         nodeTypeId: String,
     ): List<PropertyReference> {
         val references = mutableListOf<PropertyReference>()
-        val masked = maskCodeRegions(body)
+        val masked = maskMarkdownCodeRegions(body)
         var index = 0
         while (index < masked.length) {
             when {

@@ -93,12 +93,13 @@ class BodySyntaxExtractorTest {
 
     @Test
     fun `ignores indented code blocks`() {
-        val body = """
-                @props{name = "Ignored"}
-                @link{}[Ignored](ignored friendOf)
-
-            @link{}[Bob](bob friendOf)
-        """.trimIndent()
+        val body = listOf(
+            "    @props{name = \"Ignored\"}",
+            "    @link{}[Ignored](ignored friendOf)",
+            "\t@link{}[TabIgnored](tabIgnored friendOf)",
+            "",
+            "@link{}[Bob](bob friendOf)",
+        ).joinToString("\n")
 
         val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
 
