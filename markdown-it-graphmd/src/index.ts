@@ -8,8 +8,10 @@ export interface GraphMdOptions {
    * target identifier (spec §24). Use this to e.g. append `.html` for
    * static-site output. The optional render environment can be used when the
    * transformed href depends on the document currently being rendered.
+   * Return `null` when the target is unresolved or ambiguous to render the
+   * relation metadata and label without an `href`.
    */
-  hrefTransform?: (target: string, relType: string, env?: unknown) => string;
+  hrefTransform?: (target: string, relType: string, env?: unknown) => string | null;
 }
 
 /**

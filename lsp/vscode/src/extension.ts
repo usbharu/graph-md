@@ -2,12 +2,21 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { Executable, LanguageClient, LanguageClientOptions, ServerOptions, TransportKind } from "vscode-languageclient/node";
 import { graphMdPlugin } from "markdown-it-graphmd";
-import { relativeMarkdownHref } from "./preview-links";
+import {
+  loadPreviewTargetIndex,
+  PreviewSource,
+  PreviewTargetIndex,
+  resolveDocumentPreviewHref,
+  resolveMediaPreviewHref,
+} from "./preview-targets";
 import { GraphMdSearchViewProvider } from "./search-view";
 
 let client: LanguageClient | undefined;
-const mediaTargets = new Map<string, string>();
-const documentTargets = new Map<string, vscode.Uri>();
+let previewTargets: PreviewTargetIndex = {
+  documentsById: new Map(),
+  mediaByAlias: new Map(),
+};
+let previewTargetRefreshGeneration = 0;
 const semanticLegend = new vscode.SemanticTokensLegend([
   "graphmdRelationOperator",
   "graphmdRelationLabel",
@@ -21,7 +30,7 @@ export interface GraphMdMarkdownApi {
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<GraphMdMarkdownApi> {
-  await refreshMediaTargets();
+  await refreshPreviewTargets();
   const scriptName = process.platform === "win32" ? "lsp.bat" : "lsp";
   const command = context.asAbsolutePath(path.join("server", "bin", scriptName));
   const serverOptions: ServerOptions = {
@@ -31,9 +40,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<GraphM
 
   const watcher = vscode.workspace.createFileSystemWatcher("**/*.md");
   context.subscriptions.push(watcher);
-  context.subscriptions.push(watcher.onDidCreate(() => void refreshMediaTargets()));
-  context.subscriptions.push(watcher.onDidChange(() => void refreshMediaTargets()));
-  context.subscriptions.push(watcher.onDidDelete(() => void refreshMediaTargets()));
+  context.subscriptions.push(watcher.onDidCreate(() => void refreshPreviewTargets()));
+  context.subscriptions.push(watcher.onDidChange(() => void refreshPreviewTargets()));
+  context.subscriptions.push(watcher.onDidDelete(() => void refreshPreviewTargets()));
   context.subscriptions.push(
     vscode.languages.registerDocumentSemanticTokensProvider(
       { language: "markdown", scheme: "file" },
@@ -83,81 +92,51 @@ export async function activate(context: vscode.ExtensionContext): Promise<GraphM
   };
 }
 
-async function refreshMediaTargets(): Promise<void> {
+async function refreshPreviewTargets(): Promise<void> {
+  const generation = ++previewTargetRefreshGeneration;
   const files = await vscode.workspace.findFiles("**/*.md", "**/{node_modules,.git,build,dist}/**");
-  const next = new Map<string, string>();
-  const nextDocuments = new Map<string, vscode.Uri>();
-  await Promise.all(files.map(async (uri) => {
-    const bytes = await vscode.workspace.fs.readFile(uri);
-    const text = Buffer.from(bytes).toString("utf8");
-    const documentId = parseFrontMatterScalar(text, "id");
-    if (documentId) nextDocuments.set(documentId, uri);
-    const metadata = parseMediaFrontMatter(text);
-    if (!metadata) return;
-    next.set(metadata.id, metadata.url);
-    next.set(uri.toString(), metadata.url);
-    next.set(uri.fsPath, metadata.url);
-    next.set(path.basename(uri.fsPath), metadata.url);
-    next.set(path.basename(uri.fsPath, path.extname(uri.fsPath)), metadata.url);
+  const sources: PreviewSource[] = files.map((uri) => {
+    const workspaceRelativePaths: string[] = [];
     for (const folder of vscode.workspace.workspaceFolders ?? []) {
       const relative = path.relative(folder.uri.fsPath, uri.fsPath).replaceAll(path.sep, "/");
       if (!relative.startsWith("..")) {
-        next.set(relative, metadata.url);
-        next.set(`./${relative}`, metadata.url);
+        workspaceRelativePaths.push(relative);
       }
     }
-  }));
-  mediaTargets.clear();
-  next.forEach((url, key) => mediaTargets.set(key, url));
-  documentTargets.clear();
-  nextDocuments.forEach((url, key) => documentTargets.set(key, url));
-}
-
-function resolveDocumentHref(target: string, env?: unknown): string {
-  const mediaTarget = mediaTargets.get(target);
-  if (mediaTarget) return mediaTarget;
-
-  const targetUri = documentTargets.get(target);
-  const currentDocument = (env as { currentDocument?: vscode.Uri } | undefined)?.currentDocument;
-  if (
-    !targetUri ||
-    !currentDocument ||
-    targetUri.scheme !== currentDocument.scheme ||
-    targetUri.authority !== currentDocument.authority
-  ) {
-    return target;
+    return {
+      uri: uri.toString(),
+      filePath: uri.fsPath,
+      scheme: uri.scheme,
+      authority: uri.authority,
+      workspaceRelativePaths,
+    };
+  });
+  const next = await loadPreviewTargetIndex(sources, async (source) => {
+    const bytes = await vscode.workspace.fs.readFile(vscode.Uri.parse(source.uri));
+    return Buffer.from(bytes).toString("utf8");
+  });
+  if (generation === previewTargetRefreshGeneration) {
+    previewTargets = next;
   }
-
-  return relativeMarkdownHref(currentDocument.fsPath, targetUri.fsPath) ?? target;
 }
 
-function parseMediaFrontMatter(text: string): { id: string; url: string } | null {
-  if (parseFrontMatterScalar(text, "kind") !== "Media") return null;
-  const id = parseFrontMatterScalar(text, "id");
-  const url = parseFrontMatterScalar(text, "url");
-  return id && url ? { id, url } : null;
-}
-
-function parseFrontMatterScalar(text: string, name: string): string | null {
-  const normalized = text.replaceAll("\r\n", "\n");
-  if (!normalized.startsWith("---\n")) return null;
-  const end = normalized.indexOf("\n---", 4);
-  if (end < 0) return null;
-  const frontMatter = normalized.slice(4, end);
-  const match = new RegExp(`^${name}:\\s*(.+?)\\s*$`, "m").exec(frontMatter);
-  if (!match) return null;
-  return match[1].replace(/^(?:"(.*)"|'(.*)')$/, (_all, doubleQuoted, singleQuoted) => doubleQuoted ?? singleQuoted);
+function resolveDocumentHref(target: string, env?: unknown): string | null {
+  const currentDocument = (env as { currentDocument?: vscode.Uri } | undefined)?.currentDocument;
+  return resolveDocumentPreviewHref(
+    previewTargets,
+    target,
+    currentDocument
+      ? {
+          filePath: currentDocument.fsPath,
+          scheme: currentDocument.scheme,
+          authority: currentDocument.authority,
+        }
+      : undefined,
+  );
 }
 
 function resolveMediaHref(href: string): string | null {
-  const direct = mediaTargets.get(href);
-  if (direct) return direct;
-  try {
-    const decoded = decodeURIComponent(href);
-    return mediaTargets.get(decoded) ?? mediaTargets.get(path.basename(decoded)) ?? null;
-  } catch {
-    return mediaTargets.get(path.basename(href)) ?? null;
-  }
+  return resolveMediaPreviewHref(previewTargets, href);
 }
 
 export async function deactivate(): Promise<void> {
