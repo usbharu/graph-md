@@ -2,7 +2,12 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { Executable, LanguageClient, LanguageClientOptions, ServerOptions, TransportKind } from "vscode-languageclient/node";
 import { graphMdPlugin } from "markdown-it-graphmd";
-import { relativeMarkdownHref } from "./preview-links";
+import {
+  parseFrontMatterScalar,
+  parseMediaFrontMatter,
+  resolveGraphMdHref,
+  resolveMediaHref,
+} from "./preview-links";
 import { GraphMdSearchViewProvider } from "./search-view";
 
 let client: LanguageClient | undefined;
@@ -66,14 +71,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<GraphM
   return {
     extendMarkdownIt(md: any): any {
       md.use(graphMdPlugin, {
-        hrefTransform: (target: string, _relType: string, env?: unknown) => resolveDocumentHref(target, env),
+        hrefTransform: (target: string, _relType: string, env?: unknown) =>
+          resolveGraphMdHref(
+            target,
+            env as { currentDocument?: vscode.Uri } | undefined,
+            mediaTargets,
+            documentTargets,
+          ),
       });
       const defaultLinkOpen = md.renderer.rules.link_open ?? ((tokens: any[], idx: number, options: any, _env: any, self: any) => self.renderToken(tokens, idx, options));
       md.renderer.rules.link_open = (tokens: any[], idx: number, options: any, env: any, self: any): string => {
         const hrefIndex = tokens[idx].attrIndex("href");
         if (hrefIndex >= 0) {
           const href = tokens[idx].attrs[hrefIndex][1];
-          const resolved = resolveMediaHref(href);
+          const resolved = resolveMediaHref(href, mediaTargets);
           if (resolved) tokens[idx].attrs[hrefIndex][1] = resolved;
         }
         return defaultLinkOpen(tokens, idx, options, env, self);
@@ -111,53 +122,6 @@ async function refreshMediaTargets(): Promise<void> {
   next.forEach((url, key) => mediaTargets.set(key, url));
   documentTargets.clear();
   nextDocuments.forEach((url, key) => documentTargets.set(key, url));
-}
-
-function resolveDocumentHref(target: string, env?: unknown): string {
-  const mediaTarget = mediaTargets.get(target);
-  if (mediaTarget) return mediaTarget;
-
-  const targetUri = documentTargets.get(target);
-  const currentDocument = (env as { currentDocument?: vscode.Uri } | undefined)?.currentDocument;
-  if (
-    !targetUri ||
-    !currentDocument ||
-    targetUri.scheme !== currentDocument.scheme ||
-    targetUri.authority !== currentDocument.authority
-  ) {
-    return target;
-  }
-
-  return relativeMarkdownHref(currentDocument.fsPath, targetUri.fsPath) ?? target;
-}
-
-function parseMediaFrontMatter(text: string): { id: string; url: string } | null {
-  if (parseFrontMatterScalar(text, "kind") !== "Media") return null;
-  const id = parseFrontMatterScalar(text, "id");
-  const url = parseFrontMatterScalar(text, "url");
-  return id && url ? { id, url } : null;
-}
-
-function parseFrontMatterScalar(text: string, name: string): string | null {
-  const normalized = text.replaceAll("\r\n", "\n");
-  if (!normalized.startsWith("---\n")) return null;
-  const end = normalized.indexOf("\n---", 4);
-  if (end < 0) return null;
-  const frontMatter = normalized.slice(4, end);
-  const match = new RegExp(`^${name}:\\s*(.+?)\\s*$`, "m").exec(frontMatter);
-  if (!match) return null;
-  return match[1].replace(/^(?:"(.*)"|'(.*)')$/, (_all, doubleQuoted, singleQuoted) => doubleQuoted ?? singleQuoted);
-}
-
-function resolveMediaHref(href: string): string | null {
-  const direct = mediaTargets.get(href);
-  if (direct) return direct;
-  try {
-    const decoded = decodeURIComponent(href);
-    return mediaTargets.get(decoded) ?? mediaTargets.get(path.basename(decoded)) ?? null;
-  } catch {
-    return mediaTargets.get(path.basename(href)) ?? null;
-  }
 }
 
 export async function deactivate(): Promise<void> {
