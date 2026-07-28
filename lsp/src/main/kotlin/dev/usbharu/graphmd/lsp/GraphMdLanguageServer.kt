@@ -320,7 +320,7 @@ internal class GraphMdWorkspaceIndex(
         return contextualReferenceIds(document, position, referenceKind).map { id ->
             CompletionItem(id).apply {
                 this.kind = when (referenceKind) {
-                    ReferenceTargetKind.Node -> CompletionItemKind.Reference
+                    ReferenceTargetKind.Node, ReferenceTargetKind.Media -> CompletionItemKind.Reference
                     ReferenceTargetKind.NodeType, ReferenceTargetKind.RelType, ReferenceTargetKind.Timeline -> CompletionItemKind.Class
                 }
                 detail = referenceKind.name
@@ -335,6 +335,12 @@ internal class GraphMdWorkspaceIndex(
         val reference = analyzer.findReferenceAt(document.analysis, offset)
         if (reference != null) {
             return resolve(reference.kind, reference.targetId, documents).map { resolved ->
+                Location(resolved.uri, resolved.range())
+            }
+        }
+        val definition = analyzer.findDefinitionAt(document.analysis, offset)
+        if (definition != null) {
+            return symbolDefinitions(definition.kind, definition.id, documents).map { resolved ->
                 Location(resolved.uri, resolved.range())
             }
         }
@@ -359,10 +365,10 @@ internal class GraphMdWorkspaceIndex(
         val locations = mutableListOf<Location>()
         documents.forEach { indexed ->
             indexed.analysis.definitions
-                .filter { it.kind == reference.first && it.id == reference.second }
+                .filter { it.kind.sharesSymbolNamespaceWith(reference.first) && it.id == reference.second }
                 .forEach { locations += Location(indexed.uri, indexed.rangeOf(it.range)) }
             indexed.analysis.references
-                .filter { it.kind == reference.first && it.targetId == reference.second }
+                .filter { it.kind.acceptsDefinition(reference.first) && it.targetId == reference.second }
                 .forEach { locations += Location(indexed.uri, indexed.rangeOf(it.range)) }
         }
         return locations
@@ -372,29 +378,45 @@ internal class GraphMdWorkspaceIndex(
         val documents = documentsSnapshot()
         val document = documents.firstOrNull { it.uri == normalizeUri(uri) } ?: return null
         val offset = document.offsetAt(position)
+        val definition = analyzer.findDefinitionAt(document.analysis, offset)
         val symbol = analyzer.findReferenceAt(document.analysis, offset)?.let { it.kind to it.targetId }
-            ?: analyzer.findDefinitionAt(document.analysis, offset)?.let { it.kind to it.id }
+            ?: definition?.let { it.kind to it.id }
             ?: return null
-        val first = resolve(symbol.first, symbol.second, documents).firstOrNull()
+        val resolved = if (definition != null) {
+            symbolDefinitions(symbol.first, symbol.second, documents)
+        } else {
+            resolve(symbol.first, symbol.second, documents)
+        }
+        val resolvedKinds = resolved.map { it.kind }.distinct()
+        val displayKind = definition?.kind ?: resolvedKinds.singleOrNull()
+        val displayName = if (
+            definition == null &&
+            resolvedKinds.toSet() == setOf(ReferenceTargetKind.Node, ReferenceTargetKind.Media)
+        ) {
+            "Node or Media"
+        } else {
+            (displayKind ?: symbol.first).displayName()
+        }
         val contents = MarkupContent().apply {
             kind = MarkupKind.MARKDOWN
             value = buildString {
                 append("**")
-                append(
-                    when (symbol.first) {
-                        ReferenceTargetKind.Node -> "Node"
-                        ReferenceTargetKind.NodeType -> "NodeType"
-                        ReferenceTargetKind.RelType -> "RelType"
-                        ReferenceTargetKind.Timeline -> "Timeline"
-                    },
-                )
+                append(displayName)
                 append("** `")
                 append(symbol.second)
                 append("`")
-                if (first != null) {
+                if (definition != null) {
                     append("\n\nDefined in `")
-                    append(first.path.fileName.toString())
+                    append(document.path.fileName.toString())
                     append("`")
+                } else if (resolved.size == 1) {
+                    append("\n\nDefined in `")
+                    append(resolved.single().path.fileName.toString())
+                    append("`")
+                } else if (resolved.size > 1) {
+                    append("\n\nAmbiguous: ")
+                    append(resolved.size)
+                    append(" definitions")
                 }
             }
         }
@@ -412,10 +434,10 @@ internal class GraphMdWorkspaceIndex(
         val changes = linkedMapOf<String, MutableList<TextEdit>>()
         documents.forEach { indexed ->
             indexed.analysis.definitions
-                .filter { it.kind == symbol.first && it.id == symbol.second }
+                .filter { it.kind.sharesSymbolNamespaceWith(symbol.first) && it.id == symbol.second }
                 .forEach { changes.getOrPut(indexed.uri) { mutableListOf() } += TextEdit(indexed.rangeOf(it.range), newName) }
             indexed.analysis.references
-                .filter { it.kind == symbol.first && it.targetId == symbol.second }
+                .filter { it.kind.acceptsDefinition(symbol.first) && it.targetId == symbol.second }
                 .forEach { changes.getOrPut(indexed.uri) { mutableListOf() } += TextEdit(indexed.rangeOf(it.range), newName) }
         }
         return WorkspaceEdit(changes)
@@ -985,6 +1007,7 @@ internal class GraphMdWorkspaceIndex(
     private fun nextAvailableId(id: String, kindName: String): String {
         val kind = when (kindName) {
             "Node" -> ReferenceTargetKind.Node
+            "Media" -> ReferenceTargetKind.Media
             "NodeType" -> ReferenceTargetKind.NodeType
             "RelType" -> ReferenceTargetKind.RelType
             "Timeline" -> ReferenceTargetKind.Timeline
@@ -1005,7 +1028,7 @@ internal class GraphMdWorkspaceIndex(
         val folder = when (target.kind) {
             ReferenceTargetKind.NodeType, ReferenceTargetKind.RelType -> "types"
             ReferenceTargetKind.Timeline -> "timelines"
-            ReferenceTargetKind.Node -> "nodes"
+            ReferenceTargetKind.Node, ReferenceTargetKind.Media -> "nodes"
         }
         val workspaceRoots = synchronized(this) { roots.toList() }
         val base = workspaceRoots.firstOrNull { document.path.startsWith(it) }
@@ -1025,6 +1048,7 @@ internal class GraphMdWorkspaceIndex(
             ReferenceTargetKind.RelType -> "---\nid: ${target.id}\nkind: RelType\n---\n"
             ReferenceTargetKind.Timeline -> "---\nid: ${target.id}\nkind: Timeline\ntimecode:\n  type: number\n---\n"
             ReferenceTargetKind.Node -> "---\nid: ${target.id}\nkind: Node\ntype: $sourceType\n---\n"
+            ReferenceTargetKind.Media -> "---\nid: ${target.id}\nkind: Media\ntype: $sourceType\nurl: \"\"\n---\n"
         }
         val changes = listOf<Either<TextDocumentEdit, ResourceOperation>>(
             Either.forRight(CreateFile(newUri, CreateFileOptions(false, true))),
@@ -1085,6 +1109,7 @@ internal class GraphMdWorkspaceIndex(
 
     private fun ReferenceTargetKind.displayName(): String = when (this) {
         ReferenceTargetKind.Node -> "Node"
+        ReferenceTargetKind.Media -> "Media"
         ReferenceTargetKind.NodeType -> "NodeType"
         ReferenceTargetKind.RelType -> "RelType"
         ReferenceTargetKind.Timeline -> "Timeline"
@@ -1197,7 +1222,7 @@ internal class GraphMdWorkspaceIndex(
             ?: frontMatterScalar(document.text, "type")
         val targetType = context.targetId?.let { target -> compiled.nodes.firstOrNull { it.id == target }?.type }
         return when (kind) {
-            ReferenceTargetKind.Node -> {
+            ReferenceTargetKind.Node, ReferenceTargetKind.Media -> {
                 val allowedTargets = context.relType?.let { rel -> compiled.relTypes.firstOrNull { it.id == rel }?.to }
                 compiled.nodes
                     .filter { node -> allowedTargets == null || allowedTargets.any { nodeTypeMatches(node.type, it, compiled.nodeTypes) } }
@@ -1445,14 +1470,15 @@ internal class GraphMdWorkspaceIndex(
 
     private fun completionIds(kind: ReferenceTargetKind): List<String> {
         return when (kind) {
-            ReferenceTargetKind.Node -> definitionsOf(kind).map { it.id }
+            ReferenceTargetKind.Node -> definitionsCompatibleWith(kind).map { it.id }
+            ReferenceTargetKind.Media -> definitionsOf(kind).map { it.id }
             ReferenceTargetKind.NodeType, ReferenceTargetKind.RelType -> definitionsOf(kind).filter { it.path.toString().contains("/types/") }.ifEmpty { definitionsOf(kind) }.map { it.id }
             ReferenceTargetKind.Timeline -> definitionsOf(kind).map { it.id }
         }.distinct().sorted()
     }
 
     private fun resolve(kind: ReferenceTargetKind, id: String): List<IndexedDefinition> {
-        return definitionsOf(kind).filter { it.id == id }
+        return definitionsCompatibleWith(kind).filter { it.id == id }
     }
 
     private fun resolve(
@@ -1460,7 +1486,7 @@ internal class GraphMdWorkspaceIndex(
         id: String,
         documents: List<IndexedDocument>,
     ): List<IndexedDefinition> {
-        return definitionsOf(kind, documents).filter { it.id == id }
+        return definitionsCompatibleWith(kind, documents).filter { it.id == id }
     }
 
     private fun resolveProperty(reference: PropertyReference): List<IndexedPropertyDefinition> =
@@ -1532,6 +1558,34 @@ internal class GraphMdWorkspaceIndex(
         return definitionsOf(kind, snapshot)
     }
 
+    private fun definitionsCompatibleWith(kind: ReferenceTargetKind): List<IndexedDefinition> {
+        val snapshot = synchronized(this) { documents.values.toList() }
+        return definitionsCompatibleWith(kind, snapshot)
+    }
+
+    private fun definitionsCompatibleWith(
+        kind: ReferenceTargetKind,
+        documents: List<IndexedDocument>,
+    ): List<IndexedDefinition> {
+        return documents.flatMap { indexed ->
+            indexed.analysis.definitions
+                .filter { kind.acceptsDefinition(it.kind) }
+                .map { IndexedDefinition(indexed.uri, indexed.path, it.id, it.range, indexed, it.kind) }
+        }
+    }
+
+    private fun symbolDefinitions(
+        kind: ReferenceTargetKind,
+        id: String,
+        documents: List<IndexedDocument>,
+    ): List<IndexedDefinition> {
+        return documents.flatMap { indexed ->
+            indexed.analysis.definitions
+                .filter { it.kind.sharesSymbolNamespaceWith(kind) && it.id == id }
+                .map { IndexedDefinition(indexed.uri, indexed.path, it.id, it.range, indexed, it.kind) }
+        }
+    }
+
     private fun definitionsOf(
         kind: ReferenceTargetKind,
         documents: List<IndexedDocument>,
@@ -1539,7 +1593,7 @@ internal class GraphMdWorkspaceIndex(
         return documents.flatMap { indexed ->
             indexed.analysis.definitions
                 .filter { it.kind == kind }
-                .map { IndexedDefinition(indexed.uri, indexed.path, it.id, it.range, indexed) }
+                .map { IndexedDefinition(indexed.uri, indexed.path, it.id, it.range, indexed, it.kind) }
         }
     }
 
@@ -2995,6 +3049,7 @@ private data class IndexedDefinition(
     val id: String,
     val sourceRange: SourceRange,
     val document: IndexedDocument,
+    val kind: ReferenceTargetKind,
 ) {
     fun range(): Range = document.rangeOf(sourceRange)
 }

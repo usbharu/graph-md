@@ -75,6 +75,28 @@ class GraphDocumentAnalyzerTest {
     }
 
     @Test
+    fun `preserves Media as a distinct definition kind and id range`() {
+        val text = """
+            ---
+            id: portrait
+            kind: Media
+            type: Image
+            url: https://example.com/portrait.png
+            ---
+        """.trimIndent()
+
+        val definition = analyzer.analyze(text, "/tmp/portrait.md").definitions.single()
+
+        assertEquals(ReferenceTargetKind.Media, definition.kind)
+        assertEquals("portrait", definition.id)
+        assertEquals(text.indexOf("portrait"), definition.range.start)
+        assertEquals(text.indexOf("portrait") + "portrait".length, definition.range.end)
+        assertTrue(ReferenceTargetKind.Node.acceptsDefinition(definition.kind))
+        assertTrue(ReferenceTargetKind.Node.sharesSymbolNamespaceWith(definition.kind))
+        assertTrue(!ReferenceTargetKind.Media.acceptsDefinition(ReferenceTargetKind.Node))
+    }
+
+    @Test
     fun `extracts quoted and stripped yaml scalars in body and front matter`() {
         val text = """
             ---

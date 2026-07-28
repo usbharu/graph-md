@@ -4,10 +4,19 @@ import dev.usbharu.graphmd.core.model.*
 
 enum class ReferenceTargetKind {
     Node,
+    Media,
     NodeType,
     RelType,
     Timeline,
 }
+
+fun ReferenceTargetKind.acceptsDefinition(definitionKind: ReferenceTargetKind): Boolean =
+    this == definitionKind || (this == ReferenceTargetKind.Node && definitionKind == ReferenceTargetKind.Media)
+
+fun ReferenceTargetKind.sharesSymbolNamespaceWith(other: ReferenceTargetKind): Boolean =
+    this == other ||
+        (this in setOf(ReferenceTargetKind.Node, ReferenceTargetKind.Media) &&
+            other in setOf(ReferenceTargetKind.Node, ReferenceTargetKind.Media))
 
 data class SymbolDefinition(
     val id: String,
@@ -751,7 +760,7 @@ class GraphDocumentAnalyzer {
 
     private fun definitionKind(document: GraphDocument): ReferenceTargetKind {
         return when (document) {
-            is NodeDocument -> ReferenceTargetKind.Node
+            is NodeDocument -> if (document.kind == DocumentKind.Media) ReferenceTargetKind.Media else ReferenceTargetKind.Node
             is NodeTypeDocument -> ReferenceTargetKind.NodeType
             is RelTypeDocument -> ReferenceTargetKind.RelType
             is TimelineDocument -> ReferenceTargetKind.Timeline

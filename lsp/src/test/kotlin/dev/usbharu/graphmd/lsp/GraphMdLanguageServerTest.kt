@@ -23,12 +23,16 @@ import org.eclipse.lsp4j.DefinitionParams
 import org.eclipse.lsp4j.DiagnosticSeverity
 import org.eclipse.lsp4j.FileChangeType
 import org.eclipse.lsp4j.FileEvent
+import org.eclipse.lsp4j.HoverParams
 import org.eclipse.lsp4j.InitializeParams
 import org.eclipse.lsp4j.InitializedParams
 import org.eclipse.lsp4j.InsertTextFormat
 import org.eclipse.lsp4j.MessageActionItem
 import org.eclipse.lsp4j.MessageParams
 import org.eclipse.lsp4j.PublishDiagnosticsParams
+import org.eclipse.lsp4j.ReferenceContext
+import org.eclipse.lsp4j.ReferenceParams
+import org.eclipse.lsp4j.RenameParams
 import org.eclipse.lsp4j.Range
 import org.eclipse.lsp4j.Position
 import org.eclipse.lsp4j.ShowMessageRequestParams
@@ -651,6 +655,89 @@ class GraphMdLanguageServerTest {
         assertEquals("Person", analysis.references.first().targetId)
         assertEquals("bob", analysis.references[1].targetId)
         assertEquals("friendOf", analysis.references[2].targetId)
+    }
+
+    @Test
+    fun `Media definitions retain their kind across hover navigation references rename and completion`() {
+        val mediaUri = "file:///workspace/portrait.md"
+        val sourceUri = "file:///workspace/alice.md"
+        val nodeUri = "file:///workspace/bob.md"
+        val mediaText = """
+            ---
+            id: portrait
+            kind: Media
+            type: Image
+            url: https://example.com/portrait.png
+            ---
+        """.trimIndent()
+        val sourceText = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            ---
+            @link{}[Portrait](portrait shows)
+        """.trimIndent()
+        val nodeText = """
+            ---
+            id: bob
+            kind: Node
+            type: Person
+            ---
+        """.trimIndent()
+        val fixture = serverFixture(
+            mapOf(mediaUri to mediaText, sourceUri to sourceText, nodeUri to nodeText),
+        )
+        val mediaId = mediaText.indexOf("portrait")
+        val relationTarget = sourceText.lastIndexOf("portrait")
+
+        assertEquals(mediaUri, fixture.definitions(sourceUri, relationTarget + 1).single().uri)
+        assertEquals(mediaUri, fixture.definitions(mediaUri, mediaId + 1).single().uri)
+        assertTrue(fixture.hover(mediaUri, mediaId + 1).startsWith("**Media** `portrait`"))
+        assertTrue(fixture.hover(sourceUri, relationTarget + 1).startsWith("**Media** `portrait`"))
+        assertTrue(fixture.hover(nodeUri, nodeText.indexOf("bob") + 1).startsWith("**Node** `bob`"))
+
+        val references = fixture.references(mediaUri, mediaId + 1)
+        assertEquals(setOf(mediaUri, sourceUri), references.map { it.uri }.toSet())
+        val rename = fixture.rename(mediaUri, mediaId + 1, "newPortrait")
+        assertEquals(setOf(mediaUri, sourceUri), rename.changes.keys)
+        assertEquals(2, rename.changes.values.sumOf { it.size })
+
+        assertTrue("portrait" in fixture.completions(sourceUri, relationTarget + 2).map { it.label })
+    }
+
+    @Test
+    fun `Node and Media with the same id remain ambiguous in their shared namespace`() {
+        val nodeUri = "file:///workspace/shared-node.md"
+        val mediaUri = "file:///workspace/shared-media.md"
+        val sourceUri = "file:///workspace/source.md"
+        val sourceText = """
+            ---
+            id: source
+            kind: Node
+            type: Person
+            ---
+            @link{}[Shared](shared relatesTo)
+        """.trimIndent()
+        val fixture = serverFixture(
+            mapOf(
+                nodeUri to "---\nid: shared\nkind: Node\ntype: Person\n---",
+                mediaUri to "---\nid: shared\nkind: Media\ntype: Image\nurl: https://example.com/shared.png\n---",
+                sourceUri to sourceText,
+            ),
+        )
+        val targetOffset = sourceText.lastIndexOf("shared") + 1
+
+        assertEquals(setOf(nodeUri, mediaUri), fixture.definitions(sourceUri, targetOffset).map { it.uri }.toSet())
+        val hover = fixture.hover(sourceUri, targetOffset)
+        assertTrue(hover.startsWith("**Node or Media** `shared`"))
+        assertTrue("Ambiguous: 2 definitions" in hover)
+        assertTrue(fixture.diagnostics.getValue(nodeUri).any { it.message == "Node id must be unique: shared" })
+        assertTrue(fixture.diagnostics.getValue(mediaUri).any { it.message == "Node id must be unique: shared" })
+        assertEquals(
+            setOf(nodeUri, mediaUri, sourceUri),
+            fixture.rename(sourceUri, targetOffset, "renamed").changes.keys,
+        )
     }
 
     @Test
@@ -1926,12 +2013,36 @@ class GraphMdLanguageServerTest {
         val documents: Map<String, String>,
     ) {
         fun definitions(uri: String, offset: Int): List<org.eclipse.lsp4j.Location> {
+            return server.textDocumentService.definition(
+                DefinitionParams(TextDocumentIdentifier(uri), position(uri, offset)),
+            ).get().left.orEmpty()
+        }
+
+        fun hover(uri: String, offset: Int): String =
+            server.textDocumentService.hover(
+                HoverParams(TextDocumentIdentifier(uri), position(uri, offset)),
+            ).get().contents.right.value
+
+        fun references(uri: String, offset: Int): List<org.eclipse.lsp4j.Location> =
+            server.textDocumentService.references(
+                ReferenceParams(TextDocumentIdentifier(uri), position(uri, offset), ReferenceContext(true)),
+            ).get()
+
+        fun rename(uri: String, offset: Int, newName: String) =
+            server.textDocumentService.rename(
+                RenameParams(TextDocumentIdentifier(uri), position(uri, offset), newName),
+            ).get()
+
+        fun completions(uri: String, offset: Int) =
+            server.textDocumentService.completion(
+                CompletionParams(TextDocumentIdentifier(uri), position(uri, offset)),
+            ).get().left.orEmpty()
+
+        private fun position(uri: String, offset: Int): Position {
             val text = documents.getValue(uri)
             val line = text.substring(0, offset).count { it == '\n' }
             val lineStart = text.lastIndexOf('\n', offset - 1).let { if (it < 0) 0 else it + 1 }
-            return server.textDocumentService.definition(
-                DefinitionParams(TextDocumentIdentifier(uri), Position(line, offset - lineStart)),
-            ).get().left.orEmpty()
+            return Position(line, offset - lineStart)
         }
 
         fun actions(uri: String, message: String): List<CodeAction> {
