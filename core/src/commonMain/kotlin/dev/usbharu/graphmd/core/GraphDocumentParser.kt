@@ -442,7 +442,7 @@ private class MiniYamlParser(
     private val sourcePath: String,
     private val diagnostics: MutableList<Diagnostic>,
 ) {
-    private val lines = text.split('\n').map { it.trimEnd() }
+    private val lines = text.split('\n').map { stripYamlComment(it).trimEnd() }
     private var index = 0
 
     fun parse(): YamlValue? {
@@ -568,13 +568,18 @@ private class MiniYamlParser(
         if (value.startsWith("[") && value.endsWith("]")) {
             val inner = value.substring(1, value.lastIndex)
             if (inner.isBlank()) return YamlList(emptyList())
-            return YamlList(splitInlineList(inner).map(::parseInlineValue))
+            return YamlList(
+                splitYamlFlowItems(inner)
+                    .map { it.raw.trim() }
+                    .filter { it.isNotEmpty() }
+                    .map(::parseInlineValue),
+            )
         }
         if (value.startsWith("\"") && value.endsWith("\"") && value.length >= 2) {
-            return YamlString(parseQuoted(value.substring(1, value.length - 1)))
+            return YamlString(decodeYamlScalar(value))
         }
         if (value.startsWith("'") && value.endsWith("'") && value.length >= 2) {
-            return YamlString(value.substring(1, value.length - 1).replace("''", "'"))
+            return YamlString(decodeYamlScalar(value))
         }
         return when {
             value == "null" -> YamlNull
@@ -586,67 +591,17 @@ private class MiniYamlParser(
         }
     }
 
-    private fun parseQuoted(value: String): String {
-        val result = StringBuilder()
-        var i = 0
-        while (i < value.length) {
-            val ch = value[i]
-            if (ch != '\\') {
-                result.append(ch)
-                i++
-                continue
-            }
-            when (val next = value.getOrNull(i + 1)) {
-                'n' -> result.append('\n')
-                'r' -> result.append('\r')
-                't' -> result.append('\t')
-                '\\' -> result.append('\\')
-                '"' -> result.append('"')
-                else -> if (next != null) result.append(next)
-            }
-            i += 2
-        }
-        return result.toString()
-    }
-
-    private fun splitInlineList(value: String): List<String> {
-        val parts = mutableListOf<String>()
-        val current = StringBuilder()
-        var inQuotes = false
-        var quoteChar = '\u0000'
-        value.forEach { ch ->
-            when {
-                inQuotes && ch == quoteChar -> {
-                    inQuotes = false
-                    current.append(ch)
-                }
-                !inQuotes && (ch == '"' || ch == '\'') -> {
-                    inQuotes = true
-                    quoteChar = ch
-                    current.append(ch)
-                }
-                !inQuotes && ch == ',' -> {
-                    parts += current.toString().trim()
-                    current.clear()
-                }
-                else -> current.append(ch)
-            }
-        }
-        if (current.isNotEmpty()) parts += current.toString().trim()
-        return parts.filter { it.isNotEmpty() }
-    }
-
     private fun splitKeyValue(content: String): Pair<String, String?>? {
-        val colonIndex = content.indexOf(':')
+        val colonIndex = findYamlMappingColon(content)
         if (colonIndex <= 0) return null
-        val key = content.substring(0, colonIndex).trim()
+        val key = decodeYamlScalar(content.substring(0, colonIndex))
         if (key.isEmpty()) return null
         val rest = content.substring(colonIndex + 1)
         return key to rest.takeIf { it.isNotBlank() }?.trim()
     }
 
     private fun looksLikeInlineMapEntry(content: String): Boolean {
-        val colonIndex = content.indexOf(':')
+        val colonIndex = findYamlMappingColon(content)
         if (colonIndex <= 0) return false
         val next = content.getOrNull(colonIndex + 1) ?: return true
         return next == ' ' || next == '\t'

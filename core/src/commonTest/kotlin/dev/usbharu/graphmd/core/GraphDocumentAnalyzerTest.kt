@@ -3,6 +3,7 @@ package dev.usbharu.graphmd.core
 import dev.usbharu.graphmd.core.model.*
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -144,6 +145,407 @@ class GraphDocumentAnalyzerTest {
         val analysis = analyzer.analyze(text, "/tmp/works.md")
         val fromRefs = analysis.references.filter { it.field == "from" }
         assertEquals(listOf("Person", "Organization"), fromRefs.map { it.targetId })
+    }
+
+    @Test
+    fun `indexes only root id and node type across nested maps and sequences`() {
+        val text = """
+            ---
+            props:
+              object:
+                "id": nested-object
+                type: MissingObjectType
+              values:
+                - id: nested-list
+                  type: MissingListType
+            type: Person
+            kind: Node
+            id: alice
+            ---
+        """.trimIndent()
+
+        val analysis = analyzer.analyze(text, "/tmp/alice.md")
+
+        assertEquals(listOf("alice"), analysis.definitions.map { it.id })
+        assertEquals(listOf("Person"), analysis.references.filter { it.kind == ReferenceTargetKind.NodeType }.map { it.targetId })
+        assertFalse(analysis.references.any { it.targetId.startsWith("Missing") })
+        val definition = analysis.definitions.single()
+        assertEquals("alice", text.substring(definition.range.start, definition.range.end))
+        val type = analysis.references.single { it.kind == ReferenceTargetKind.NodeType }
+        assertEquals("Person", text.substring(type.range.start, type.range.end))
+    }
+
+    @Test
+    fun `nested schema type is not a nodetype reference for type documents`() {
+        val nodeType = """
+            ---
+            id: Person
+            kind: NodeType
+            props:
+              name:
+                type: string
+              metadata:
+                type: object-looking-value
+                id: nested
+            ---
+        """.trimIndent()
+        val relType = """
+            ---
+            id: knows
+            kind: RelType
+            from: [Person]
+            to:
+              - Person
+            props:
+              since:
+                type: number
+                id: nested
+            ---
+        """.trimIndent()
+
+        val nodeTypeAnalysis = analyzer.analyze(nodeType, "/tmp/Person.md")
+        val relTypeAnalysis = analyzer.analyze(relType, "/tmp/knows.md")
+
+        assertEquals(listOf("Person"), nodeTypeAnalysis.definitions.map { it.id })
+        assertTrue(nodeTypeAnalysis.references.none { it.kind == ReferenceTargetKind.NodeType })
+        assertEquals(listOf("knows"), relTypeAnalysis.definitions.map { it.id })
+        assertEquals(listOf("Person", "Person"), relTypeAnalysis.references.map { it.targetId })
+    }
+
+    @Test
+    fun `preserves nested timeline references without treating selector id as a definition`() {
+        val typeText = """
+            ---
+            id: Event
+            kind: NodeType
+            props:
+              happenedAt:
+                type: instant
+                timeline:
+                  id: CommonEra
+                  mapped: true
+            ---
+        """.trimIndent()
+        val timelineText = """
+            ---
+            id: ProjectEra
+            kind: Timeline
+            mappings:
+              - kind: offset
+                from: CommonEra
+                offset: 1000
+            props:
+              label:
+                default: Project
+                id: display-only
+                type: display-only
+            ---
+        """.trimIndent()
+
+        val typeAnalysis = analyzer.analyze(typeText, "/tmp/Event.md")
+        val timelineAnalysis = analyzer.analyze(timelineText, "/tmp/ProjectEra.md")
+
+        assertEquals(listOf("Event"), typeAnalysis.definitions.map { it.id })
+        assertEquals(listOf("CommonEra"), typeAnalysis.references.map { it.targetId })
+        assertEquals(listOf("ProjectEra"), timelineAnalysis.definitions.map { it.id })
+        assertEquals(listOf("CommonEra"), timelineAnalysis.references.map { it.targetId })
+    }
+
+    @Test
+    fun `indexes only direct endpoints of each timeline mapping entry`() {
+        val text = """
+            ---
+            id: ProjectEra
+            kind: Timeline
+            timecode:
+              type: number
+            mappings:
+              - kind: offset
+                from: CommonEra
+                offset: 1
+              - kind: offset
+                to: Branch
+                offset: 2
+              - kind: offset
+                to: Other
+                nested:
+                  from: display-only
+                  to: also-display-only
+                offset: 3
+            ---
+        """.trimIndent()
+
+        val analysis = analyzer.analyze(text, "/tmp/ProjectEra.md")
+
+        assertEquals(listOf("CommonEra", "Branch", "Other"), analysis.references.map { it.targetId })
+        assertTrue(analysis.references.none { "display-only" in it.targetId })
+    }
+
+    @Test
+    fun `sequence item nested boundary follows its first child indentation`() {
+        val text = """
+            ---
+            id: ProjectEra
+            kind: Timeline
+            timecode:
+              type: number
+            mappings:
+              - nested:
+                from: display-indent-2
+              - nested:
+                  from: display-indent-4
+                kind: offset
+                to: DirectAfter4
+                offset: 1
+              - nested:
+                    from: display-indent-6
+                kind: offset
+                to: DirectAfter6
+                offset: 2
+              - from: DirectBefore
+                nested:
+                  from: display-after-direct
+                kind: offset
+                offset: 3
+            ---
+        """.trimIndent()
+
+        val analysis = analyzer.analyze(text, "/tmp/ProjectEra.md")
+
+        assertEquals(listOf("DirectAfter4", "DirectAfter6", "DirectBefore"), analysis.references.map { it.targetId })
+        assertTrue(analysis.references.none { it.targetId.startsWith("display-") })
+    }
+
+    @Test
+    fun `same-indent nested list ends before direct sequence item siblings`() {
+        val text = """
+            ---
+            id: ProjectEra
+            kind: Timeline
+            timecode:
+              type: number
+            mappings:
+              - nested:
+                - display-only
+                - inner:
+                    from: display-deep
+
+                # comment before returning to direct mapping fields
+                kind: offset
+                to: CommonEra
+                offset: 1
+              - from: DirectBefore
+                nested:
+                  - inner:
+                      to: display-after-direct
+                kind: offset
+                offset: 2
+              - nested:
+                from: same-indent-map
+                to: same-indent-map-too
+              - kind: offset
+                to: Branch
+                offset: 3
+            ---
+        """.trimIndent()
+
+        val analysis = analyzer.analyze(text, "/tmp/ProjectEra.md")
+
+        assertEquals(listOf("CommonEra", "DirectBefore", "Branch"), analysis.references.map { it.targetId })
+        assertTrue(
+            analysis.references.none {
+                it.targetId in setOf("display-deep", "display-after-direct", "same-indent-map", "same-indent-map-too")
+            },
+        )
+    }
+
+    @Test
+    fun `scanner restores direct sequence item paths after deep node props`() {
+        val text = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            props:
+              values:
+                - nested:
+                    id: nested-id
+                    deeper:
+                      type: nested-type
+                  id: direct-id
+                  type: direct-type
+                - id: second-id
+                  type: second-type
+            ---
+        """.trimIndent()
+        val lines = text.split('\n')
+        val starts = buildList {
+            add(0)
+            text.forEachIndexed { index, char -> if (char == '\n') add(index + 1) }
+        }
+        val structure = FrontMatterStructureScanner().scan(lines, starts, 1, lines.lastIndex)
+        val pathsByValue = structure.scalars.associate { it.value to it.path }
+
+        assertEquals(listOf("props", "values", "nested", "id"), pathsByValue.getValue("nested-id"))
+        assertEquals(listOf("props", "values", "nested", "deeper", "type"), pathsByValue.getValue("nested-type"))
+        assertEquals(listOf("props", "values", "id"), pathsByValue.getValue("direct-id"))
+        assertEquals(listOf("props", "values", "type"), pathsByValue.getValue("direct-type"))
+        assertEquals(listOf("props", "values", "id"), pathsByValue.getValue("second-id"))
+        assertEquals(listOf("props", "values", "type"), pathsByValue.getValue("second-type"))
+    }
+
+    @Test
+    fun `indexes timeline only in document schema positions`() {
+        val nodeText = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            props:
+              timeline: display-only
+              event:
+                timeline: CommonEra
+              nested:
+                validTime:
+                  - timeline: Branch
+            validTime:
+              - timeline: RootEra
+            ---
+        """.trimIndent()
+        val typeText = """
+            ---
+            id: Event
+            kind: NodeType
+            props:
+              timeline:
+                type: string
+              happenedAt:
+                type: array
+                items:
+                  type: instant
+                  timeline: CommonEra
+                custom:
+                  timeline: display-only
+            ---
+        """.trimIndent()
+
+        val nodeAnalysis = analyzer.analyze(nodeText, "/tmp/alice.md")
+        val typeAnalysis = analyzer.analyze(typeText, "/tmp/Event.md")
+
+        assertEquals(
+            listOf("CommonEra", "Branch", "RootEra"),
+            nodeAnalysis.references.filter { it.kind == ReferenceTargetKind.Timeline }.map { it.targetId },
+        )
+        assertEquals(
+            listOf("CommonEra"),
+            typeAnalysis.references.filter { it.kind == ReferenceTargetKind.Timeline }.map { it.targetId },
+        )
+        assertTrue((nodeAnalysis.references + typeAnalysis.references).none { it.targetId == "display-only" })
+    }
+
+    @Test
+    fun `indexes root from and to only for reltype`() {
+        val documents = listOf(
+            "Node" to "---\nid: n\nkind: Node\ntype: Person\nfrom: Wrong\n---",
+            "Media" to "---\nid: m\nkind: Media\ntype: Person\nurl: media.png\nto: Wrong\n---",
+            "NodeType" to "---\nid: N\nkind: NodeType\nfrom: Wrong\n---",
+            "Timeline" to "---\nid: T\nkind: Timeline\nto: Wrong\n---",
+        )
+
+        documents.forEach { (kind, text) ->
+            val analysis = analyzer.analyze(text, "/tmp/$kind.md")
+            assertTrue(analysis.references.none { it.field in setOf("from", "to") }, kind)
+        }
+
+        val relType = analyzer.analyze(
+            "---\nid: r\nkind: RelType\nfrom: [Person]\nto: Organization\n---",
+            "/tmp/r.md",
+        )
+        assertEquals(listOf("Person", "Organization"), relType.references.map { it.targetId })
+        assertTrue(relType.references.all { it.kind == ReferenceTargetKind.NodeType })
+    }
+
+    @Test
+    fun `parser and analyzer share comment and escaped flow scalar semantics`() {
+        val text = """
+            ---
+            id: "works#At" # trailing id comment
+            kind: RelType # trailing kind comment
+            extends: ["A\",B", 'C'',D', "E#F", [Ignored, Nested], G] # trailing list comment
+            from: [Person] # trailing endpoint comment
+            to:
+              - "Organization: East" # colon inside the quoted scalar
+            ---
+        """.trimIndent()
+
+        val analysis = analyzer.analyze(text, "/tmp/works.md")
+        val document = analysis.parsed.document as RelTypeDocument
+
+        assertEquals("works#At", document.id)
+        assertEquals(listOf("A\",B", "C',D", "E#F", "G"), document.extends)
+        assertEquals(listOf("A\",B", "C',D", "E#F", "G", "Person", "Organization: East"), analysis.references.map { it.targetId })
+        assertEquals(document.id, analysis.definitions.single().id)
+        analysis.references.forEach { reference ->
+            assertEquals(
+                reference.targetId,
+                decodeYamlScalar(analysis.text.substring(reference.range.start, reference.range.end)),
+            )
+        }
+    }
+
+    @Test
+    fun `matches parser root indentation and duplicate field semantics`() {
+        val text = """
+            ---
+              id: stale
+              type: Missing
+              id: alice
+              kind: Media
+              url: https://example.com/alice.png
+              type: "Person"
+              props:
+                  nested:
+                      id: ignored
+                      type: AlsoIgnored
+            ---
+        """.trimIndent()
+
+        val analysis = analyzer.analyze(text, "/tmp/alice.md")
+
+        assertEquals("alice", analysis.definitions.single().id)
+        assertEquals("Person", analysis.references.single { it.kind == ReferenceTargetKind.NodeType }.targetId)
+        assertEquals("\"Person\"", text.substring(
+            analysis.references.single().range.start,
+            analysis.references.single().range.end,
+        ))
+    }
+
+    @Test
+    fun `tracks quoted flow values comments tabs and crlf without flattening paths`() {
+        val text = (
+            "---\r\n" +
+                "\t# root fields use the parser's first-entry indentation\r\n" +
+                "\tid: worksAt\r\n" +
+                "\tkind: RelType\r\n" +
+                "\tfrom: [\"Person\", 'Organization']\r\n" +
+                "\tto:\r\n" +
+                "\t\t- Person\r\n" +
+                "\tprops:\r\n" +
+                "\t\tmetadata:\r\n" +
+                "\t\t\t\"id\": nested\r\n" +
+                "\t\t\ttype: string\r\n" +
+                "---"
+            )
+
+        val analysis = analyzer.analyze(text, "/tmp/worksAt.md")
+
+        assertEquals("worksAt", analysis.definitions.single().id)
+        assertEquals(listOf("Person", "Organization", "Person"), analysis.references.map { it.targetId })
+        assertTrue(analysis.references.none { it.targetId in setOf("nested", "string") })
+        assertEquals(
+            listOf("\"Person\"", "'Organization'", "Person"),
+            analysis.references.map { analysis.text.substring(it.range.start, it.range.end) },
+        )
     }
 
     @Test

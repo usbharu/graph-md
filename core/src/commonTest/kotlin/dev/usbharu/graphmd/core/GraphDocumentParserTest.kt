@@ -43,6 +43,60 @@ class GraphDocumentParserTest {
     }
 
     @Test
+    fun `comments and flow lists use quote aware shared lexing`() {
+        val parsed = compiler.parseDocument(
+            text = """
+                ---
+                "id": "child#type" # outside a quote is a comment
+                'kind': NodeType # comment
+                extends: ["A\",B", 'C'',D', "Hash # inside", "Colon: value", [Ignored, Nested], Plain] # comment
+                # a whole line comment
+                props:
+                ---
+            """.trimIndent(),
+            sourcePath = "/tmp/child.md",
+        )
+
+        val document = parsed.document as? NodeTypeDocument
+        assertNotNull(document)
+        assertEquals("child#type", document.id)
+        assertEquals(listOf("A\",B", "C',D", "Hash # inside", "Colon: value", "Plain"), document.extends)
+        assertTrue(parsed.diagnostics.any { it.message == "extends items MUST be strings" })
+        assertTrue(parsed.diagnostics.none { "Invalid YAML mapping entry: # a whole line comment" in it.message })
+    }
+
+    @Test
+    fun `flow lists ignore blank items consistently with the previous parser`() {
+        val variants = listOf(
+            "[A,]",
+            "[A, ]",
+            "[, A]",
+            "[A,, B]",
+            """["A,B", ['Ignored', Nested], C,]""",
+        )
+
+        variants.forEachIndexed { index, flow ->
+            val parsed = compiler.parseDocument(
+                "---\nid: Type$index\nkind: NodeType\nextends: $flow\n---",
+                "/tmp/type-$index.md",
+            )
+            val document = parsed.document as? NodeTypeDocument
+            assertNotNull(document)
+            val expected = when (index) {
+                3 -> listOf("A", "B")
+                4 -> listOf("A,B", "C")
+                else -> listOf("A")
+            }
+            assertEquals(expected, document.extends, flow)
+            if (index == 4) {
+                assertTrue(parsed.diagnostics.any { it.message == "extends items MUST be strings" })
+            } else {
+                assertTrue(parsed.diagnostics.none { it.message == "extends items MUST be strings" }, flow)
+            }
+        }
+    }
+
+    @Test
     fun `parses node type rel type and timeline documents`() {
         val nodeType = compiler.parseDocument(
             """

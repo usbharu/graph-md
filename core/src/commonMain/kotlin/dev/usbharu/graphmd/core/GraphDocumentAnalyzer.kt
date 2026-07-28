@@ -53,6 +53,7 @@ data class GraphDocumentAnalysis(
 
 class GraphDocumentAnalyzer {
     private val parser = GraphDocumentParser()
+    private val frontMatterScanner = FrontMatterStructureScanner()
 
     fun analyze(text: String, sourcePath: String): GraphDocumentAnalysis {
         val normalized = text.replace("\r\n", "\n")
@@ -71,83 +72,9 @@ class GraphDocumentAnalyzer {
         val references = mutableListOf<SymbolReference>()
         val propertyDefinitions = mutableListOf<PropertyDefinition>()
         val propertyReferences = mutableListOf<PropertyReference>()
-        var currentListField: String? = null
-
-        for (lineIndex in 1 until endLine) {
-            val line = lines[lineIndex]
-            val trimmed = line.trim()
-            if (trimmed.isBlank() || trimmed.startsWith("#")) continue
-
-            val inlineList = Regex("""^([A-Za-z][A-Za-z0-9_-]*)\s*:\s*\[(.*)\]\s*$""").matchEntire(line)
-            if (inlineList != null) {
-                val field = inlineList.groupValues[1]
-                currentListField = null
-                val kind = listFieldKind(field, document)
-                if (kind != null) {
-                    val listStart = line.indexOf('[') + 1
-                    collectInlineListReferences(
-                        rawItems = inlineList.groupValues[2],
-                        absoluteListStart = lineStarts[lineIndex] + listStart,
-                        field = field,
-                        kind = kind,
-                        references = references,
-                    )
-                }
-                continue
-            }
-
-            val mapping = Regex("""^([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*?)\s*$""").matchEntire(line)
-            if (mapping != null && !trimmed.startsWith("- ")) {
-                val field = mapping.groupValues[1]
-                val value = mapping.groupValues[2]
-                currentListField = if (value.isEmpty()) field else null
-                val colonIndex = line.indexOf(':')
-                val valueStartInLine = line.substring(colonIndex + 1).indexOfFirst { !it.isWhitespace() }
-                    .takeIf { it >= 0 }?.plus(colonIndex + 1)
-                if (valueStartInLine != null) {
-                    val range = SourceRange(
-                        start = lineStarts[lineIndex] + valueStartInLine,
-                        end = lineStarts[lineIndex] + valueStartInLine + value.length,
-                    )
-                    when (field) {
-                        "id" -> document?.id?.let { id ->
-                            definitions += SymbolDefinition(id, definitionKind(document), range)
-                        }
-                        "type" -> if (document is NodeDocument) {
-                            references += SymbolReference(stripYamlScalar(value), ReferenceTargetKind.NodeType, field, range)
-                        }
-                        "extends", "from", "to", "timeline" -> {
-                            listFieldKind(field, document)?.let { kind ->
-                                references += SymbolReference(stripYamlScalar(value), kind, field, range)
-                            }
-                        }
-                    }
-                }
-                continue
-            }
-
-            if (currentListField != null && Regex("""^\s*-\s+""").containsMatchIn(line)) {
-                val match = Regex("""^(\s*-\s+)(.*?)\s*$""").matchEntire(line) ?: continue
-                val field = currentListField
-                val kind = listFieldKind(field, document) ?: continue
-                val rawValue = match.groupValues[2]
-                val itemStart = lineStarts[lineIndex] + match.groupValues[1].length
-                references += SymbolReference(
-                    targetId = stripYamlScalar(rawValue),
-                    kind = kind,
-                    field = field,
-                    range = SourceRange(itemStart, itemStart + rawValue.length),
-                )
-                continue
-            }
-
-            if (line.firstOrNull()?.isWhitespace() == false) {
-                currentListField = null
-            }
-        }
-
-        collectTimelineReferences(lines, lineStarts, endLine, document, references)
-        val yamlPropertyKeys = extractYamlPropertyKeys(lines, lineStarts, endLine)
+        val frontMatter = frontMatterScanner.scan(lines, lineStarts, 1, endLine)
+        collectStructuredFrontMatterSymbols(frontMatter, document, definitions, references)
+        val yamlPropertyKeys = extractYamlPropertyKeys(frontMatter)
         when (document) {
             is NodeDocument -> yamlPropertyKeys.forEach { key ->
                 propertyReferences += PropertyReference(
@@ -428,42 +355,81 @@ class GraphDocumentAnalyzer {
         return starts
     }
 
-    private fun collectInlineListReferences(
-        rawItems: String,
-        absoluteListStart: Int,
-        field: String,
-        kind: ReferenceTargetKind,
+    private fun collectStructuredFrontMatterSymbols(
+        structure: FrontMatterStructure,
+        document: GraphDocument?,
+        definitions: MutableList<SymbolDefinition>,
         references: MutableList<SymbolReference>,
     ) {
-        var cursor = 0
-        rawItems.split(',').forEach { chunk ->
-            val value = chunk.trim()
-            val rawIndex = rawItems.indexOf(chunk, cursor)
-            cursor = rawIndex + chunk.length
-            if (value.isEmpty()) return@forEach
-            val valueIndex = chunk.indexOf(value)
-            val start = absoluteListStart + rawIndex + valueIndex
-            references += SymbolReference(stripYamlScalar(value), kind, field, SourceRange(start, start + value.length))
+        document ?: return
+
+        structure.rootEntries("id").lastOrNull()?.let { entry ->
+            structure.scalarsFor(entry).singleOrNull()?.let { scalar ->
+                definitions += SymbolDefinition(scalar.value, definitionKind(document), scalar.range)
+            }
+        }
+
+        fun collectRootField(field: String, kind: ReferenceTargetKind?) {
+            if (kind == null) return
+            structure.rootEntries(field).lastOrNull()?.let { entry ->
+                structure.scalarsFor(entry).forEach { scalar ->
+                    references += SymbolReference(scalar.value, kind, field, scalar.range)
+                }
+            }
+        }
+
+        if (document is NodeDocument) {
+            collectRootField("type", ReferenceTargetKind.NodeType)
+        }
+        collectRootField("extends", listFieldKind("extends", document))
+        collectRootField("from", listFieldKind("from", document))
+        collectRootField("to", listFieldKind("to", document))
+
+        structure.scalars.forEach { scalar ->
+            val isNestedTimelineField = when (document) {
+                is NodeDocument -> isNodeTimelinePath(scalar.path)
+                is NodeTypeDocument, is RelTypeDocument -> isPropertySchemaTimelinePath(scalar.path)
+                else -> false
+            }
+            val isCanonicalSelectorId =
+                (document is NodeTypeDocument || document is RelTypeDocument) &&
+                isPropertySchemaTimelineSelectorIdPath(scalar.path)
+            val isTimelineMappingEndpoint =
+                document is TimelineDocument &&
+                scalar.path.size == 2 &&
+                scalar.path.firstOrNull() == "mappings" &&
+                scalar.path.lastOrNull() in setOf("from", "to")
+            if (isNestedTimelineField || isCanonicalSelectorId || isTimelineMappingEndpoint) {
+                val field = if (isCanonicalSelectorId) "timeline" else scalar.path.last()
+                references += SymbolReference(
+                    scalar.value,
+                    ReferenceTargetKind.Timeline,
+                    field,
+                    scalar.range,
+                )
+            }
         }
     }
 
-    private fun collectTimelineReferences(
-        lines: List<String>,
-        lineStarts: List<Int>,
-        endLine: Int,
-        document: GraphDocument?,
-        references: MutableList<SymbolReference>,
-    ) {
-        for (lineIndex in 1 until endLine) {
-            val line = lines[lineIndex]
-            val match = Regex("""^(\s*)(?:-\s*)?(timeline|from|to):\s*([A-Za-z_][A-Za-z0-9_.:-]*)\s*$""").matchEntire(line) ?: continue
-            val field = match.groupValues[2]
-            if (field in setOf("from", "to") && document !is TimelineDocument) continue
-            val id = match.groupValues[3]
-            val start = lineStarts[lineIndex] + line.lastIndexOf(id)
-            if (references.any { it.kind == ReferenceTargetKind.Timeline && it.range.start == start }) continue
-            references += SymbolReference(id, ReferenceTargetKind.Timeline, field, SourceRange(start, start + id.length))
-        }
+    private fun isNodeTimelinePath(path: List<String>): Boolean {
+        if (path.lastOrNull() != "timeline") return false
+        if (path.firstOrNull() == "validTime") return true
+        if (path.firstOrNull() != "props" || path.size < 3) return false
+        // `props.timeline` is a property named "timeline", while a timeline
+        // below a property value is an instant/duration or validTime member.
+        return true
+    }
+
+    private fun isPropertySchemaTimelinePath(path: List<String>): Boolean {
+        if (path.size < 3 || path[0] != "props" || path.last() != "timeline") return false
+        return path.subList(2, path.lastIndex).all { it == "items" }
+    }
+
+    private fun isPropertySchemaTimelineSelectorIdPath(path: List<String>): Boolean {
+        if (path.size < 4 || path[0] != "props" || path.last() != "id") return false
+        val schemaPath = path.subList(2, path.lastIndex)
+        return schemaPath.lastOrNull() == "timeline" &&
+            schemaPath.dropLast(1).all { it == "items" }
     }
 
     private fun extractInlineTimelineReferences(body: String, baseOffset: Int): List<SymbolReference> {
@@ -514,41 +480,10 @@ class GraphDocumentAnalyzer {
         return references
     }
 
-    private fun extractYamlPropertyKeys(
-        lines: List<String>,
-        lineStarts: List<Int>,
-        endLine: Int,
-    ): List<PropertyKey> {
-        val propsLine = (1 until endLine).firstOrNull { lineIndex ->
-            lines[lineIndex].matches(Regex("""^props\s*:\s*(?:#.*)?$"""))
-        } ?: return emptyList()
-        val candidates = mutableListOf<YamlPropertyKey>()
-        for (lineIndex in propsLine + 1 until endLine) {
-            val line = lines[lineIndex]
-            if (line.isBlank() || line.trimStart().startsWith("#")) continue
-            val indent = line.indexOfFirst { !it.isWhitespace() }.let { if (it < 0) line.length else it }
-            if (indent == 0) break
-            val content = line.drop(indent)
-            val colonIndex = content.indexOf(':')
-            if (colonIndex <= 0) continue
-            val rawKey = content.substring(0, colonIndex)
-            val key = rawKey.trim()
-            if (key.isEmpty()) continue
-            val keyStart = indent + rawKey.indexOf(key)
-            candidates += YamlPropertyKey(
-                indent,
-                PropertyKey(
-                    key,
-                    SourceRange(
-                        lineStarts[lineIndex] + keyStart,
-                        lineStarts[lineIndex] + keyStart + key.length,
-                    ),
-                ),
-            )
-        }
-        val propertyIndent = candidates.minOfOrNull { it.indent } ?: return emptyList()
-        return candidates.filter { it.indent == propertyIndent }.map { it.key }
-    }
+    private fun extractYamlPropertyKeys(structure: FrontMatterStructure): List<PropertyKey> =
+        structure.entries
+            .filter { it.path.size == 2 && it.path.first() == "props" }
+            .map { PropertyKey(it.key, it.keyRange) }
 
     private fun extractBodyPropertyReferences(
         body: String,
@@ -738,7 +673,7 @@ class GraphDocumentAnalyzer {
     private fun listFieldKind(field: String, document: GraphDocument?): ReferenceTargetKind? {
         return when (field) {
             "timeline" -> ReferenceTargetKind.Timeline
-            "from", "to" -> if (document is TimelineDocument) ReferenceTargetKind.Timeline else ReferenceTargetKind.NodeType
+            "from", "to" -> if (document is RelTypeDocument) ReferenceTargetKind.NodeType else null
             "extends" -> when (document) {
             is RelTypeDocument -> ReferenceTargetKind.RelType
             is NodeTypeDocument -> ReferenceTargetKind.NodeType
@@ -758,23 +693,9 @@ class GraphDocumentAnalyzer {
         }
     }
 
-    private fun stripYamlScalar(value: String): String {
-        val trimmed = value.trim()
-        return when {
-            trimmed.length >= 2 && trimmed.first() == '"' && trimmed.last() == '"' -> trimmed.substring(1, trimmed.length - 1)
-            trimmed.length >= 2 && trimmed.first() == '\'' && trimmed.last() == '\'' -> trimmed.substring(1, trimmed.length - 1)
-            else -> trimmed
-        }
-    }
-
     private data class PropertyKey(
         val name: String,
         val range: SourceRange,
-    )
-
-    private data class YamlPropertyKey(
-        val indent: Int,
-        val key: PropertyKey,
     )
 
     private data class ExtractedPropertyReferences(
