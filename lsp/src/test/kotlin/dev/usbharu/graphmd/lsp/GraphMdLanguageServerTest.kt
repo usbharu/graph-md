@@ -11,6 +11,7 @@ import dev.usbharu.graphmd.core.model.ResolvedPropSchema
 import dev.usbharu.graphmd.core.model.SourceDocument
 import dev.usbharu.graphmd.core.model.TimelineSelector
 import org.eclipse.lsp4j.CompletionParams
+import org.eclipse.lsp4j.CompletionItemKind
 import org.eclipse.lsp4j.CodeActionContext
 import org.eclipse.lsp4j.CodeAction
 import org.eclipse.lsp4j.CodeActionKind
@@ -870,6 +871,97 @@ class GraphMdLanguageServerTest {
         assertEquals(ReferenceTargetKind.NodeType, analyzer.inferCompletionKind(analysis, typeOffset))
         assertEquals(ReferenceTargetKind.RelType, analyzer.inferCompletionKind(analysis, relationOffset))
         assertNotNull(analyzer.findReferenceAt(analysis, analysis.text.indexOf("fri") + 1))
+    }
+
+    @Test
+    fun `node type completion includes definitions outside types directories`() {
+        val nodeText = "---\nid: alice\nkind: Node\ntype: Canonical\n---"
+        val nodeTypeText = "---\nid: Child\nkind: NodeType\nextends: Canonical\n---"
+        val relTypeText = "---\nid: connects\nkind: RelType\nfrom: Canonical\nto: Canonical\n---"
+        val nodeUri = "file:///workspace/alice.md"
+        val nodeTypeUri = "file:///workspace/models/Child.md"
+        val relTypeUri = "file:///workspace/relations/connects.md"
+        val server = serverFixture(
+            mapOf(
+                "file:///workspace/types/Canonical.md" to graphDocument("Canonical", "NodeType"),
+                "file:///workspace/models/nested/Alpha.md" to graphDocument("Alpha", "NodeType"),
+                "file:///C:/graph/schemas/WindowsNode.md" to graphDocument("WindowsNode", "NodeType"),
+                "file:///workspace/duplicates/Alpha.md" to graphDocument("Alpha", "NodeType"),
+                "file:///workspace/types/unrelated-rel.md" to graphDocument("unrelatedRel", "RelType"),
+                "file:///workspace/unrelated-node.md" to graphDocument("unrelatedNode", "Node"),
+                nodeUri to nodeText,
+                nodeTypeUri to nodeTypeText,
+                relTypeUri to relTypeText,
+            ),
+        ).server
+        val expected = listOf("Alpha", "Canonical", "Child", "WindowsNode")
+
+        fun labelsAtValueStart(uri: String, text: String, field: String): List<String> {
+            val line = text.lines().indexOfFirst { it.startsWith("$field:") }
+            val character = text.lines()[line].indexOf(':') + 2
+            return server.textDocumentService.completion(
+                CompletionParams(TextDocumentIdentifier(uri), Position(line, character)),
+            ).get().left.map { it.label }
+        }
+
+        assertEquals(expected, labelsAtValueStart(nodeUri, nodeText, "type"))
+        assertEquals(expected, labelsAtValueStart(nodeTypeUri, nodeTypeText, "extends"))
+        assertEquals(expected, labelsAtValueStart(relTypeUri, relTypeText, "from"))
+
+        val items = server.textDocumentService.completion(
+            CompletionParams(TextDocumentIdentifier(nodeUri), Position(3, "type: ".length)),
+        ).get().left
+        assertEquals(expected, items.map { it.label })
+        assertTrue(items.all { it.kind == CompletionItemKind.Reference })
+        assertTrue(items.all { it.detail == "NodeType" })
+        assertEquals(expected, items.map { it.insertText })
+        assertEquals(expected.map { "1-$it" }, items.map { it.sortText })
+    }
+
+    @Test
+    fun `relation type completion includes definitions outside types directories`() {
+        val relTypeText = "---\nid: childRel\nkind: RelType\nextends: CanonicalRel\n---"
+        val nodeText = "---\nid: alice\nkind: Node\ntype: Person\n---\n@link[Bob](bob CanonicalRel)"
+        val relTypeUri = "file:///workspace/relations/childRel.md"
+        val nodeUri = "file:///workspace/alice.md"
+        val server = serverFixture(
+            mapOf(
+                "file:///workspace/types/CanonicalRel.md" to graphDocument("CanonicalRel", "RelType"),
+                "file:///workspace/relations/nested/AlphaRel.md" to graphDocument("AlphaRel", "RelType"),
+                "file:///C:/graph/schemas/WindowsRel.md" to graphDocument("WindowsRel", "RelType"),
+                "file:///workspace/duplicates/AlphaRel.md" to graphDocument("AlphaRel", "RelType"),
+                "file:///workspace/types/Person.md" to graphDocument("Person", "NodeType"),
+                "file:///workspace/unrelated-node.md" to graphDocument("unrelatedNode", "Node"),
+                relTypeUri to relTypeText,
+                nodeUri to nodeText,
+            ),
+        ).server
+        val expected = listOf("AlphaRel", "CanonicalRel", "childRel", "WindowsRel").sorted()
+
+        val extendsItems = server.textDocumentService.completion(
+            CompletionParams(TextDocumentIdentifier(relTypeUri), Position(3, "extends: ".length)),
+        ).get().left
+        assertEquals(expected, extendsItems.map { it.label })
+        assertEquals(expected.toSet().size, extendsItems.size)
+        assertTrue(extendsItems.all { it.kind == CompletionItemKind.Reference })
+        assertTrue(extendsItems.all { it.detail == "RelType" })
+
+        val relationServer = serverFixture(
+            mapOf(
+                "file:///workspace/types/CanonicalRel.md" to graphDocument("CanonicalRel", "RelType"),
+                "file:///workspace/relations/nested/AlphaRel.md" to graphDocument("AlphaRel", "RelType"),
+                "file:///C:/graph/schemas/WindowsRel.md" to graphDocument("WindowsRel", "RelType"),
+                "file:///workspace/types/Person.md" to graphDocument("Person", "NodeType"),
+                relTypeUri to relTypeText,
+                nodeUri to nodeText,
+            ),
+        ).server
+        val relationItems = relationServer.textDocumentService.completion(
+            CompletionParams(TextDocumentIdentifier(nodeUri), Position(5, "@link[Bob](bob ".length)),
+        ).get().left
+        assertEquals(expected, relationItems.map { it.label })
+        assertTrue(relationItems.all { it.kind == CompletionItemKind.Class })
+        assertTrue(relationItems.all { it.detail == "RelType" })
     }
 
     @Test

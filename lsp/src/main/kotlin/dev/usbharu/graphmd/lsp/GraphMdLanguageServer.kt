@@ -1446,7 +1446,7 @@ internal class GraphMdWorkspaceIndex(
     private fun completionIds(kind: ReferenceTargetKind): List<String> {
         return when (kind) {
             ReferenceTargetKind.Node -> definitionsOf(kind).map { it.id }
-            ReferenceTargetKind.NodeType, ReferenceTargetKind.RelType -> definitionsOf(kind).filter { it.path.toString().contains("/types/") }.ifEmpty { definitionsOf(kind) }.map { it.id }
+            ReferenceTargetKind.NodeType, ReferenceTargetKind.RelType -> definitionsOf(kind).map { it.id }
             ReferenceTargetKind.Timeline -> definitionsOf(kind).map { it.id }
         }.distinct().sorted()
     }
