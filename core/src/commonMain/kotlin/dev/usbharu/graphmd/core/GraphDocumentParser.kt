@@ -49,6 +49,11 @@ class GraphDocumentParser {
             diagnostics += schemaError("id MUST be non-empty", sourcePath)
             return null
         }
+        val kindName = root.requireString("kind", sourcePath, diagnostics)
+        if (kindName == "RelType" && id.any { it.isWhitespace() }) {
+            diagnostics += schemaError("RelType id MUST NOT contain whitespace", sourcePath, id)
+            return null
+        }
         if (!id.matches(Regex("""[A-Za-z_][A-Za-z0-9_.:-]*"""))) {
             diagnostics += schemaWarning(
                 "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*",
@@ -56,7 +61,7 @@ class GraphDocumentParser {
                 id,
             )
         }
-        val kindName = root.requireString("kind", sourcePath, diagnostics) ?: return null
+        if (kindName == null) return null
         return when (kindName) {
             "Node" -> parseNodeDocument(id, root, body, sourcePath, diagnostics, media = false)
             "Media" -> parseNodeDocument(id, root, body, sourcePath, diagnostics, media = true)

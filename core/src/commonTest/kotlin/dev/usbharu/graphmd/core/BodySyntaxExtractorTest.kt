@@ -53,6 +53,55 @@ class BodySyntaxExtractorTest {
     }
 
     @Test
+    fun `supports quoted noncanonical rel type without whitespace`() {
+        val extracted = extractor.extract(
+            """@link[Bob](bob "friend/of")""",
+            "/tmp/alice.md",
+            "alice",
+        )
+
+        assertTrue(extracted.diagnostics.isEmpty(), extracted.diagnostics.joinToString("\n") { it.message })
+        assertEquals("friend/of", extracted.relations.single().relType)
+    }
+
+    @Test
+    fun `rejects whitespace in quoted and unquoted rel types`() {
+        listOf(
+            """@link[Bob](bob friend Of)""",
+            "@link[Bob](bob friend\tOf)",
+            "@link[Bob](bob friend\u00a0Of)",
+            """@link[Bob](bob "friend Of")""",
+            """@link[Bob](bob "friend\ Of")""",
+            "@link[Bob](bob \"friend\tOf\")",
+            "@link[Bob](bob \"friend\u00a0Of\")",
+        ).forEach { body ->
+            val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
+
+            assertTrue(extracted.relations.isEmpty(), body)
+            val diagnostic = extracted.diagnostics.single {
+                it.message == "Relation target and type must be separated by horizontal spaces"
+            }
+            assertEquals(SourceRange(0, body.lastIndexOf(')')), diagnostic.source?.range)
+        }
+    }
+
+    @Test
+    fun `keeps target and malformed relation recovery when rel type whitespace is rejected`() {
+        val body = """
+            @link[Allowed target label](bob "friend Of")
+            @link[Carol](carol friendOf)
+        """.trimIndent()
+
+        val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
+
+        assertEquals(listOf("carol"), extracted.relations.map { it.target })
+        assertEquals("Carol", extracted.relations.single().label)
+        assertTrue(extracted.diagnostics.any {
+            it.message == "Relation target and type must be separated by horizontal spaces"
+        })
+    }
+
+    @Test
     fun `reports malformed relation`() {
         val body = """@link{}[Bob](bob)"""
 

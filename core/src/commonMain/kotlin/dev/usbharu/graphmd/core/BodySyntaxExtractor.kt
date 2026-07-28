@@ -148,7 +148,7 @@ class BodySyntaxExtractor {
             diagnostics += syntaxDiagnostic("@link must be followed immediately by a link", sourcePath, documentId, start, cursor)
             return null
         }
-        val parsed = parseRelation(masked, original, cursor - 1, sourcePath, documentId, diagnostics) ?: return null
+        val parsed = parseRelation(masked, original, cursor - 1, start, sourcePath, documentId, diagnostics) ?: return null
         val relation = parsed.first.copy(props = props, range = SourceRange(start, parsed.second), validTime = validTime)
         return relation to parsed.second
     }
@@ -217,41 +217,54 @@ class BodySyntaxExtractor {
         masked: String,
         original: String,
         start: Int,
+        diagnosticStart: Int,
         sourcePath: String,
         documentId: String,
         diagnostics: MutableList<Diagnostic>,
     ): Pair<ExtractedRelation, Int>? {
         val closeLabel = findUnescaped(masked, ']', start + 2) ?: run {
-            diagnostics += syntaxDiagnostic("Unclosed relation label", sourcePath, documentId, start, original.length)
+            diagnostics += syntaxDiagnostic("Unclosed relation label", sourcePath, documentId, diagnosticStart, original.length)
             return null
         }
         if (masked.getOrNull(closeLabel + 1) != '(') {
-            diagnostics += syntaxDiagnostic("Relation must be followed by (...)", sourcePath, documentId, start, closeLabel + 1)
+            diagnostics += syntaxDiagnostic("Relation must be followed by (...)", sourcePath, documentId, diagnosticStart, closeLabel + 1)
             return null
         }
         val closeParen = findUnescaped(masked, ')', closeLabel + 2) ?: run {
-            diagnostics += syntaxDiagnostic("Unclosed relation target", sourcePath, documentId, start, original.length)
+            diagnostics += syntaxDiagnostic("Unclosed relation target", sourcePath, documentId, diagnosticStart, original.length)
             return null
         }
         val label = unescapeLabel(original.substring(start + 2, closeLabel))
         val targetAndType = original.substring(closeLabel + 2, closeParen).trim()
         val parts = RelationTargetParser.parse(targetAndType)
         if (parts == null) {
-            diagnostics += syntaxDiagnostic("Relation target and type must be separated by horizontal spaces", sourcePath, documentId, start, closeParen)
+            diagnostics += syntaxDiagnostic(
+                "Relation target and type must be separated by horizontal spaces",
+                sourcePath,
+                documentId,
+                diagnosticStart,
+                closeParen,
+            )
             return null
         }
         var end = closeParen + 1
         val props = if (masked.getOrNull(end) == '{') {
             val range = readBalanced(masked, end, '{', '}')
             if (range == null) {
-                diagnostics += syntaxDiagnostic("Unclosed relation props", sourcePath, documentId, start, original.length)
+                diagnostics += syntaxDiagnostic("Unclosed relation props", sourcePath, documentId, diagnosticStart, original.length)
                 return null
             }
             end = range.end
             try {
                 InlinePropsParser(original.substring(closeParen + 1, range.end)).parseObject().values
             } catch (e: InlinePropsParseException) {
-                diagnostics += syntaxDiagnostic(e.message ?: "Invalid relation props", sourcePath, documentId, start, range.end)
+                diagnostics += syntaxDiagnostic(
+                    e.message ?: "Invalid relation props",
+                    sourcePath,
+                    documentId,
+                    diagnosticStart,
+                    range.end,
+                )
                 return null
             }
         } else {
