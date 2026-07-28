@@ -435,6 +435,9 @@ internal class GraphMdWorkspaceIndex(
     ): List<CodeAction> = buildList {
         val message = diagnostic.message
 
+        if (message.startsWith("Ambiguous ") && " reference: " in message) {
+            return@buildList
+        }
         referenceTargetForDiagnostic(message)?.let { target ->
             val candidates = completionIds(target.kind)
                 .sortedWith(compareBy<String> { levenshtein(it.lowercase(), target.id.lowercase()) }.thenBy { it })
@@ -1118,6 +1121,17 @@ internal class GraphMdWorkspaceIndex(
             val sourcePath = diagnostic.source?.path ?: return@forEach
             val uri = Path.of(sourcePath).toUri().toString()
             val document = documents[uri] ?: return@forEach
+            val referenceTarget = diagnostic
+                .takeIf { it.category == DiagnosticCategory.ReferenceError }
+                ?.let { referenceTargetForDiagnostic(it.message) }
+            if (referenceTarget != null && document.analysis.references.any { reference ->
+                    reference.kind == referenceTarget.kind &&
+                        reference.targetId == referenceTarget.id &&
+                        (referenceTarget.field == null || reference.field == referenceTarget.field)
+                }
+            ) {
+                return@forEach
+            }
             diagnostics.getOrPut(uri) { mutableListOf() } += org.eclipse.lsp4j.Diagnostic().apply {
                 severity = when (diagnostic.severity) {
                     Severity.Error -> DiagnosticSeverity.Error
@@ -1130,8 +1144,52 @@ internal class GraphMdWorkspaceIndex(
                     ?: document.rangeOf(diagnosticSourceRange(document, diagnostic) ?: SourceRange(0, 0))
             }
         }
+        val definitionsById = workspace.documents
+            .flatMap { it.analysis.definitions }
+            .groupBy { it.id }
+        workspace.documents.forEach { document ->
+            document.analysis.references.forEach { reference ->
+                val candidates = definitionsById[reference.targetId].orEmpty()
+                val matching = candidates.count { it.kind == reference.kind }
+                val message = when {
+                    matching > 1 -> "Ambiguous ${reference.kind.displayName()} reference: ${reference.targetId}"
+                    matching == 1 -> null
+                    candidates.isNotEmpty() -> {
+                        val actualKinds = candidates.map { it.kind.displayName() }.distinct().sorted().joinToString(", ")
+                        "Expected ${reference.kind.displayName()} but found $actualKinds: ${reference.targetId}"
+                    }
+                    else -> unresolvedReferenceMessage(reference)
+                }
+                if (message != null) {
+                    diagnostics.getOrPut(document.uri) { mutableListOf() } += org.eclipse.lsp4j.Diagnostic().apply {
+                        severity = DiagnosticSeverity.Error
+                        this.message = message
+                        source = "graphmd"
+                        code = Either.forLeft(DiagnosticCategory.ReferenceError.name)
+                        range = document.rangeOf(reference.range)
+                    }
+                }
+            }
+        }
         documents.keys.forEach { uri -> diagnostics.putIfAbsent(uri, mutableListOf()) }
         return diagnostics
+    }
+
+    private fun unresolvedReferenceMessage(reference: SymbolReference): String = when {
+        reference.kind == ReferenceTargetKind.NodeType && reference.field == "extends" ->
+            "Unknown parent NodeType: ${reference.targetId}"
+        reference.kind == ReferenceTargetKind.RelType && reference.field == "extends" ->
+            "Unknown parent RelType: ${reference.targetId}"
+        reference.kind == ReferenceTargetKind.Timeline && reference.field == "extends" ->
+            "Unknown parent Timeline: ${reference.targetId}"
+        reference.kind == ReferenceTargetKind.NodeType ->
+            "Unknown NodeType: ${reference.targetId}"
+        reference.kind == ReferenceTargetKind.RelType ->
+            "Unknown RelType: ${reference.targetId}"
+        reference.kind == ReferenceTargetKind.Node ->
+            "Unknown Node target: ${reference.targetId}"
+        else ->
+            "Unknown Timeline: ${reference.targetId}"
     }
 
     private fun normalizeUri(uri: String): String =
@@ -1594,6 +1652,12 @@ internal class GraphMdWorkspaceIndex(
     }
 
     private fun referenceTargetForDiagnostic(message: String): DiagnosticReferenceTarget? {
+        Regex("""^Ambiguous (Node|NodeType|RelType|Timeline) reference: (.+)$""").matchEntire(message)?.let {
+            return DiagnosticReferenceTarget(referenceTargetKind(it.groupValues[1]), it.groupValues[2], null)
+        }
+        Regex("""^Expected (Node|NodeType|RelType|Timeline) but found .+: (.+)$""").matchEntire(message)?.let {
+            return DiagnosticReferenceTarget(referenceTargetKind(it.groupValues[1]), it.groupValues[2], null)
+        }
         Regex("""^Unknown NodeType: (.+)$""").matchEntire(message)?.let {
             return DiagnosticReferenceTarget(ReferenceTargetKind.NodeType, it.groupValues[1], "type")
         }
@@ -1619,6 +1683,14 @@ internal class GraphMdWorkspaceIndex(
             return DiagnosticReferenceTarget(ReferenceTargetKind.Timeline, it.groupValues[1], null)
         }
         return null
+    }
+
+    private fun referenceTargetKind(name: String): ReferenceTargetKind = when (name) {
+        "Node" -> ReferenceTargetKind.Node
+        "NodeType" -> ReferenceTargetKind.NodeType
+        "RelType" -> ReferenceTargetKind.RelType
+        "Timeline" -> ReferenceTargetKind.Timeline
+        else -> error("Unknown reference target kind: $name")
     }
 }
 

@@ -563,15 +563,15 @@ private class MiniYamlParser(
     }
 
     private fun parseInlineValue(raw: String): YamlValue {
-        val value = raw.trim()
+        val value = stripYamlTrailingComment(raw).trim()
         if (value.isEmpty()) return YamlNull
         if (value.startsWith("[") && value.endsWith("]")) {
             val inner = value.substring(1, value.lastIndex)
             if (inner.isBlank()) return YamlList(emptyList())
-            return YamlList(splitInlineList(inner).map(::parseInlineValue))
+            return YamlList(splitYamlInlineList(inner).map { parseInlineValue(it.raw) })
         }
         if (value.startsWith("\"") && value.endsWith("\"") && value.length >= 2) {
-            return YamlString(parseQuoted(value.substring(1, value.length - 1)))
+            return YamlString(decodeDoubleQuotedYamlScalar(value.substring(1, value.length - 1)))
         }
         if (value.startsWith("'") && value.endsWith("'") && value.length >= 2) {
             return YamlString(value.substring(1, value.length - 1).replace("''", "'"))
@@ -584,56 +584,6 @@ private class MiniYamlParser(
             value.matches(Regex("[-+]?[0-9]+\\.[0-9]+")) -> YamlNumber(value.toDouble())
             else -> YamlString(value)
         }
-    }
-
-    private fun parseQuoted(value: String): String {
-        val result = StringBuilder()
-        var i = 0
-        while (i < value.length) {
-            val ch = value[i]
-            if (ch != '\\') {
-                result.append(ch)
-                i++
-                continue
-            }
-            when (val next = value.getOrNull(i + 1)) {
-                'n' -> result.append('\n')
-                'r' -> result.append('\r')
-                't' -> result.append('\t')
-                '\\' -> result.append('\\')
-                '"' -> result.append('"')
-                else -> if (next != null) result.append(next)
-            }
-            i += 2
-        }
-        return result.toString()
-    }
-
-    private fun splitInlineList(value: String): List<String> {
-        val parts = mutableListOf<String>()
-        val current = StringBuilder()
-        var inQuotes = false
-        var quoteChar = '\u0000'
-        value.forEach { ch ->
-            when {
-                inQuotes && ch == quoteChar -> {
-                    inQuotes = false
-                    current.append(ch)
-                }
-                !inQuotes && (ch == '"' || ch == '\'') -> {
-                    inQuotes = true
-                    quoteChar = ch
-                    current.append(ch)
-                }
-                !inQuotes && ch == ',' -> {
-                    parts += current.toString().trim()
-                    current.clear()
-                }
-                else -> current.append(ch)
-            }
-        }
-        if (current.isNotEmpty()) parts += current.toString().trim()
-        return parts.filter { it.isNotEmpty() }
     }
 
     private fun splitKeyValue(content: String): Pair<String, String?>? {

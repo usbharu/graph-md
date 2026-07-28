@@ -246,6 +246,216 @@ class GraphDocumentAnalyzerTest {
     }
 
     @Test
+    fun `extracts quoted nested Timeline scalars without quotes or false positives`() {
+        val text = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            validTime:
+              - timeline: "Quoted" # double
+              - timeline: 'Single' # single
+              - timeline: Escaped # bare
+            props:
+              label: "Quoted"
+              timeline: "not closed
+            ---
+        """.trimIndent()
+
+        val timelines = analyzer.analyze(text, "/tmp/alice.md").references
+            .filter { it.kind == ReferenceTargetKind.Timeline }
+
+        assertEquals(listOf("Quoted", "Single", "Escaped"), timelines.map { it.targetId })
+        timelines.forEach { reference ->
+            assertEquals(reference.targetId.length, reference.range.end - reference.range.start)
+            assertTrue(text.substring(reference.range.start, reference.range.end).none { it == '"' || it == '\'' })
+        }
+    }
+
+    @Test
+    fun `collects only structurally Timeline-valued yaml fields`() {
+        val timelineText = """
+            ---
+            id: T
+            kind: Timeline
+            mappings:
+              - kind: offset
+                to: "Base" # mapping target
+                offset: 1
+            props:
+              from: note
+              to: other
+              timeline: label
+            ---
+        """.trimIndent()
+        val nodeText = """
+            ---
+            id: event
+            kind: Node
+            type: Event
+            validTime:
+              - timeline: Valid
+            props:
+              instant:
+                timeline: Instant
+                timecode: 1
+              duration:
+                from:
+                  timeline: Endpoint
+                  timecode: 2
+              numericDuration:
+                timeline: NumericInt
+                from: 1
+              decimalDuration:
+                timeline: NumericDecimal
+                to: 1.5
+              ordinary:
+                timeline: NotAReference
+              ordinaryDurationLike:
+                timeline: StillNotAReference
+                from: note
+              ordinaryEndpoint:
+                from:
+                  timeline: AlsoNotAReference
+            ---
+        """.trimIndent()
+        val schemaText = """
+            ---
+            id: Event
+            kind: NodeType
+            props:
+              at:
+                type: instant
+                timeline: "Schema"
+              singularCanonical:
+                type: instant
+                timeline:
+                  id: Singular
+                  mapped: true
+              singularLegacy:
+                type: instant
+                timeline:
+                  Legacy.Single:
+                    mapped: false
+              overlappingLegacy:
+                type: instant
+                timeline:
+                  Nested:
+                    id: Spurious
+                    mapped: true
+              overlappingLegacyList:
+                type: instant
+                timeline:
+                  - Listed:
+                      id: AlsoSpurious
+                      mapped: false
+              canonicalExtra:
+                type: instant
+                timeline:
+                  id: Canonical
+                  mapped: true
+                  extra: ignored
+              canonicalListExtra:
+                type: instant
+                timeline:
+                  - id: CanonicalList
+                    mapped: false
+                    extra: ignored
+              alternatives:
+                type: instant
+                timeline:
+                  - id: First
+                    mapped: false
+                  - Mapped:
+                      mapped: true
+                  - Third.Age:
+                      mapped: true
+                  - _Leading:
+                      mapped: false
+              inline:
+                type: instant
+                timeline: [, Inline,, "QuotedInline",] # choices
+            ---
+        """.trimIndent()
+
+        assertEquals(
+            listOf("Base"),
+            analyzer.analyze(timelineText, "/tmp/t.md").references
+                .filter { it.kind == ReferenceTargetKind.Timeline }.map { it.targetId },
+        )
+        assertEquals(
+            listOf("Valid", "Instant", "Endpoint", "NumericInt", "NumericDecimal"),
+            analyzer.analyze(nodeText, "/tmp/node.md").references
+                .filter { it.kind == ReferenceTargetKind.Timeline }.map { it.targetId },
+        )
+        val schemaAnalysis = analyzer.analyze(schemaText, "/tmp/schema.md")
+        assertTrue(schemaAnalysis.parsed.diagnostics.isEmpty(), schemaAnalysis.parsed.diagnostics.joinToString())
+        assertEquals(
+            listOf(
+                "Schema",
+                "Singular",
+                "Legacy.Single",
+                "Nested",
+                "Listed",
+                "Canonical",
+                "CanonicalList",
+                "First",
+                "Mapped",
+                "Third.Age",
+                "_Leading",
+                "Inline",
+                "QuotedInline",
+            ),
+            schemaAnalysis.references
+                .filter { it.kind == ReferenceTargetKind.Timeline }.map { it.targetId },
+        )
+        schemaAnalysis.references.filter { it.targetId in setOf("Inline", "QuotedInline") }.forEach { reference ->
+            assertEquals(reference.targetId, schemaText.substring(reference.range.start, reference.range.end))
+        }
+
+        val invalidSelectorText = """
+            ---
+            id: Invalid
+            kind: NodeType
+            props:
+              missingMapped:
+                type: instant
+                timeline:
+                  - id: MissingMapped
+              nonBoolean:
+                type: instant
+                timeline:
+                  - Legacy:
+                      mapped: nope
+              deepCanonical:
+                type: instant
+                timeline:
+                  - id: DeepCanonical
+                    nested:
+                      mapped: true
+              deepLegacy:
+                type: instant
+                timeline:
+                  - DeepLegacy:
+                      nested:
+                        mapped: false
+              neighbor:
+                type: instant
+                timeline:
+                  - id: Neighbor
+                  - id: Other
+                    mapped: true
+            ---
+        """.trimIndent()
+        val invalidAnalysis = analyzer.analyze(invalidSelectorText, "/tmp/invalid-schema.md")
+        assertTrue(invalidAnalysis.parsed.diagnostics.isNotEmpty())
+        assertEquals(
+            listOf("Other"),
+            invalidAnalysis.references.filter { it.kind == ReferenceTargetKind.Timeline }.map { it.targetId },
+        )
+    }
+
+    @Test
     fun `resets current list field when a non indented non mapping line appears`() {
         val text = """
             ---

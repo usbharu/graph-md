@@ -322,6 +322,188 @@ class GraphCompilerTest {
     }
 
     @Test
+    fun `distinguishes unresolved wrong-kind ambiguous and resolved references`() {
+        fun referenceMessages(documents: List<GraphDocument>): List<String> =
+            compiler().compile(documents).diagnostics
+                .filter { it.category == DiagnosticCategory.ReferenceError }
+                .map { it.message }
+
+        assertEquals(
+            listOf("Unknown NodeType: Missing"),
+            referenceMessages(listOf(NodeDocument("alice", "Missing", sourcePath = "/tmp/unresolved.md"))),
+        )
+        assertEquals(
+            listOf("Expected NodeType but found RelType: Shared"),
+            referenceMessages(
+                listOf(
+                    RelTypeDocument("Shared", sourcePath = "/tmp/shared-rel.md"),
+                    NodeDocument("alice", "Shared", sourcePath = "/tmp/wrong-kind.md"),
+                ),
+            ),
+        )
+        assertTrue(
+            "Ambiguous NodeType reference: Shared" in referenceMessages(
+                listOf(
+                    NodeTypeDocument("Shared", sourcePath = "/tmp/shared-a.md"),
+                    NodeTypeDocument("Shared", sourcePath = "/tmp/shared-b.md"),
+                    NodeDocument("alice", "Shared", sourcePath = "/tmp/ambiguous.md"),
+                ),
+            ),
+        )
+        assertEquals(
+            listOf("Expected Node but found NodeType, RelType: Shared"),
+            referenceMessages(
+                listOf(
+                    NodeTypeDocument("Shared", sourcePath = "/tmp/shared-type.md"),
+                    RelTypeDocument("Shared", sourcePath = "/tmp/shared-rel.md"),
+                    RelTypeDocument("friendOf", sourcePath = "/tmp/friend-of.md"),
+                    NodeTypeDocument("Person", sourcePath = "/tmp/person.md"),
+                    NodeDocument(
+                        "alice",
+                        "Person",
+                        body = "@link{}[Shared](Shared friendOf)",
+                        sourcePath = "/tmp/mixed.md",
+                    ),
+                ),
+            ),
+        )
+        assertTrue(
+            referenceMessages(
+                listOf(
+                    NodeTypeDocument("Shared", sourcePath = "/tmp/shared-type.md"),
+                    RelTypeDocument("Shared", sourcePath = "/tmp/shared-rel.md"),
+                    NodeDocument("alice", "Shared", sourcePath = "/tmp/resolved-with-wrong-kind.md"),
+                ),
+            ).none { "Shared" in it },
+        )
+        assertEquals(
+            emptyList(),
+            referenceMessages(
+                listOf(
+                    NodeTypeDocument("Person", sourcePath = "/tmp/person.md"),
+                    NodeDocument("alice", "Person", sourcePath = "/tmp/resolved.md"),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `Timeline references use candidate precedence across validation paths`() {
+        fun validTimeMessages(candidates: List<GraphDocument>): List<String> =
+            compiler().compile(
+                candidates + NodeTypeDocument("Person", sourcePath = "/tmp/person.md") +
+                    NodeDocument(
+                        "alice",
+                        "Person",
+                        validTime = listOf(ValidTime("T")),
+                        sourcePath = "/tmp/alice.md",
+                    ),
+            ).diagnostics.filter { it.category == DiagnosticCategory.ReferenceError }.map { it.message }
+
+        assertEquals(listOf("Unknown Timeline: T"), validTimeMessages(emptyList()))
+        assertEquals(
+            listOf("Expected Timeline but found NodeType: T"),
+            validTimeMessages(listOf(NodeTypeDocument("T", sourcePath = "/tmp/wrong.md"))),
+        )
+        assertTrue(
+            "Ambiguous Timeline reference: T" in validTimeMessages(
+                listOf(
+                    TimelineDocument("T", sourcePath = "/tmp/t-a.md"),
+                    TimelineDocument("T", sourcePath = "/tmp/t-b.md"),
+                ),
+            ),
+        )
+        assertTrue(
+            validTimeMessages(
+                listOf(
+                    TimelineDocument("T", sourcePath = "/tmp/t.md"),
+                    NodeTypeDocument("T", sourcePath = "/tmp/wrong-too.md"),
+                ),
+            ).none { "T" in it },
+        )
+
+        val allPaths = compiler().compile(
+            listOf(
+                NodeTypeDocument("SelectorWrong", sourcePath = "/tmp/selector-wrong.md"),
+                NodeTypeDocument("MappingWrong", sourcePath = "/tmp/mapping-wrong.md"),
+                NodeTypeDocument("InstantWrong", sourcePath = "/tmp/instant-wrong.md"),
+                NodeTypeDocument("EndpointWrong", sourcePath = "/tmp/endpoint-wrong.md"),
+                TimelineDocument(
+                    "Base",
+                    mappings = listOf(OffsetTimelineMapping(to = "MappingWrong", offset = 1.0)),
+                    sourcePath = "/tmp/base.md",
+                ),
+                NodeTypeDocument(
+                    "Event",
+                    props = mapOf(
+                        "instant" to PropSchema(PropType.instant, timeline = TimelineSelector.Id("SelectorWrong")),
+                        "endpoint" to PropSchema(PropType.duration),
+                    ),
+                    sourcePath = "/tmp/event-type.md",
+                ),
+                NodeDocument(
+                    "event",
+                    "Event",
+                    props = mapOf(
+                        "instant" to RawObject(
+                            mapOf("timeline" to RawString("InstantWrong"), "timecode" to RawInteger(1)),
+                        ),
+                        "endpoint" to RawObject(
+                            mapOf(
+                                "timeline" to RawString("Base"),
+                                "from" to RawObject(
+                                    mapOf("timeline" to RawString("EndpointWrong"), "timecode" to RawInteger(1)),
+                                ),
+                            ),
+                        ),
+                    ),
+                    sourcePath = "/tmp/event.md",
+                ),
+            ),
+        ).diagnostics.map { it.message }
+
+        listOf("SelectorWrong", "MappingWrong", "InstantWrong", "EndpointWrong").forEach { id ->
+            assertTrue("Expected Timeline but found NodeType: $id" in allPaths, allPaths.joinToString())
+        }
+
+        val commented = compiler().compileSources(
+            listOf(
+                SourceDocument(
+                    """
+                    ---
+                    id: T
+                    kind: Timeline
+                    ---
+                    """.trimIndent(),
+                    "/tmp/t.md",
+                ),
+                SourceDocument(
+                    """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    ---
+                    """.trimIndent(),
+                    "/tmp/person.md",
+                ),
+                SourceDocument(
+                    """
+                    ---
+                    id: commented
+                    kind: Node
+                    type: Person
+                    validTime:
+                      - timeline: T # era
+                    ---
+                    """.trimIndent(),
+                    "/tmp/commented.md",
+                ),
+            ),
+        )
+        assertTrue(commented.diagnostics.none { it.category == DiagnosticCategory.ReferenceError }, commented.diagnostics.joinToString())
+    }
+
+    @Test
     fun `reports invalid reltype narrowing and timeline schema errors`() {
         val result = compiler().compile(
             listOf(
