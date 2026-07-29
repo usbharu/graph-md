@@ -29,6 +29,11 @@ import org.eclipse.lsp4j.InsertTextFormat
 import org.eclipse.lsp4j.MessageActionItem
 import org.eclipse.lsp4j.MessageParams
 import org.eclipse.lsp4j.PublishDiagnosticsParams
+import org.eclipse.lsp4j.PrepareRenameParams
+import org.eclipse.lsp4j.ReferenceContext
+import org.eclipse.lsp4j.ReferenceParams
+import org.eclipse.lsp4j.RenameParams
+import org.eclipse.lsp4j.HoverParams
 import org.eclipse.lsp4j.Range
 import org.eclipse.lsp4j.Position
 import org.eclipse.lsp4j.ShowMessageRequestParams
@@ -53,6 +58,102 @@ import kotlin.test.assertTrue
 
 class GraphMdLanguageServerTest {
     private val analyzer = GraphDocumentAnalyzer()
+
+    @Test
+    fun `noncanonical decoded ids support navigation hover prepare rename and rename`() {
+        val definitionUri = "file:///workspace/noncanonical-type.md"
+        val referenceUri = "file:///workspace/noncanonical-node.md"
+        val definitionText = "---\r\nid: \"HOGE\\@FUGA\" # keep\r\nkind: NodeType\r\n---\r\n"
+        val referenceText = """
+            ---
+            id: alice
+            kind: Node
+            type: "HOGE\@FUGA" # keep
+            ---
+        """.trimIndent()
+        val fixture = serverFixture(mapOf(definitionUri to definitionText, referenceUri to referenceText))
+        val referenceOffset = referenceText.indexOf("HOGE") + 6
+        val referencePosition = Position(3, 12)
+        val identifier = TextDocumentIdentifier(referenceUri)
+
+        val definition = fixture.definitions(referenceUri, referenceOffset).single()
+        assertEquals(definitionUri, definition.uri)
+        assertEquals(Range(Position(1, 5), Position(1, 15)), definition.range)
+
+        val references = fixture.server.textDocumentService.references(
+            ReferenceParams(identifier, referencePosition, ReferenceContext(true)),
+        ).get()
+        assertEquals(setOf(definitionUri, referenceUri), references.map { it.uri }.toSet())
+
+        val hover = fixture.server.textDocumentService.hover(HoverParams(identifier, referencePosition)).get()
+        assertTrue(hover?.contents?.right?.value?.contains("HOGE@FUGA") == true)
+
+        val prepared = fixture.server.textDocumentService.prepareRename(
+            PrepareRenameParams(identifier, referencePosition),
+        ).get()?.second
+        assertEquals("HOGE@FUGA", prepared?.placeholder)
+        assertEquals(Range(Position(3, 7), Position(3, 17)), prepared?.range)
+
+        val rename = fixture.server.textDocumentService.rename(
+            RenameParams(identifier, referencePosition, "ValidType"),
+        ).get()
+        assertEquals("ValidType", rename?.changes?.getValue(definitionUri)?.single()?.newText)
+        assertEquals(Range(Position(1, 5), Position(1, 15)), rename?.changes?.getValue(definitionUri)?.single()?.range)
+        assertEquals("ValidType", rename?.changes?.getValue(referenceUri)?.single()?.newText)
+        assertTrue(
+            fixture.diagnostics.getValue(definitionUri).any {
+                it.severity == DiagnosticSeverity.Warning &&
+                    it.message == "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*"
+            },
+        )
+    }
+
+    @Test
+    fun `rename uses only parser-selected duplicate id and full no-separation scalar`() {
+        val duplicateUri = "file:///workspace/duplicate.md"
+        val referenceUri = "file:///workspace/duplicate-reference.md"
+        val suffixUri = "file:///workspace/no-separation.md"
+        val duplicateText = "---\nid: A@one\nid: B@two\nkind: NodeType\n---"
+        val referenceText = "---\nid: node\nkind: Node\ntype: B@two\n---"
+        val suffixText = "---\nid: \"A@id\"#suffix\nkind: NodeType\n---"
+        val fixture = serverFixture(
+            mapOf(
+                duplicateUri to duplicateText,
+                referenceUri to referenceText,
+                suffixUri to suffixText,
+            ),
+        )
+
+        val duplicateRename = fixture.server.textDocumentService.rename(
+            RenameParams(TextDocumentIdentifier(referenceUri), Position(3, 9), "ValidType"),
+        ).get()
+        val definitionEdit = duplicateRename?.changes?.getValue(duplicateUri)?.single()
+        assertEquals(Range(Position(2, 4), Position(2, 9)), definitionEdit?.range)
+        assertEquals("ValidType", definitionEdit?.newText)
+
+        val suffixPrepared = fixture.server.textDocumentService.prepareRename(
+            PrepareRenameParams(TextDocumentIdentifier(suffixUri), Position(1, 8)),
+        ).get()?.second
+        assertEquals("\"A@id\"#suffix", suffixPrepared?.placeholder)
+        assertEquals(Range(Position(1, 4), Position(1, 17)), suffixPrepared?.range)
+    }
+
+    @Test
+    fun `rename preserves quotes around bracket-prefixed ids`() {
+        val definitionUri = "file:///workspace/bracket-type.md"
+        val referenceUri = "file:///workspace/bracket-node.md"
+        val definitionText = "---\nid: \"[Type@id]\"\nkind: NodeType\n---"
+        val referenceText = "---\nid: node\nkind: Node\ntype: \"[Type@id]\"\n---"
+        val fixture = serverFixture(mapOf(definitionUri to definitionText, referenceUri to referenceText))
+
+        val edit = fixture.server.textDocumentService.rename(
+            RenameParams(TextDocumentIdentifier(referenceUri), Position(3, 10), "ValidType"),
+        ).get()
+
+        assertEquals(Range(Position(1, 5), Position(1, 14)), edit?.changes?.getValue(definitionUri)?.single()?.range)
+        assertEquals(Range(Position(3, 7), Position(3, 16)), edit?.changes?.getValue(referenceUri)?.single()?.range)
+        assertEquals("ValidType", edit?.changes?.getValue(definitionUri)?.single()?.newText)
+    }
 
     @Test
     fun `server advertises quick fix code actions`() {

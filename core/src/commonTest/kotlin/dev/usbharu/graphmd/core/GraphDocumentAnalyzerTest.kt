@@ -11,6 +11,242 @@ class GraphDocumentAnalyzerTest {
     private val analyzer = GraphDocumentAnalyzer()
 
     @Test
+    fun `indexes complete noncanonical yaml ids with decoded values and editable ranges`() {
+        val text = """
+            ---
+            id: "HOGE\@FUGA" # definition comment
+            kind: Node
+            type: 'TYPE@ONE' # reference comment
+            props:
+              nested:
+                id: phantom@id
+                timeline: "TIME\/LINE"
+            ---
+        """.trimIndent()
+
+        val analysis = analyzer.analyze(text, "/tmp/punctuation.md")
+        val definition = analysis.definitions.single()
+        assertEquals("HOGE@FUGA", definition.id)
+        assertEquals("HOGE\\@FUGA", text.substring(definition.range.start, definition.range.end))
+        assertEquals("HOGE@FUGA", analysis.parsed.document?.id)
+        assertEquals(listOf("TYPE@ONE", "TIME/LINE"), analysis.references.map { it.targetId })
+        assertTrue(analysis.definitions.none { it.id == "phantom@id" })
+        assertTrue(analysis.parsed.diagnostics.any { it.message.startsWith("id MUST match ") })
+    }
+
+    @Test
+    fun `preserves noncanonical list and body reference tokens without fragments`() {
+        val text = """
+            ---
+            id: Child@Type
+            kind: NodeType
+            extends: ["Base@Type", 'Other/Type', Third+Type] # list comment
+            props:
+              active:
+                timeline: Era@Branch
+            ---
+        """.trimIndent()
+
+        val analysis = analyzer.analyze(text, "/tmp/child.md")
+        assertEquals(
+            listOf("Base@Type", "Other/Type", "Third+Type", "Era@Branch"),
+            analysis.references.map { it.targetId },
+        )
+        assertTrue(analysis.references.none { it.targetId in setOf("Base", "Type", "Era", "Branch") })
+        assertEquals(
+            listOf("Base@Type", "Other/Type", "Third+Type", "Era@Branch"),
+            analysis.references.map { text.substring(it.range.start, it.range.end) },
+        )
+    }
+
+    @Test
+    fun `indexes complete GraphMD target and quoted relation type tokens`() {
+        val text = """
+            ---
+            id: source
+            kind: Node
+            type: Type
+            ---
+            @link{}[Target](node@remote "rel\/type")
+        """.trimIndent()
+
+        val analysis = analyzer.analyze(text, "/tmp/body.md")
+        val target = analysis.references.single { it.field == "relation.target" }
+        val relType = analysis.references.single { it.field == "relation.type" }
+        assertEquals("node@remote", target.targetId)
+        assertEquals("rel/type", relType.targetId)
+        assertEquals("node@remote", text.substring(target.range.start, target.range.end))
+        assertEquals("rel\\/type", text.substring(relType.range.start, relType.range.end))
+    }
+
+    @Test
+    fun `keeps raw offsets for CRLF and UTF-16 text before noncanonical symbols`() {
+        val text = "---\r\n# 😀\r\nid: HOGE@FUGA\r\nkind: NodeType\r\n---\r\n"
+        val analysis = analyzer.analyze(text, "/tmp/crlf.md")
+        val definition = analysis.definitions.single()
+
+        assertEquals(text.indexOf("HOGE@FUGA"), definition.range.start)
+        assertEquals("HOGE@FUGA", text.substring(definition.range.start, definition.range.end))
+        assertEquals("HOGE@FUGA", analyzer.findDefinitionAt(analysis, definition.range.start + 5)?.id)
+    }
+
+    @Test
+    fun `keeps parser and analyzer identities aligned around yaml comments and flow lists`() {
+        val blockList = """
+            ---
+            id: Child
+            kind: NodeType
+            extends:
+              - Parent@id # keep
+            ---
+        """.trimIndent()
+        val blockAnalysis = analyzer.analyze(blockList, "/tmp/block.md")
+        assertEquals(listOf("Parent@id"), (blockAnalysis.parsed.document as NodeTypeDocument).extends)
+        assertEquals(listOf("Parent@id"), blockAnalysis.references.map { it.targetId })
+
+        val noSeparation = """
+            ---
+            id: Child
+            kind: NodeType
+            extends: [Parent@id]#suffix
+            ---
+        """.trimIndent()
+        val noSeparationAnalysis = analyzer.analyze(noSeparation, "/tmp/no-separation.md")
+        assertTrue(noSeparationAnalysis.references.none { it.targetId == "Parent@id" })
+        assertTrue((noSeparationAnalysis.parsed.document as NodeTypeDocument).extends.isEmpty())
+
+        val quotedSuffix = """
+            ---
+            id: "A@id"#suffix
+            kind: NodeType
+            ---
+        """.trimIndent()
+        val suffixAnalysis = analyzer.analyze(quotedSuffix, "/tmp/suffix.md")
+        val suffixDefinition = suffixAnalysis.definitions.single()
+        assertEquals("\"A@id\"#suffix", suffixDefinition.id)
+        assertEquals("\"A@id\"#suffix", quotedSuffix.substring(suffixDefinition.range.start, suffixDefinition.range.end))
+        assertEquals(suffixAnalysis.parsed.document?.id, suffixDefinition.id)
+    }
+
+    @Test
+    fun `indexes only the parser-selected duplicate root id`() {
+        val text = """
+            ---
+            id: A@one
+            id: B@two
+            kind: NodeType
+            ---
+        """.trimIndent()
+
+        val analysis = analyzer.analyze(text, "/tmp/duplicate-id.md")
+        val definition = analysis.definitions.single()
+        assertEquals("B@two", definition.id)
+        assertEquals(text.lastIndexOf("B@two"), definition.range.start)
+        assertEquals("B@two", analysis.parsed.document?.id)
+    }
+
+    @Test
+    fun `does not index timeline text inside inline quoted property values`() {
+        val text = """
+            ---
+            id: node
+            kind: Node
+            type: Type
+            ---
+            @props{note="timeline=Ghost@id", x=1}
+        """.trimIndent()
+
+        val analysis = analyzer.analyze(text, "/tmp/string.md")
+        assertTrue(analysis.references.none { it.targetId == "Ghost@id" })
+    }
+
+    @Test
+    fun `flow lists track escaped double quotes while retaining punctuation`() {
+        val text = """
+            ---
+            id: Child
+            kind: NodeType
+            extends: ["A\"B,C", D@two]
+            ---
+        """.trimIndent()
+
+        val analysis = analyzer.analyze(text, "/tmp/flow.md")
+        assertEquals(listOf("A\"B,C", "D@two"), (analysis.parsed.document as NodeTypeDocument).extends)
+        assertEquals(listOf("A\"B,C", "D@two"), analysis.references.map { it.targetId })
+        assertEquals(listOf("A\\\"B,C", "D@two"), analysis.references.map { text.substring(it.range.start, it.range.end) })
+    }
+
+    @Test
+    fun `does not partially index nested or comment-truncated flow lists`() {
+        val nested = """
+            ---
+            id: Child
+            kind: NodeType
+            extends:
+              - [Parent@id]
+            ---
+        """.trimIndent()
+        val nestedAnalysis = analyzer.analyze(nested, "/tmp/nested-flow.md")
+        assertTrue((nestedAnalysis.parsed.document as NodeTypeDocument).extends.isEmpty())
+        assertTrue(nestedAnalysis.references.none { "Parent@id" in it.targetId })
+
+        val truncated = """
+            ---
+            id: Child
+            kind: NodeType
+            extends: [Parent@id, # closing bracket is commented]
+            ---
+        """.trimIndent()
+        val truncatedAnalysis = analyzer.analyze(truncated, "/tmp/truncated-flow.md")
+        assertTrue((truncatedAnalysis.parsed.document as NodeTypeDocument).extends.isEmpty())
+        assertTrue(truncatedAnalysis.references.none { it.targetId == "Parent@id" })
+
+        val quoted = """
+            ---
+            id: Child
+            kind: NodeType
+            extends:
+              - "[Parent@id]"
+            ---
+        """.trimIndent()
+        val quotedAnalysis = analyzer.analyze(quoted, "/tmp/quoted-bracket.md")
+        assertEquals(listOf("[Parent@id]"), (quotedAnalysis.parsed.document as NodeTypeDocument).extends)
+        val quotedReference = quotedAnalysis.references.single()
+        assertEquals("[Parent@id]", quotedReference.targetId)
+        assertEquals("[Parent@id]", quoted.substring(quotedReference.range.start, quotedReference.range.end))
+
+        val quotedMapping = """
+            ---
+            id: node
+            kind: Node
+            type: "[Type@id]"
+            ---
+        """.trimIndent()
+        val mappingAnalysis = analyzer.analyze(quotedMapping, "/tmp/quoted-mapping.md")
+        assertEquals("[Type@id]", (mappingAnalysis.parsed.document as NodeDocument).type)
+        assertEquals("[Type@id]", mappingAnalysis.references.single { it.field == "type" }.targetId)
+    }
+
+    @Test
+    fun `unmatched prose quote does not hide timeline references on later lines`() {
+        val text = """
+            ---
+            id: node
+            kind: Node
+            type: Type
+            ---
+            Unmatched " prose
+            @props(validTime=Era@Branch){age=1}
+        """.trimIndent()
+
+        val analysis = analyzer.analyze(text, "/tmp/unmatched-quote.md")
+        assertEquals(
+            listOf("Era@Branch"),
+            analysis.references.filter { it.kind == ReferenceTargetKind.Timeline }.map { it.targetId },
+        )
+    }
+
+    @Test
     fun `returns empty analysis when front matter marker is absent`() {
         val text = "no front matter here"
         val analysis = analyzer.analyze(text, "/tmp/raw.md")

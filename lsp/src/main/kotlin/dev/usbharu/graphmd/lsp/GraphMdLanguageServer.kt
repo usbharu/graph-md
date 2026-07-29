@@ -9,6 +9,7 @@ import dev.usbharu.graphmd.query.gmql.GmqlExecutionProfile
 import dev.usbharu.graphmd.query.gmql.GmqlValue
 import org.eclipse.lsp4j.*
 import org.eclipse.lsp4j.jsonrpc.messages.Either
+import org.eclipse.lsp4j.jsonrpc.messages.Either3
 import org.eclipse.lsp4j.services.LanguageClient
 import org.eclipse.lsp4j.services.LanguageClientAware
 import org.eclipse.lsp4j.services.LanguageServer
@@ -48,7 +49,7 @@ class GraphMdLanguageServer : LanguageServer, LanguageClientAware, GraphMdSearch
                     definitionProvider = Either.forLeft(true)
                     referencesProvider = Either.forLeft(true)
                     hoverProvider = Either.forLeft(true)
-                    renameProvider = Either.forLeft(true)
+                    renameProvider = Either.forRight(RenameOptions(true))
                     codeActionProvider = Either.forRight(
                         CodeActionOptions(listOf(CodeActionKind.QuickFix)).apply {
                             resolveProvider = false
@@ -140,6 +141,13 @@ private class GraphMdTextDocumentService(
 
     override fun rename(params: RenameParams): CompletableFuture<WorkspaceEdit?> {
         return CompletableFuture.completedFuture(index.rename(params.textDocument.uri, params.position, params.newName))
+    }
+
+    override fun prepareRename(
+        params: PrepareRenameParams,
+    ): CompletableFuture<Either3<Range, PrepareRenameResult, PrepareRenameDefaultBehavior>?> {
+        val prepared = index.prepareRename(params.textDocument.uri, params.position)
+        return CompletableFuture.completedFuture(prepared?.let { Either3.forSecond(it) })
     }
 
     override fun codeAction(params: CodeActionParams): CompletableFuture<List<Either<Command, CodeAction>>> {
@@ -399,6 +407,15 @@ internal class GraphMdWorkspaceIndex(
             }
         }
         return Hover(contents)
+    }
+
+    fun prepareRename(uri: String, position: Position): PrepareRenameResult? {
+        val document = documentSnapshot(normalizeUri(uri)) ?: return null
+        val offset = document.offsetAt(position)
+        val symbol = analyzer.findReferenceAt(document.analysis, offset)?.let { it.range to it.targetId }
+            ?: analyzer.findDefinitionAt(document.analysis, offset)?.let { it.range to it.id }
+            ?: return null
+        return PrepareRenameResult(document.rangeOf(symbol.first), symbol.second)
     }
 
     fun rename(uri: String, position: Position, newName: String): WorkspaceEdit? {
@@ -1570,6 +1587,9 @@ internal class GraphMdWorkspaceIndex(
             return document.yamlScalarRange("id", it.groupValues[1])
         }
         if (diagnostic.message.startsWith("id MUST match ")) {
+            document.analysis.definitions.singleOrNull()?.range
+                ?.let(document::rangeOf)
+                ?.let { return it }
             frontMatterScalar(document.text, "id")
                 ?.let { document.yamlScalarRange("id", it) }
                 ?.let { return it }
@@ -2644,11 +2664,19 @@ private data class IndexedDocument(
     }
 
     fun bodyRangeOf(sourceRange: SourceRange): Range {
-        val bodyOffset = analysis.frontMatterEndOffset
-        return Range(
-            normalizedPositionAt(bodyOffset + sourceRange.start),
-            normalizedPositionAt(bodyOffset + sourceRange.end),
-        )
+        val bodyStart = positionAt(analysis.frontMatterEndOffset)
+        val normalizedBody = analysis.parsed.document?.body.orEmpty()
+        fun bodyPosition(offset: Int): Position {
+            val safeOffset = offset.coerceIn(0, normalizedBody.length)
+            val before = normalizedBody.substring(0, safeOffset)
+            val relativeLine = before.count { it == '\n' }
+            val relativeLineStart = before.lastIndexOf('\n').let { if (it < 0) 0 else it + 1 }
+            return Position(
+                bodyStart.line + relativeLine,
+                (if (relativeLine == 0) bodyStart.character else 0) + safeOffset - relativeLineStart,
+            )
+        }
+        return Range(bodyPosition(sourceRange.start), bodyPosition(sourceRange.end))
     }
 
     fun endRange(): Range = rangeOf(SourceRange(text.length, text.length))
@@ -2902,20 +2930,6 @@ private data class IndexedDocument(
         val safeOffset = offset.coerceIn(0, text.length)
         val line = lineStarts.indexOfLast { it <= safeOffset }.coerceAtLeast(0)
         return Position(line, safeOffset - lineStarts[line])
-    }
-
-    private fun normalizedPositionAt(offset: Int): Position {
-        val normalizedText = analysis.text
-        val safeOffset = offset.coerceIn(0, normalizedText.length)
-        var line = 0
-        var lineStart = 0
-        for (index in 0 until safeOffset) {
-            if (normalizedText[index] == '\n') {
-                line++
-                lineStart = index + 1
-            }
-        }
-        return Position(line, safeOffset - lineStart)
     }
 
     private fun sourceLines(): List<SourceLine> = buildList {

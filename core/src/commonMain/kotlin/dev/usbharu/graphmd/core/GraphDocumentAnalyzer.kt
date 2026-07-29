@@ -55,39 +55,41 @@ class GraphDocumentAnalyzer {
     private val parser = GraphDocumentParser()
 
     fun analyze(text: String, sourcePath: String): GraphDocumentAnalysis {
-        val normalized = text.replace("\r\n", "\n")
-        val parsed = parser.parseDocument(normalized, sourcePath)
+        val parsed = parser.parseDocument(text, sourcePath)
         val document = parsed.document
-        val lines = normalized.split('\n')
+        val lines = text.split('\n').map { it.removeSuffix("\r") }
         if (lines.firstOrNull() != "---") {
-            return GraphDocumentAnalysis(normalized, parsed, 0, emptyList(), emptyList(), emptyList(), emptyList())
+            return GraphDocumentAnalysis(text, parsed, 0, emptyList(), emptyList(), emptyList(), emptyList())
         }
         val endLine = lines.drop(1).indexOfFirst { it == "---" || it == "..." }.let { if (it >= 0) it + 1 else -1 }
         if (endLine < 0) {
-            return GraphDocumentAnalysis(normalized, parsed, 0, emptyList(), emptyList(), emptyList(), emptyList())
+            return GraphDocumentAnalysis(text, parsed, 0, emptyList(), emptyList(), emptyList(), emptyList())
         }
-        val lineStarts = computeLineStarts(normalized)
+        val lineStarts = computeLineStarts(text)
         val definitions = mutableListOf<SymbolDefinition>()
         val references = mutableListOf<SymbolReference>()
         val propertyDefinitions = mutableListOf<PropertyDefinition>()
         val propertyReferences = mutableListOf<PropertyReference>()
-        var currentListField: String? = null
+        val rootIdScalars = mutableListOf<YamlScalarToken>()
+        var currentListField: Pair<String, Int>? = null
 
         for (lineIndex in 1 until endLine) {
             val line = lines[lineIndex]
             val trimmed = line.trim()
             if (trimmed.isBlank() || trimmed.startsWith("#")) continue
+            val indent = line.indexOfFirst { !it.isWhitespace() }.let { if (it < 0) line.length else it }
 
-            val inlineList = Regex("""^([A-Za-z][A-Za-z0-9_-]*)\s*:\s*\[(.*)\]\s*$""").matchEntire(line)
+            val inlineList = scanYamlInlineList(line)
             if (inlineList != null) {
-                val field = inlineList.groupValues[1]
+                val field = inlineList.field
                 currentListField = null
-                val kind = listFieldKind(field, document)
+                val relevant = indent == 0 || field == "timeline" ||
+                    (field in setOf("from", "to") && document is TimelineDocument)
+                val kind = if (relevant) listFieldKind(field, document) else null
                 if (kind != null) {
-                    val listStart = line.indexOf('[') + 1
                     collectInlineListReferences(
-                        rawItems = inlineList.groupValues[2],
-                        absoluteListStart = lineStarts[lineIndex] + listStart,
+                        rawItems = inlineList.rawItems,
+                        absoluteListStart = lineStarts[lineIndex] + inlineList.itemsStart,
                         field = field,
                         kind = kind,
                         references = references,
@@ -96,29 +98,32 @@ class GraphDocumentAnalyzer {
                 continue
             }
 
-            val mapping = Regex("""^([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*?)\s*$""").matchEntire(line)
-            if (mapping != null && !trimmed.startsWith("- ")) {
-                val field = mapping.groupValues[1]
-                val value = mapping.groupValues[2]
-                currentListField = if (value.isEmpty()) field else null
+            val mapping = Regex("""^(\s*)(-\s*)?([A-Za-z][A-Za-z0-9_-]*)\s*:(.*)$""").matchEntire(line)
+            if (mapping != null) {
+                val field = mapping.groupValues[3]
                 val colonIndex = line.indexOf(':')
-                val valueStartInLine = line.substring(colonIndex + 1).indexOfFirst { !it.isWhitespace() }
-                    .takeIf { it >= 0 }?.plus(colonIndex + 1)
-                if (valueStartInLine != null) {
-                    val range = SourceRange(
-                        start = lineStarts[lineIndex] + valueStartInLine,
-                        end = lineStarts[lineIndex] + valueStartInLine + value.length,
-                    )
+                val scalar = scanYamlScalar(line, colonIndex + 1, lineStarts[lineIndex])
+                currentListField = if (mapping.groupValues[2].isEmpty() &&
+                    scalar == null && mapping.groupValues[4].substringBefore('#').isBlank()
+                ) {
+                    field to indent
+                } else {
+                    null
+                }
+                if (scalar != null) {
                     when (field) {
-                        "id" -> document?.id?.let { id ->
-                            definitions += SymbolDefinition(id, definitionKind(document), range)
-                        }
-                        "type" -> if (document is NodeDocument) {
-                            references += SymbolReference(stripYamlScalar(value), ReferenceTargetKind.NodeType, field, range)
+                        "id" -> if (indent == 0) rootIdScalars += scalar
+                        "type" -> if (indent == 0 && document is NodeDocument) {
+                            references += SymbolReference(scalar.decoded, ReferenceTargetKind.NodeType, field, scalar.range)
                         }
                         "extends", "from", "to", "timeline" -> {
-                            listFieldKind(field, document)?.let { kind ->
-                                references += SymbolReference(stripYamlScalar(value), kind, field, range)
+                            if (!scalar.isUnquotedFlowValue &&
+                                (indent == 0 || field == "timeline" ||
+                                    (field in setOf("from", "to") && document is TimelineDocument))
+                            ) {
+                                listFieldKind(field, document)?.let { kind ->
+                                    references += SymbolReference(scalar.decoded, kind, field, scalar.range)
+                                }
                             }
                         }
                     }
@@ -127,26 +132,35 @@ class GraphDocumentAnalyzer {
             }
 
             if (currentListField != null && Regex("""^\s*-\s+""").containsMatchIn(line)) {
-                val match = Regex("""^(\s*-\s+)(.*?)\s*$""").matchEntire(line) ?: continue
-                val field = currentListField
+                val match = Regex("""^(\s*-\s+)(.*)$""").matchEntire(line) ?: continue
+                val (field, parentIndent) = currentListField
+                if (indent <= parentIndent) {
+                    currentListField = null
+                    continue
+                }
                 val kind = listFieldKind(field, document) ?: continue
-                val rawValue = match.groupValues[2]
-                val itemStart = lineStarts[lineIndex] + match.groupValues[1].length
+                val scalar = scanYamlScalar(line, match.groupValues[1].length, lineStarts[lineIndex]) ?: continue
+                if (scalar.isUnquotedFlowValue) continue
                 references += SymbolReference(
-                    targetId = stripYamlScalar(rawValue),
+                    targetId = scalar.decoded,
                     kind = kind,
                     field = field,
-                    range = SourceRange(itemStart, itemStart + rawValue.length),
+                    range = scalar.range,
                 )
                 continue
             }
 
-            if (line.firstOrNull()?.isWhitespace() == false) {
+            if (currentListField?.let { indent <= it.second } == true) {
                 currentListField = null
             }
         }
 
-        collectTimelineReferences(lines, lineStarts, endLine, document, references)
+        document?.let {
+            rootIdScalars.lastOrNull()?.let { scalar ->
+                definitions += SymbolDefinition(scalar.decoded, definitionKind(it), scalar.range)
+            }
+        }
+
         val yamlPropertyKeys = extractYamlPropertyKeys(lines, lineStarts, endLine)
         when (document) {
             is NodeDocument -> yamlPropertyKeys.forEach { key ->
@@ -177,15 +191,18 @@ class GraphDocumentAnalyzer {
         }
 
         if (document is NodeDocument) {
-            val bodyOffset = lineStarts[endLine] + lines[endLine].length + 1
-            references += extractBodyReferences(document.body, bodyOffset)
-            references += extractInlineTimelineReferences(document.body, bodyOffset)
-            propertyReferences += extractBodyPropertyReferences(document.body, bodyOffset, document.type)
+            val bodyOffset = lineStarts[endLine] + lines[endLine].length +
+                if (text.getOrNull(lineStarts[endLine] + lines[endLine].length) == '\r') 2 else 1
+            val body = text.substring(bodyOffset.coerceAtMost(text.length))
+            references += extractBodyReferences(body, bodyOffset)
+            references += extractInlineTimelineReferences(body, bodyOffset)
+            propertyReferences += extractBodyPropertyReferences(body, bodyOffset, document.type)
         }
 
-        val frontMatterEndOffset = lineStarts[endLine] + lines[endLine].length + 1
+        val frontMatterEndOffset = lineStarts[endLine] + lines[endLine].length +
+            if (text.getOrNull(lineStarts[endLine] + lines[endLine].length) == '\r') 2 else 1
         return GraphDocumentAnalysis(
-            normalized,
+            text,
             parsed,
             frontMatterEndOffset,
             definitions,
@@ -312,15 +329,21 @@ class GraphDocumentAnalyzer {
                     val closeParen = findUnescaped(masked, ')', closeLabel + 2)
                     if (closeParen != null) {
                         val raw = body.substring(closeLabel + 2, closeParen)
-                        val parsed = RelationTargetParser.parse(raw)
+                        val parsed = RelationTargetParser.parseDetailed(raw)
                         if (parsed != null) {
-                            val target = parsed.first
-                            val relType = parsed.second
-                            val targetStart = closeLabel + 2 + raw.indexOf(target)
-                            val relTypeToken = raw.substring(raw.indexOfFirst { it == ' ' || it == '\t' }).trim()
-                            val relTypeStart = closeLabel + 2 + raw.lastIndexOf(relTypeToken)
-                            refs += SymbolReference(target, ReferenceTargetKind.Node, "relation.target", SourceRange(baseOffset + targetStart, baseOffset + targetStart + target.length))
-                            refs += SymbolReference(relType, ReferenceTargetKind.RelType, "relation.type", SourceRange(baseOffset + relTypeStart, baseOffset + relTypeStart + relTypeToken.length))
+                            val contentStart = baseOffset + closeLabel + 2
+                            refs += SymbolReference(
+                                parsed.target,
+                                ReferenceTargetKind.Node,
+                                "relation.target",
+                                SourceRange(contentStart + parsed.targetRange.first, contentStart + parsed.targetRange.last + 1),
+                            )
+                            refs += SymbolReference(
+                                parsed.relType,
+                                ReferenceTargetKind.RelType,
+                                "relation.type",
+                                SourceRange(contentStart + parsed.relTypeRange.first, contentStart + parsed.relTypeRange.last + 1),
+                            )
                         }
                         index = closeParen + 1
                         continue
@@ -391,6 +414,60 @@ class GraphDocumentAnalyzer {
         return chars.concatToString()
     }
 
+    private fun maskQuotedStrings(text: String): String {
+        val chars = text.toCharArray()
+        var index = 0
+        while (index < chars.size) {
+            if (chars[index] != '"') {
+                index++
+                continue
+            }
+            chars[index++] = ' '
+            var escaped = false
+            while (index < chars.size) {
+                val char = chars[index]
+                if (char == '\n') break
+                chars[index] = ' '
+                index++
+                when {
+                    escaped -> escaped = false
+                    char == '\\' -> escaped = true
+                    char == '"' -> break
+                }
+            }
+        }
+        return chars.concatToString()
+    }
+
+    private fun scanYamlInlineList(line: String): YamlInlineList? {
+        val mapping = Regex("""^(\s*)([A-Za-z][A-Za-z0-9_-]*)\s*:""").find(line) ?: return null
+        val field = mapping.groupValues[2]
+        var index = mapping.range.last + 1
+        while (index < line.length && line[index].isWhitespace()) index++
+        if (line.getOrNull(index) != '[') return null
+        val itemsStart = index + 1
+        index = itemsStart
+        var quote: Char? = null
+        var escaped = false
+        while (index < line.length) {
+            val char = line[index]
+            when {
+                quote == '"' && escaped -> escaped = false
+                quote == '"' && char == '\\' -> escaped = true
+                quote == '\'' && char == '\'' && line.getOrNull(index + 1) == '\'' -> index++
+                quote != null && char == quote -> quote = null
+                quote == null && (char == '"' || char == '\'') -> quote = char
+                quote == null && char == '#' && index > itemsStart && line[index - 1].isWhitespace() -> return null
+                quote == null && char == ']' -> {
+                    if (!onlyWhitespaceOrSeparatedComment(line, index + 1)) return null
+                    return YamlInlineList(field, line.substring(itemsStart, index), itemsStart)
+                }
+            }
+            index++
+        }
+        return null
+    }
+
     private fun findUnescaped(text: String, target: Char, start: Int): Int? {
         var escaped = false
         var index = start
@@ -435,40 +512,16 @@ class GraphDocumentAnalyzer {
         kind: ReferenceTargetKind,
         references: MutableList<SymbolReference>,
     ) {
-        var cursor = 0
-        rawItems.split(',').forEach { chunk ->
-            val value = chunk.trim()
-            val rawIndex = rawItems.indexOf(chunk, cursor)
-            cursor = rawIndex + chunk.length
-            if (value.isEmpty()) return@forEach
-            val valueIndex = chunk.indexOf(value)
-            val start = absoluteListStart + rawIndex + valueIndex
-            references += SymbolReference(stripYamlScalar(value), kind, field, SourceRange(start, start + value.length))
-        }
-    }
-
-    private fun collectTimelineReferences(
-        lines: List<String>,
-        lineStarts: List<Int>,
-        endLine: Int,
-        document: GraphDocument?,
-        references: MutableList<SymbolReference>,
-    ) {
-        for (lineIndex in 1 until endLine) {
-            val line = lines[lineIndex]
-            val match = Regex("""^(\s*)(?:-\s*)?(timeline|from|to):\s*([A-Za-z_][A-Za-z0-9_.:-]*)\s*$""").matchEntire(line) ?: continue
-            val field = match.groupValues[2]
-            if (field in setOf("from", "to") && document !is TimelineDocument) continue
-            val id = match.groupValues[3]
-            val start = lineStarts[lineIndex] + line.lastIndexOf(id)
-            if (references.any { it.kind == ReferenceTargetKind.Timeline && it.range.start == start }) continue
-            references += SymbolReference(id, ReferenceTargetKind.Timeline, field, SourceRange(start, start + id.length))
+        splitYamlInlineItems(rawItems).forEach { item ->
+            val itemText = rawItems.substring(item.start, item.end)
+            val scalar = scanYamlScalar(itemText, 0, absoluteListStart + item.start) ?: return@forEach
+            references += SymbolReference(scalar.decoded, kind, field, scalar.range)
         }
     }
 
     private fun extractInlineTimelineReferences(body: String, baseOffset: Int): List<SymbolReference> {
         val references = mutableListOf<SymbolReference>()
-        val masked = maskCodeRegions(body)
+        val masked = maskQuotedStrings(maskCodeRegions(body))
         Regex("""validTime\s*=\s*""").findAll(masked).forEach { marker ->
             var cursor = marker.range.last + 1
             val end = when (masked.getOrNull(cursor)) {
@@ -487,27 +540,31 @@ class GraphDocumentAnalyzer {
                 }
             }
             val expression = body.substring(cursor, end.coerceAtMost(body.length))
-            Regex("""[A-Za-z_][A-Za-z0-9_.:-]*""").findAll(expression).forEach { token ->
-                if (token.value in setOf("from", "to", "timecode", "value")) return@forEach
-                val absoluteStart = baseOffset + cursor + token.range.first
+            INLINE_SELECTOR.findAll(expression).forEach { match ->
+                val token = match.groups[1] ?: return@forEach
+                val decoded = decodeInlineToken(token.value)
+                val quoteOffset = if (token.value.firstOrNull() in setOf('"', '\'')) 1 else 0
+                val tokenStart = match.range.first + match.value.lastIndexOf(token.value)
+                val absoluteStart = baseOffset + cursor + tokenStart + quoteOffset
                 references += SymbolReference(
-                    token.value,
+                    decoded,
                     ReferenceTargetKind.Timeline,
                     "validTime.timeline",
-                    SourceRange(absoluteStart, absoluteStart + token.value.length),
+                    SourceRange(absoluteStart, absoluteStart + token.value.length - quoteOffset * 2),
                 )
             }
         }
-        Regex("""\btimeline\s*=\s*([A-Za-z_][A-Za-z0-9_.:-]*)""").findAll(masked).forEach { match ->
+        INLINE_TIMELINE_ASSIGNMENT.findAll(masked).forEach { match ->
             val token = match.groups[1] ?: return@forEach
+            val quoteOffset = if (token.value.firstOrNull() in setOf('"', '\'')) 1 else 0
             val tokenStart = match.range.first + match.value.lastIndexOf(token.value)
-            val absoluteStart = baseOffset + tokenStart
+            val absoluteStart = baseOffset + tokenStart + quoteOffset
             if (references.none { it.range.start == absoluteStart }) {
                 references += SymbolReference(
-                    token.value,
+                    decodeInlineToken(token.value),
                     ReferenceTargetKind.Timeline,
                     "timeline",
-                    SourceRange(absoluteStart, absoluteStart + token.value.length),
+                    SourceRange(absoluteStart, absoluteStart + token.value.length - quoteOffset * 2),
                 )
             }
         }
@@ -758,12 +815,166 @@ class GraphDocumentAnalyzer {
         }
     }
 
-    private fun stripYamlScalar(value: String): String {
-        val trimmed = value.trim()
-        return when {
-            trimmed.length >= 2 && trimmed.first() == '"' && trimmed.last() == '"' -> trimmed.substring(1, trimmed.length - 1)
-            trimmed.length >= 2 && trimmed.first() == '\'' && trimmed.last() == '\'' -> trimmed.substring(1, trimmed.length - 1)
-            else -> trimmed
+    private fun scanYamlScalar(line: String, start: Int, absoluteBase: Int): YamlScalarToken? {
+        var tokenStart = start
+        while (tokenStart < line.length && line[tokenStart].isWhitespace()) tokenStart++
+        if (tokenStart >= line.length || line[tokenStart] == '#') return null
+        return when (line[tokenStart]) {
+            '"' -> {
+                val decoded = StringBuilder()
+                var index = tokenStart + 1
+                var closedAt: Int? = null
+                while (index < line.length) {
+                    when (val char = line[index]) {
+                        '"' -> {
+                            closedAt = index
+                            break
+                        }
+                        '\\' -> {
+                            when (val escaped = line.getOrNull(index + 1)) {
+                                'n' -> decoded.append('\n')
+                                'r' -> decoded.append('\r')
+                                't' -> decoded.append('\t')
+                                '\\' -> decoded.append('\\')
+                                '"' -> decoded.append('"')
+                                null -> Unit
+                                else -> decoded.append(escaped)
+                            }
+                            index += 2
+                        }
+                        else -> {
+                            decoded.append(char)
+                            index++
+                        }
+                    }
+                }
+                val endQuote = closedAt ?: return scanPlainYamlScalar(line, tokenStart, absoluteBase)
+                if (!onlyWhitespaceOrSeparatedComment(line, endQuote + 1)) {
+                    return scanPlainYamlScalar(line, tokenStart, absoluteBase)
+                }
+                YamlScalarToken(
+                    decoded.toString(),
+                    SourceRange(absoluteBase + tokenStart + 1, absoluteBase + endQuote),
+                    quoted = true,
+                )
+            }
+            '\'' -> {
+                val decoded = StringBuilder()
+                var index = tokenStart + 1
+                var closedAt: Int? = null
+                while (index < line.length) {
+                    if (line[index] == '\'' && line.getOrNull(index + 1) == '\'') {
+                        decoded.append('\'')
+                        index += 2
+                    } else if (line[index] == '\'') {
+                        closedAt = index
+                        break
+                    } else {
+                        decoded.append(line[index])
+                        index++
+                    }
+                }
+                val endQuote = closedAt ?: return scanPlainYamlScalar(line, tokenStart, absoluteBase)
+                if (!onlyWhitespaceOrSeparatedComment(line, endQuote + 1)) {
+                    return scanPlainYamlScalar(line, tokenStart, absoluteBase)
+                }
+                YamlScalarToken(
+                    decoded.toString(),
+                    SourceRange(absoluteBase + tokenStart + 1, absoluteBase + endQuote),
+                    quoted = true,
+                )
+            }
+            else -> scanPlainYamlScalar(line, tokenStart, absoluteBase)
+        }
+    }
+
+    private fun scanPlainYamlScalar(line: String, tokenStart: Int, absoluteBase: Int): YamlScalarToken? {
+        var end = line.length
+        var index = tokenStart
+        while (index < line.length) {
+            if (line[index] == '#' && index > tokenStart && line[index - 1].isWhitespace()) {
+                end = index
+                break
+            }
+            index++
+        }
+        while (end > tokenStart && line[end - 1].isWhitespace()) end--
+        return if (end == tokenStart) null
+        else YamlScalarToken(
+            line.substring(tokenStart, end),
+            SourceRange(absoluteBase + tokenStart, absoluteBase + end),
+            quoted = false,
+        )
+    }
+
+    private fun onlyWhitespaceOrSeparatedComment(line: String, start: Int): Boolean {
+        var index = start
+        while (index < line.length && line[index].isWhitespace()) index++
+        return index == line.length || (index > start && line[index] == '#')
+    }
+
+    private fun splitYamlInlineItems(value: String): List<SourceRange> {
+        val ranges = mutableListOf<SourceRange>()
+        var start = 0
+        var index = 0
+        var quote: Char? = null
+        var escaped = false
+        while (index <= value.length) {
+            val char = value.getOrNull(index)
+            when {
+                quote == '"' && escaped -> escaped = false
+                quote == '"' && char == '\\' -> escaped = true
+                quote != null && char == quote -> {
+                    if (quote == '\'' && value.getOrNull(index + 1) == '\'') {
+                        index++
+                    } else {
+                        quote = null
+                    }
+                }
+                quote == null && (char == '"' || char == '\'') -> quote = char
+                quote == null && (char == ',' || char == null) -> {
+                    ranges += SourceRange(start, index)
+                    start = index + 1
+                }
+            }
+            index++
+        }
+        return ranges
+    }
+
+    private data class YamlScalarToken(
+        val decoded: String,
+        val range: SourceRange,
+        val quoted: Boolean,
+    ) {
+        val isUnquotedFlowValue: Boolean
+            get() = !quoted && decoded.startsWith("[")
+    }
+
+    private data class YamlInlineList(
+        val field: String,
+        val rawItems: String,
+        val itemsStart: Int,
+    )
+
+    private fun decodeInlineToken(raw: String): String {
+        if (raw.length < 2) return raw
+        return when (raw.first()) {
+            '"' -> {
+                val result = StringBuilder()
+                var index = 1
+                while (index < raw.length - 1) {
+                    if (raw[index] == '\\' && index + 1 < raw.length - 1) {
+                        result.append(raw[index + 1])
+                        index += 2
+                    } else {
+                        result.append(raw[index++])
+                    }
+                }
+                result.toString()
+            }
+            '\'' -> raw.substring(1, raw.length - 1).replace("''", "'")
+            else -> raw
         }
     }
 
@@ -781,4 +992,10 @@ class GraphDocumentAnalyzer {
         val references: List<PropertyReference>,
         val nextIndex: Int,
     )
+
+    private companion object {
+        private val INLINE_TOKEN = """"(?:\\.|[^"])*"|'(?:''|[^'])*'|[^\s,()\[\]{}=]+"""
+        private val INLINE_SELECTOR = Regex("""(?:^|[\[,])\s*($INLINE_TOKEN)""")
+        private val INLINE_TIMELINE_ASSIGNMENT = Regex("""\btimeline\s*=\s*($INLINE_TOKEN)""")
+    }
 }

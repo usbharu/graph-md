@@ -510,7 +510,7 @@ private class MiniYamlParser(
             val indent = indentOf(line)
             if (indent < expectedIndent) break
             if (indent != expectedIndent || !line.drop(indent).startsWith("- ")) break
-            val remainder = line.drop(indent + 2)
+            val remainder = stripYamlComment(line.drop(indent + 2)).trimEnd()
             index++
             val value = when {
                 remainder.isBlank() -> parseNestedBlock(expectedIndent) ?: YamlNull
@@ -612,25 +612,40 @@ private class MiniYamlParser(
     private fun splitInlineList(value: String): List<String> {
         val parts = mutableListOf<String>()
         val current = StringBuilder()
-        var inQuotes = false
-        var quoteChar = '\u0000'
-        value.forEach { ch ->
+        var quote: Char? = null
+        var escaped = false
+        var index = 0
+        while (index < value.length) {
+            val ch = value[index]
             when {
-                inQuotes && ch == quoteChar -> {
-                    inQuotes = false
+                quote == '"' && escaped -> {
+                    escaped = false
                     current.append(ch)
                 }
-                !inQuotes && (ch == '"' || ch == '\'') -> {
-                    inQuotes = true
-                    quoteChar = ch
+                quote == '"' && ch == '\\' -> {
+                    escaped = true
                     current.append(ch)
                 }
-                !inQuotes && ch == ',' -> {
+                quote == '\'' && ch == '\'' && value.getOrNull(index + 1) == '\'' -> {
+                    current.append(ch)
+                    current.append(ch)
+                    index++
+                }
+                quote != null && ch == quote -> {
+                    quote = null
+                    current.append(ch)
+                }
+                quote == null && (ch == '"' || ch == '\'') -> {
+                    quote = ch
+                    current.append(ch)
+                }
+                quote == null && ch == ',' -> {
                     parts += current.toString().trim()
                     current.clear()
                 }
                 else -> current.append(ch)
             }
+            index++
         }
         if (current.isNotEmpty()) parts += current.toString().trim()
         return parts.filter { it.isNotEmpty() }
@@ -642,7 +657,26 @@ private class MiniYamlParser(
         val key = content.substring(0, colonIndex).trim()
         if (key.isEmpty()) return null
         val rest = content.substring(colonIndex + 1)
-        return key to rest.takeIf { it.isNotBlank() }?.trim()
+        val scalar = stripYamlComment(rest).trim()
+        return key to scalar.takeIf { it.isNotBlank() }
+    }
+
+    private fun stripYamlComment(value: String): String {
+        var quote: Char? = null
+        var escaped = false
+        value.forEachIndexed { index, char ->
+            when {
+                quote == '"' && escaped -> escaped = false
+                quote == '"' && char == '\\' -> escaped = true
+                quote == '\'' && char == '\'' &&
+                    (value.getOrNull(index + 1) == '\'' || value.getOrNull(index - 1) == '\'') -> Unit
+                quote != null && char == quote -> quote = null
+                quote == null && (char == '"' || char == '\'') -> quote = char
+                quote == null && char == '#' && (index == 0 || value[index - 1].isWhitespace()) ->
+                    return value.substring(0, index)
+            }
+        }
+        return value
     }
 
     private fun looksLikeInlineMapEntry(content: String): Boolean {
@@ -653,7 +687,7 @@ private class MiniYamlParser(
     }
 
     private fun skipIgnorable() {
-        while (index < lines.size && lines[index].isBlank()) index++
+        while (index < lines.size && (lines[index].isBlank() || lines[index].trimStart().startsWith("#"))) index++
     }
 
     private fun indentOf(line: String): Int = line.indexOfFirst { !it.isWhitespace() }.let { if (it == -1) line.length else it }
