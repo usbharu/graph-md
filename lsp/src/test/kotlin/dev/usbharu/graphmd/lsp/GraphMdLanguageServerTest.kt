@@ -4,9 +4,11 @@ import dev.usbharu.graphmd.core.GraphDocumentAnalyzer
 import dev.usbharu.graphmd.core.GraphCompiler
 import dev.usbharu.graphmd.core.ReferenceTargetKind
 import dev.usbharu.graphmd.core.model.DocumentKind
+import dev.usbharu.graphmd.core.model.GraphDocument
 import dev.usbharu.graphmd.core.model.NodeDocument
 import dev.usbharu.graphmd.core.model.NodeTypeDocument
 import dev.usbharu.graphmd.core.model.PropType
+import dev.usbharu.graphmd.core.model.RelTypeDocument
 import dev.usbharu.graphmd.core.model.ResolvedPropSchema
 import dev.usbharu.graphmd.core.model.SourceDocument
 import dev.usbharu.graphmd.core.model.TimelineSelector
@@ -1859,6 +1861,170 @@ class GraphMdLanguageServerTest {
             timelineIds = emptyList(),
         ).resolve()?.map { it.label }.orEmpty()
         assertEquals(listOf("Entity"), listItems)
+    }
+
+    @Test
+    fun `property schema completions require a property key`() {
+        fun labelsAtCursor(
+            source: String,
+            parsedDocument: GraphDocument?,
+            nodePropsSchema: Map<String, ResolvedPropSchema> = emptyMap(),
+        ): List<String> {
+            val offset = source.indexOf("<cursor>")
+            assertTrue(offset >= 0)
+            val text = source.replace("<cursor>", "")
+            return FrontMatterCompletionResolver(
+                text = text,
+                offset = offset,
+                parsedDocument = parsedDocument,
+                nodeTypeIds = emptyList(),
+                relTypeIds = emptyList(),
+                timelineIds = listOf("CommonEra"),
+                nodePropsSchema = nodePropsSchema,
+            ).resolve()?.map { it.label }.orEmpty()
+        }
+
+        val nodeType = NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md")
+        val relType = RelTypeDocument(id = "Knows", sourcePath = "/tmp/knows.md")
+
+        assertEquals(
+            emptyList(),
+            labelsAtCursor("---\nid: Person\nkind: NodeType\nprops:\n  <cursor>\n---", nodeType),
+        )
+        assertEquals(
+            emptyList(),
+            labelsAtCursor("---\nid: Person\nkind: NodeType\nprops:\n  req<cursor>\n---", nodeType),
+        )
+        assertEquals(
+            listOf("type", "required"),
+            labelsAtCursor("---\nid: Person\nkind: NodeType\nprops:\n  name:\n    <cursor>\n---", nodeType),
+        )
+        assertEquals(
+            listOf("true", "false"),
+            labelsAtCursor("---\nid: Person\nkind: NodeType\nprops:\n  name:\n    required: <cursor>\n---", nodeType),
+        )
+        assertEquals(
+            listOf("type", "required"),
+            labelsAtCursor("---\nid: Person\nkind: NodeType\nprops:\n  required: <cursor>\n---", nodeType),
+        )
+        assertEquals(
+            listOf("type", "required"),
+            labelsAtCursor(
+                "---\nid: Person\nkind: NodeType\nprops:\n  tags:\n    type: array\n    items:\n      <cursor>\n---",
+                nodeType,
+            ),
+        )
+        assertEquals(
+            listOf("true", "false"),
+            labelsAtCursor(
+                "---\nid: Person\nkind: NodeType\nprops:\n  tags:\n    type: array\n    items:\n      required: <cursor>\n---",
+                nodeType,
+            ),
+        )
+        assertEquals(
+            listOf("required"),
+            labelsAtCursor(
+                "---\r\nid: Person\r\nkind: NodeType\r\nprops:\r\n  name:\r\n    type: string\r\n\r\n    # schema comment\r\n    <cursor>\r\n---",
+                nodeType,
+            ),
+        )
+        assertEquals(
+            emptyList(),
+            labelsAtCursor(
+                "---\nid: Person\nkind: NodeType\nprops:\n  name:\n    type: string\n  req<cursor>\n---",
+                nodeType,
+            ),
+        )
+        assertEquals(
+            emptyList(),
+            labelsAtCursor(
+                "---\nid: Person\nkind: NodeType\nmetadata:\n  props:\n    req<cursor>\n---",
+                nodeType,
+            ),
+        )
+        assertEquals(
+            listOf("type", "required"),
+            labelsAtCursor("---\nid: Knows\nkind: RelType\nprops:\n  since:\n    <cursor>\n---", relType),
+        )
+        assertEquals(
+            listOf("type", "required"),
+            labelsAtCursor("---\nid: Draft\nkind: NodeType\nprops:\n  name:\n    <cursor>\n---", null),
+        )
+        assertEquals(
+            listOf("type", "required"),
+            labelsAtCursor("---\nid: DraftRel\nkind: RelType\nprops:\n  weight:\n    <cursor>\n---", null),
+        )
+
+        val instanceCases = listOf(
+            Triple(
+                NodeDocument(id = "alice", type = "Person", sourcePath = "/tmp/alice.md"),
+                mapOf("foo" to ResolvedPropSchema(type = PropType.string)),
+                "foo",
+            ),
+            Triple(
+                NodeDocument(id = "alice", type = "Person", sourcePath = "/tmp/alice.md"),
+                mapOf("foo" to ResolvedPropSchema(type = PropType.string)),
+                "unknown",
+            ),
+            Triple(
+                NodeDocument(id = "alice", type = "Person", sourcePath = "/tmp/alice.md"),
+                emptyMap(),
+                "foo",
+            ),
+            Triple(
+                NodeDocument(
+                    id = "image",
+                    type = "Image",
+                    sourcePath = "/tmp/image.md",
+                    documentKind = DocumentKind.Media,
+                ),
+                mapOf("foo" to ResolvedPropSchema(type = PropType.string)),
+                "foo",
+            ),
+            Triple(
+                NodeDocument(
+                    id = "image",
+                    type = "Image",
+                    sourcePath = "/tmp/image.md",
+                    documentKind = DocumentKind.Media,
+                ),
+                mapOf("foo" to ResolvedPropSchema(type = PropType.string)),
+                "unknown",
+            ),
+            Triple(
+                NodeDocument(
+                    id = "image",
+                    type = "Image",
+                    sourcePath = "/tmp/image.md",
+                    documentKind = DocumentKind.Media,
+                ),
+                emptyMap(),
+                "foo",
+            ),
+        )
+        instanceCases.forEach { (document, schema, property) ->
+            val frontMatter = "---\nid: ${document.id}\nkind: ${document.kind}\ntype: ${document.type}\nprops:\n  $property:"
+            assertEquals(
+                emptyList(),
+                labelsAtCursor("$frontMatter\n    <cursor>\n---", document, schema),
+            )
+            assertEquals(
+                emptyList(),
+                labelsAtCursor("$frontMatter\n    req<cursor>\n---", document, schema),
+            )
+            assertEquals(
+                emptyList(),
+                labelsAtCursor("$frontMatter\n    type: <cursor>\n---", document, schema),
+            )
+            assertEquals(
+                emptyList(),
+                labelsAtCursor("$frontMatter\n    required: <cursor>\n---", document, schema),
+            )
+            assertEquals(
+                emptyList(),
+                labelsAtCursor("$frontMatter\n    timeline: <cursor>\n---", document, schema),
+            )
+        }
     }
 
     private fun serverFixture(documents: Map<String, String>): ServerFixture {

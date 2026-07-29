@@ -1657,18 +1657,20 @@ internal class FrontMatterCompletionResolver(
     private val nodePropsSchema: Map<String, ResolvedPropSchema> = emptyMap(),
 ) {
     fun resolve(): List<CompletionEntry>? {
-        val lines = text.replace("\r\n", "\n").split('\n')
+        val normalizedText = text.replace("\r\n", "\n")
+        val normalizedOffset = text.take(offset.coerceIn(0, text.length)).replace("\r\n", "\n").length
+        val lines = normalizedText.split('\n')
         if (lines.firstOrNull() != "---") return null
         val endLine = lines.drop(1).indexOfFirst { it == "---" || it == "..." }.let { if (it >= 0) it + 1 else -1 }
         if (endLine < 0) return null
         val lineStarts = computeLineStarts(lines)
-        if (offset >= lineStarts[endLine] + lines[endLine].length) return null
-        val lineIndex = lineStarts.indexOfLast { it <= offset }.coerceAtLeast(0)
+        if (normalizedOffset >= lineStarts[endLine] + lines[endLine].length) return null
+        val lineIndex = lineStarts.indexOfLast { it <= normalizedOffset }.coerceAtLeast(0)
         if (lineIndex == 0 || lineIndex >= endLine) return null
         val line = lines[lineIndex]
         val indent = indentOf(line)
         val trimmed = line.trimStart()
-        val cursorInLine = offset - lineStarts[lineIndex]
+        val cursorInLine = normalizedOffset - lineStarts[lineIndex]
         val beforeCursor = line.take(cursorInLine.coerceIn(0, line.length))
         val currentKeyPrefix = trimmed.takeWhile { it != ':' && !it.isWhitespace() }
         val usedTopLevelKeys = siblingKeysAtIndent(lines, lineIndex, 0)
@@ -1686,6 +1688,7 @@ internal class FrontMatterCompletionResolver(
 
         val path = contextPath(lines, lineIndex, indent, hasColon)
         val valuePrefix = if (hasColon) beforeCursor.substringAfter(':', "").trimStart() else ""
+        val documentKind = parsedDocument?.kind ?: inferredDocumentKind()
         nodePropsYamlCompletions(lines, lineIndex, indent, path, hasColon, currentKeyPrefix, valuePrefix)?.let { return it }
         return when {
             indent == 0 && keyCandidate.isNotEmpty() && !hasColon -> topLevelKeyCompletions(keyCandidate, usedTopLevelKeys)
@@ -1697,17 +1700,17 @@ internal class FrontMatterCompletionResolver(
             hasColon && parsedDocument is TimelineDocument && "mappings" in path && path.lastOrNull() in setOf("from", "to") ->
                 idCompletions(valuePrefix, timelineIds, "Timeline")
             hasColon && (path == listOf("from") || path == listOf("to")) -> idCompletions(valuePrefix, nodeTypeIds, "NodeType")
-            hasColon && path.lastOrNull() == "required" ->
+            hasColon && path.lastOrNull() == "required" && isPropSchemaPath(path.dropLast(1), documentKind) ->
                 enumCompletions(valuePrefix, listOf("true", "false"), "boolean")
             hasColon && path == listOf("timecode", "type") ->
                 enumCompletions(valuePrefix, listOf("number"), "timecode type")
-            hasColon && path.lastOrNull() == "type" ->
+            hasColon && path.lastOrNull() == "type" && isPropSchemaPath(path.dropLast(1), documentKind) ->
                 enumCompletions(valuePrefix, listOf("number", "string", "text", "instant", "duration", "array"), "prop type")
-            hasColon && path.lastOrNull() == "timeline" ->
+            hasColon && path.lastOrNull() == "timeline" && isPropSchemaPath(path.dropLast(1), documentKind) ->
                 timelineSelectorCompletions(valuePrefix)
-            hasColon && valuePrefix.isEmpty() -> nestedKeyCompletions(path, "", lines, lineIndex)
+            hasColon && valuePrefix.isEmpty() -> nestedKeyCompletions(path, "", lines, lineIndex, documentKind)
             indent == 0 -> topLevelKeyCompletions(keyCandidate, usedTopLevelKeys)
-            else -> nestedKeyCompletions(path, currentKeyPrefix, lines, lineIndex)
+            else -> nestedKeyCompletions(path, currentKeyPrefix, lines, lineIndex, documentKind)
         }
     }
 
@@ -1766,7 +1769,7 @@ internal class FrontMatterCompletionResolver(
         val schema = parentContainer.properties[currentKey]
         return when {
             schema != null -> typedValueCompletions(schema, valuePrefix, yaml = true)
-            currentKey == "timeline" ->
+            currentKey == "timeline" && currentKey in parentContainer.specialKeys ->
                 idCompletions(valuePrefix, allowedTimelineIds(parentContainer.ownerSchema), "Timeline")
             else -> null
         }
@@ -1802,6 +1805,7 @@ internal class FrontMatterCompletionResolver(
         prefix: String,
         lines: List<String>,
         lineIndex: Int,
+        documentKind: DocumentKind?,
     ): List<CompletionEntry>? {
         if (
             path.lastOrNull() == "validTime" &&
@@ -1814,7 +1818,7 @@ internal class FrontMatterCompletionResolver(
             path.lastOrNull() == "validTime" -> listOf("timeline", "from", "to")
             path.takeLast(2).let { it == listOf("validTime", "from") || it == listOf("validTime", "to") } ->
                 listOf("value", "timecode")
-            isInsidePropSchema(path) -> when (siblingScalarValue(lines, lineIndex, "type")) {
+            isPropSchemaPath(path, documentKind) -> when (siblingScalarValue(lines, lineIndex, "type")) {
                 "instant", "duration" -> listOf("type", "required", "timeline")
                 "array" -> listOf("type", "required", "items")
                 else -> listOf("type", "required")
@@ -2036,12 +2040,11 @@ internal class FrontMatterCompletionResolver(
 
     private fun indentOf(line: String): Int = line.indexOfFirst { !it.isWhitespace() }.let { if (it < 0) line.length else it }
 
-    private fun isInsidePropSchema(path: List<String>): Boolean {
-        if (path.isEmpty()) return false
-        val propsIndex = path.indexOf("props")
-        val propertiesIndex = path.indexOf("properties")
-        return propsIndex >= 0 || propertiesIndex >= 0
-    }
+    private fun isPropSchemaPath(path: List<String>, documentKind: DocumentKind?): Boolean =
+        (documentKind == DocumentKind.NodeType || documentKind == DocumentKind.RelType) &&
+            path.size >= 2 &&
+            path.first() == "props" &&
+            path.drop(2).all { it == "items" }
 
     private fun inferredDocumentKind(): DocumentKind? {
         val raw = Regex("""(?m)^kind\s*:\s*([A-Za-z]+)""").find(text)?.groupValues?.get(1)
