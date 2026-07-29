@@ -61,6 +61,7 @@ The `graphmd` CLI is implemented in the `cli` multiplatform module.
 ./gradlew :cli:run --args="stats ./documents"
 ./gradlew :cli:run --args='search "MATCH (person:Person) WHERE person.age >= $minimumAge RETURN person" ./documents --param minimumAge=18 --json'
 ./gradlew :cli:run --args="search --query-file queries/people.gmql ./documents --param minimumAge=18"
+./gradlew :cli:run --args="demo ./benchmark-data --count 1000 --seed 42"
 ```
 
 `search` executes GMQL against the documents found at the supplied paths.
@@ -90,6 +91,15 @@ endpoints as `assertion-only` ID references.
 Only `lint` emits validation warnings. Other operations keep warnings out of
 stderr while still reporting validation errors; `stats` retains the warning
 count as an aggregate.
+
+`demo DIR --count N` generates a compact, randomized GraphMD dataset containing
+Nodes, Media, links, properties, NodeType and RelType hierarchies, and Timeline
+hierarchies. The output directory must be new or empty. Counts below eight are
+expanded to the minimum complete eight-document dataset. Omit `--seed` for a
+new dataset on each run, or provide an integer seed to reproduce the exact same
+files and relationships. The seed used is always included in command output.
+Documents are generated and written one at a time, so memory use does not grow
+with the requested file count.
 
 This project uses a version catalog (see `gradle/libs.versions.toml`) to declare and version dependencies
 and both a build cache and a configuration cache (see `gradle.properties`).
