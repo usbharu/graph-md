@@ -392,6 +392,13 @@ internal class GmqlExecutor(
     private val propertyById = graph.propertyAssertions.associateBy { it.id }
     private val relationById = graph.relationAssertions.associateBy { it.id }
     private val textById = graph.textAssertions.associateBy { it.id }
+    private val titleAssertionsByNodeId = graph.textAssertions
+        .asSequence()
+        .filter { it.kind == TextKind.TITLE }
+        .mapNotNull { assertion ->
+            (assertion.owner as? AssertionOwner.Node)?.nodeId?.let { it to assertion }
+        }
+        .groupBy({ it.first }, { it.second })
     private val timelineUniverse = IntervalSet.of(
         graph.timelineCatalog.timelines
             .map { it.canonicalId }
@@ -781,7 +788,8 @@ internal class GmqlExecutor(
         val temporal = expressionTypes[call] is GmqlType.Temporal
         val chain = (scope as? GmqlExpression.Property)?.propertyChain()
         val variable = chain?.first ?: (scope as? GmqlExpression.Variable)?.name
-        val owner = when (val entity = variable?.let(binding.entities::get)) {
+        val entity = variable?.let(binding.entities::get)
+        val owner = when (entity) {
             is Entity.Node -> AssertionOwner.Node(entity.id)
             is Entity.Relation -> AssertionOwner.Relation(entity.id)
             null -> return booleanResult(
@@ -797,6 +805,22 @@ internal class GmqlExecutor(
             index.textAssertionIdsByOwner[owner].orEmpty().asSequence().mapNotNull(textById::get)
         } else {
             graph.textAssertions.asSequence().filter { it.owner == owner }
+        }.let { owned ->
+            if (path != null || entity !is Entity.Relation) {
+                owned
+            } else {
+                // An unscoped Link full-text search includes the visible title of
+                // its linked target. Reuse the target's TITLE assertion instead
+                // of copying it to the Link, so ownership and persisted indexes
+                // remain canonical. Scoped searches such as link.label continue
+                // to search only the Link's own assertions.
+                val targetTitles = relationById[entity.id]
+                    ?.targetNodeId
+                    ?.let(titleAssertionsByNodeId::get)
+                    .orEmpty()
+                    .asSequence()
+                (owned + targetTitles).distinctBy { it.id }
+            }
         }
         candidates
             .filter {

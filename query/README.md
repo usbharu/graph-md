@@ -20,6 +20,13 @@ Pass the original `SourceDocument` list when building if normal Markdown body
 text should be searchable. Without it, normalized property strings and relation
 labels are still indexed.
 
+An unscoped `FULLTEXT(link, query)` search also considers the linked target
+node's level-one Markdown heading (`TITLE`). The title remains owned by the target node:
+`FULLTEXT(link.label, query)` searches only the Link label, and targets without
+a Markdown title do not synthesize searchable text from their ID or URL.
+GraphMD's `[label](target relationType)` form has a visible Link label; its
+parenthesized portion is not Markdown's optional link-title syntax.
+
 ## Building and searching
 
 ```kotlin

@@ -4,6 +4,7 @@ import dev.usbharu.graphmd.core.GraphCompiler
 import dev.usbharu.graphmd.core.model.SourceDocument
 import dev.usbharu.graphmd.query.GraphSearchEngine
 import dev.usbharu.graphmd.query.ir.AssertionOwner
+import dev.usbharu.graphmd.query.ir.TextKind
 import dev.usbharu.graphmd.query.model.*
 import kotlin.coroutines.*
 import kotlin.test.*
@@ -334,6 +335,126 @@ class GmqlEngineTest {
     }
 
     @Test
+    fun `link full text includes the linked target title without changing assertion ownership`() {
+        val localSources = sources.map { source ->
+            if (source.sourcePath == "/bob.md") {
+                source.copy(text = source.text.replace("# Bob", "# Bob — 漆黒の魔王"))
+            } else {
+                source
+            }
+        }
+        val localEngine = GraphSearchEngine.build(GraphCompiler().compileSources(localSources), localSources)
+        val targetTitle = localEngine.graph.textAssertions.single {
+            it.kind == TextKind.TITLE && it.text == "Bob — 漆黒の魔王"
+        }
+        val relation = localEngine.graph.relationAssertions.single()
+
+        assertEquals(AssertionOwner.Node(NodeId("bob")), targetTitle.owner)
+        assertEquals(
+            listOf("Bob"),
+            localEngine.graph.textAssertions
+                .filter { it.owner == AssertionOwner.Relation(relation.id) }
+                .map { it.text },
+            "The target title must not be duplicated onto the Link.",
+        )
+
+        val byTargetTitle = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (a)-[link:friendOf]->(b)
+                   WHERE FULLTEXT(link, "漆黒の魔王")
+                   RETURN ID(a) AS source, ID(b) AS target""",
+            )
+        }
+        val byVisibleLabel = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (a)-[link:friendOf]->(b)
+                   WHERE FULLTEXT(link, "Bob")
+                   RETURN ID(a) AS source, ID(b) AS target""",
+            )
+        }
+        val scopedLabel = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (a)-[link:friendOf]->(b)
+                   WHERE FULLTEXT(link.label, "漆黒の魔王")
+                   RETURN ID(a) AS source""",
+            )
+        }
+        val unrelatedSourceText = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (a)-[link:friendOf]->(b)
+                   WHERE FULLTEXT(link, "勇者")
+                   RETURN ID(a) AS source""",
+            )
+        }
+
+        assertEquals(listOf("alice", "bob"), byTargetTitle.rows.single().stringValues())
+        assertEquals(listOf("alice", "bob"), byVisibleLabel.rows.single().stringValues())
+        assertTrue(scopedLabel.rows.isEmpty(), scopedLabel.toString())
+        assertTrue(unrelatedSourceText.rows.isEmpty(), unrelatedSourceText.toString())
+
+        val compiled = localEngine.compileGmql(
+            """MATCH (a)-[link:friendOf]->(b)
+               WHERE FULLTEXT(link, "漆黒の魔王")
+               RETURN ID(a) AS source, ID(b) AS target""",
+        ).query!!
+        assertEquals(
+            runSuspend { localEngine.scanGmql(compiled) },
+            runSuspend { localEngine.executeGmql(compiled) },
+        )
+        val loaded = GraphSearchEngine.loadStatic(localEngine.exportStatic())
+        assertEquals(
+            listOf("alice", "bob"),
+            runSuspend { loaded.executeGmql(compiled) }.rows.single().stringValues(),
+        )
+    }
+
+    @Test
+    fun `link full text does not synthesize a title from a target URL`() {
+        val localSources = listOf(
+            source("/type.md", "---\nid: Asset\nkind: NodeType\n---"),
+            source(
+                "/relation.md",
+                "---\nid: references\nkind: RelType\nfrom: [Asset]\nto: [Asset]\n---",
+            ),
+            source(
+                "/source.md",
+                """
+                ---
+                id: source
+                kind: Node
+                type: Asset
+                ---
+                Plain searchable prose.
+                @link[Visible asset](target references)
+                """,
+            ),
+            source(
+                "/target.md",
+                """
+                ---
+                id: target
+                kind: Media
+                type: Asset
+                url: https://cdn.example.test/image.png
+                ---
+                """,
+            ),
+        )
+        val localEngine = GraphSearchEngine.build(GraphCompiler().compileSources(localSources), localSources)
+
+        suspend fun search(term: String) = localEngine.queryGmql(
+            """MATCH (a)-[link:references]->(b)
+               WHERE FULLTEXT(link, ${'$'}term)
+               RETURN ID(a) AS source""",
+            mapOf("term" to GmqlValue.StringValue(term)),
+        )
+
+        assertEquals(listOf("source"), runSuspend { search("Visible asset") }.stringColumn())
+        assertTrue(runSuspend { search("cdn.example.test") }.rows.isEmpty())
+        assertTrue(runSuspend { search("Plain searchable prose") }.rows.isEmpty())
+    }
+
+    @Test
     fun `offset limit parameters and execution profiles are checked without string substitution`() {
         val paged = runSuspend {
             engine.queryGmql(
@@ -509,8 +630,11 @@ class GmqlEngineTest {
     private fun source(path: String, text: String) = SourceDocument(text.trimIndent(), path)
 }
 
-private fun GmqlQueryResult.stringColumn(): List<String> =
-    rows.map { (it.values.single() as GmqlValue.StringValue).value }
+    private fun GmqlQueryResult.stringColumn(): List<String> =
+        rows.map { (it.values.single() as GmqlValue.StringValue).value }
+
+    private fun GmqlRow.stringValues(): List<String> =
+        values.map { (it as GmqlValue.StringValue).value }
 
 private fun <T> runSuspend(block: suspend () -> T): T {
     var outcome: Result<T>? = null

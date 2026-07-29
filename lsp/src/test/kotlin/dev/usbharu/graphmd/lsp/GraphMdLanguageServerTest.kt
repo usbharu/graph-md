@@ -290,6 +290,63 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `link full text follows target title updates and deletion`() {
+        val index = GraphMdWorkspaceIndex()
+        val targetUri = "file:///workspace/bob.md"
+        index.upsert(
+            "file:///workspace/Person.md",
+            "---\nid: Person\nkind: NodeType\n---",
+        )
+        index.upsert(
+            "file:///workspace/friendOf.md",
+            "---\nid: friendOf\nkind: RelType\nfrom: [Person]\nto: [Person]\n---",
+        )
+        index.upsert(
+            "file:///workspace/alice.md",
+            """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            ---
+            Plain source prose.
+            @link[Visible label](bob friendOf)
+            """.trimIndent(),
+        )
+        index.upsert(
+            targetUri,
+            "---\nid: bob\nkind: Node\ntype: Person\n---\n# 古い称号",
+        )
+
+        fun linkSearch(term: String) = index.search(
+            GraphMdSearchParams(
+                """MATCH (source)-[link:friendOf]->(target)
+                   WHERE FULLTEXT(link, ${'$'}term)
+                   RETURN ID(source) AS source, ID(target) AS target""",
+                mapOf("term" to "\"$term\""),
+            ),
+        )
+
+        assertEquals(listOf("alice", "bob"), linkSearch("古い称号").rows.single().values)
+        assertEquals(listOf("alice", "bob"), linkSearch("Visible label").rows.single().values)
+        assertTrue(linkSearch("Plain source prose").rows.isEmpty())
+
+        index.upsert(
+            targetUri,
+            "---\nid: bob\nkind: Node\ntype: Person\n---\n# 新しい称号",
+        )
+
+        assertTrue(linkSearch("古い称号").rows.isEmpty())
+        assertEquals(listOf("alice", "bob"), linkSearch("新しい称号").rows.single().values)
+        assertEquals(listOf("alice", "bob"), linkSearch("Visible label").rows.single().values)
+
+        index.remove(targetUri)
+
+        assertTrue(linkSearch("新しい称号").rows.isEmpty())
+        assertTrue(linkSearch("Visible label").rows.isEmpty())
+    }
+
+    @Test
     fun `quick fixes replace or create unknown references`() {
         val fixture = serverFixture(
             mapOf(
