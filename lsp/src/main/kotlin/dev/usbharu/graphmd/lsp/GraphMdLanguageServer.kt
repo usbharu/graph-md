@@ -1717,7 +1717,10 @@ internal class GraphMdWorkspaceIndex(
         Regex("""(?:Node|NodeType|RelType|Timeline) id must be unique: (.+)""").matchEntire(diagnostic.message)?.let {
             return document.yamlScalarRange("id", it.groupValues[1])
         }
-        if (diagnostic.message.startsWith("id MUST match ")) {
+        if (
+            diagnostic.message.startsWith("id MUST match ") ||
+            diagnostic.message == "RelType id MUST NOT contain whitespace"
+        ) {
             frontMatterScalar(document.text, "id")
                 ?.let { document.yamlScalarRange("id", it) }
                 ?.let { return it }

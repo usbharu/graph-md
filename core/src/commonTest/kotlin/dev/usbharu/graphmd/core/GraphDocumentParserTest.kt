@@ -1186,4 +1186,85 @@ class GraphDocumentParserTest {
             assertEquals(id, diagnostic.source?.documentId)
         }
     }
+
+    @Test
+    fun `rejects rel type ids containing decoded Unicode whitespace`() {
+        val cases = listOf(
+            "friend Of" to "friend Of",
+            "'friend Of'" to "friend Of",
+            "\"friend Of\"" to "friend Of",
+            "\"friend\\tOf\"" to "friend\tOf",
+            "\"friend\u00a0Of\"" to "friend\u00a0Of",
+            "\"friend\\nOf\"" to "friend\nOf",
+        )
+
+        cases.forEachIndexed { index, (encoded, id) ->
+            val result = compiler.parseDocument(
+                "---\nid: $encoded\nkind: RelType\n---",
+                "/tmp/invalid-rel-type-$index.md",
+            )
+
+            assertNull(result.document, "RelType '$id' must not be retained")
+            val diagnostic = result.diagnostics.single {
+                it.message == "RelType id MUST NOT contain whitespace"
+            }
+            assertEquals(DiagnosticCategory.SchemaError, diagnostic.category)
+            assertEquals(Severity.Error, diagnostic.severity)
+            assertEquals(id, diagnostic.source?.documentId)
+            assertTrue(result.diagnostics.none { it.severity == Severity.Warning })
+        }
+    }
+
+    @Test
+    fun `warns but retains noncanonical rel type ids without whitespace`() {
+        val result = compiler.parseDocument(
+            """
+                ---
+                id: "friend/of"
+                kind: RelType
+                ---
+            """.trimIndent(),
+            "/tmp/noncanonical-rel-type.md",
+        )
+
+        assertEquals("friend/of", (result.document as? RelTypeDocument)?.id)
+        assertTrue(result.diagnostics.any {
+            it.message == "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*" &&
+                it.severity == Severity.Warning
+        })
+    }
+
+    @Test
+    fun `compiler resolves retained noncanonical rel type and excludes whitespace definition`() {
+        val result = compiler.compileSources(
+            listOf(
+                SourceDocument(
+                    "---\nid: \"friend/of\"\nkind: RelType\n---",
+                    "/tmp/friend-slash.md",
+                ),
+                SourceDocument(
+                    "---\nid: \"friend Of\"\nkind: RelType\n---",
+                    "/tmp/friend-space.md",
+                ),
+                SourceDocument(
+                    "---\nid: child\nkind: RelType\nextends: [\"friend Of\"]\n---",
+                    "/tmp/child.md",
+                ),
+                SourceDocument(
+                    "---\nid: alice\nkind: Node\ntype: Person\n---\n@link[Bob](bob friend/of)",
+                    "/tmp/alice.md",
+                ),
+                SourceDocument(
+                    "---\nid: bob\nkind: Node\ntype: Person\n---",
+                    "/tmp/bob.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.relTypes.any { it.id == "friend/of" })
+        assertTrue(result.relTypes.none { it.id == "friend Of" })
+        assertEquals("friend/of", result.relations.single().type)
+        assertTrue(result.diagnostics.any { it.message == "Unknown parent RelType: friend Of" })
+        assertTrue(result.diagnostics.none { it.message == "Unknown RelType: friend/of" })
+    }
 }

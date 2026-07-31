@@ -1950,6 +1950,7 @@ class GraphMdLanguageServerTest {
         val uri = "file:///workspace/invalid-id.md"
         val escapedUri = "file:///workspace/escaped-invalid-id.md"
         val hashUri = "file:///workspace/hash-invalid-id.md"
+        val whitespaceRelTypeUri = "file:///workspace/whitespace-rel-type-id.md"
         val fixture = serverFixture(
             mapOf(
                 uri to """
@@ -1968,6 +1969,12 @@ class GraphMdLanguageServerTest {
                     ---
                     id: "bad#id"
                     kind: NodeType
+                    ---
+                """.trimIndent(),
+                whitespaceRelTypeUri to """
+                    ---
+                    id: "bad id"
+                    kind: RelType
                     ---
                 """.trimIndent(),
             ),
@@ -1993,6 +2000,13 @@ class GraphMdLanguageServerTest {
         assertEquals(DiagnosticSeverity.Warning, hashDiagnostic.severity)
         assertEquals(Position(1, 5), hashDiagnostic.range.start)
         assertEquals(Position(1, 11), hashDiagnostic.range.end)
+
+        val whitespaceRelTypeDiagnostic = fixture.diagnostics.getValue(whitespaceRelTypeUri).single {
+            it.message == "RelType id MUST NOT contain whitespace"
+        }
+        assertEquals(DiagnosticSeverity.Error, whitespaceRelTypeDiagnostic.severity)
+        assertEquals(Position(1, 5), whitespaceRelTypeDiagnostic.range.start)
+        assertEquals(Position(1, 11), whitespaceRelTypeDiagnostic.range.end)
     }
 
     @Test
