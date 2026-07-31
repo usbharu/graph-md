@@ -2,7 +2,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { Executable, LanguageClient, LanguageClientOptions, ServerOptions, TransportKind } from "vscode-languageclient/node";
 import { graphMdPlugin } from "markdown-it-graphmd";
-import { relativeMarkdownHref } from "./preview-links";
+import { resolveGraphMdHref, resolveMediaHref } from "./preview-links";
 import {
   isIndexedMarkdownPath,
   previewIndexAliases,
@@ -96,14 +96,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<GraphM
   return {
     extendMarkdownIt(md: any): any {
       md.use(graphMdPlugin, {
-        hrefTransform: (target: string, _relType: string, env?: unknown) => resolveDocumentHref(target, env),
+        hrefTransform: (target: string, _relType: string, env?: unknown) =>
+          resolveGraphMdHrefFromIndex(target, env),
       });
       const defaultLinkOpen = md.renderer.rules.link_open ?? ((tokens: any[], idx: number, options: any, _env: any, self: any) => self.renderToken(tokens, idx, options));
       md.renderer.rules.link_open = (tokens: any[], idx: number, options: any, env: any, self: any): string => {
         const hrefIndex = tokens[idx].attrIndex("href");
         if (hrefIndex >= 0) {
           const href = tokens[idx].attrs[hrefIndex][1];
-          const resolved = resolveMediaHref(href);
+          const resolved = resolveMediaHrefFromIndex(href);
           if (resolved) tokens[idx].attrs[hrefIndex][1] = resolved;
         }
         return defaultLinkOpen(tokens, idx, options, env, self);
@@ -252,34 +253,21 @@ function updatePreviewTargets(changed: boolean): void {
   }
 }
 
-function resolveDocumentHref(target: string, env?: unknown): string | null {
-  const mediaTarget = previewTargets.snapshot.media.get(target);
-  if (mediaTarget) return mediaTarget;
-
-  const documentTarget = previewTargets.snapshot.documents.get(target);
-  const targetUri = documentTarget ? vscode.Uri.parse(documentTarget.uri) : undefined;
-  const currentDocument = (env as { currentDocument?: vscode.Uri } | undefined)?.currentDocument;
-  if (
-    !targetUri ||
-    !currentDocument ||
-    targetUri.scheme !== currentDocument.scheme ||
-    targetUri.authority !== currentDocument.authority
-  ) {
-    return null;
+function resolveGraphMdHrefFromIndex(target: string, env?: unknown): string {
+  const documentTargets = new Map<string, vscode.Uri>();
+  for (const [id, source] of previewTargets.snapshot.documents) {
+    documentTargets.set(id, vscode.Uri.parse(source.uri));
   }
-
-  return relativeMarkdownHref(currentDocument.fsPath, targetUri.fsPath);
+  return resolveGraphMdHref(
+    target,
+    env as { currentDocument?: vscode.Uri } | undefined,
+    previewTargets.snapshot.media,
+    documentTargets,
+  );
 }
 
-function resolveMediaHref(href: string): string | null {
-  const direct = previewTargets.snapshot.media.get(href);
-  if (direct) return direct;
-  try {
-    const decoded = decodeURIComponent(href);
-    return previewTargets.snapshot.media.get(decoded) ?? previewTargets.snapshot.media.get(path.basename(decoded)) ?? null;
-  } catch {
-    return previewTargets.snapshot.media.get(path.basename(href)) ?? null;
-  }
+function resolveMediaHrefFromIndex(href: string): string | null {
+  return resolveMediaHref(href, previewTargets.snapshot.media);
 }
 
 export async function deactivate(): Promise<void> {

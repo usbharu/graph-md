@@ -8,6 +8,28 @@ import kotlin.test.assertTrue
 
 class InlinePropsParserTest {
     @Test
+    fun `parses noncanonical timeline ids up to validTime delimiters`() {
+        val parsed = InlinePropsParser(
+            """{age(validTime=[Era@Branch,Other/Line(from=1,to=2)])=20}""",
+        ).parseObject()
+
+        val assertion = (parsed.values.getValue("age") as RawArray).values.single() as RawObject
+        val validTime = assertion.values.getValue("validTime") as RawArray
+        val timelineIds = validTime.values.map { rawEntry ->
+            val entry = rawEntry as RawObject
+            (entry.values.getValue("timeline") as RawString).value
+        }
+        assertEquals(listOf("Era@Branch", "Other/Line"), timelineIds)
+    }
+
+    @Test
+    fun `does not accept quoted inline timeline ids`() {
+        assertFailsWith<InlinePropsParseException> {
+            InlinePropsParser("""{age(validTime="Era@Branch")=20}""").parseObject()
+        }
+    }
+
+    @Test
     fun `parses nested object and array`() {
         val parsed = InlinePropsParser("""{ name = "Alice", tags = [foo, "bar"], meta = { active = true, score = 1.5 } }""").parseObject()
 

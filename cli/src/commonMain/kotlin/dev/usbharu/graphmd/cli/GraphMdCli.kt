@@ -24,19 +24,20 @@ class GraphMdCli internal constructor(
     fun run(arguments: List<String>): CliResult {
         return when (val parsed = CliArguments.parse(arguments)) {
             is ParseResult.Print -> CliResult(stdout = parsed.text)
-            is ParseResult.Error -> usageError(parsed.message)
+            is ParseResult.Error -> usageError(parsed.message, parsed.exitCode)
             is ParseResult.Run -> try {
                 execute(parsed)
             } catch (exception: CliIoException) {
-                usageError(exception.message ?: "I/O error")
+                usageError(exception.message ?: "I/O error", if (parsed.command is CliCommand.Demo) 1 else 2)
             } catch (exception: Throwable) {
-                usageError(exception.message ?: "Unexpected error")
+                usageError(exception.message ?: "Unexpected error", if (parsed.command is CliCommand.Demo) 1 else 2)
             }
         }
     }
 
     private fun execute(invocation: ParseResult.Run): CliResult {
         val command = invocation.command
+        if (command is CliCommand.Demo) return demo(command, invocation.json)
         val sources = WorkspaceLoader(fileSystem).load(command.paths)
         val options = if (command is CliCommand.Lint && command.strict) {
             CompileOptions(mode = ValidationMode.Strict)
@@ -52,7 +53,71 @@ class GraphMdCli internal constructor(
             is CliCommand.Lint -> lint(compilation, command, invocation.json)
             is CliCommand.Stats -> stats(compilation, command, invocation.json)
             is CliCommand.Search -> search(compilation, sources, command, invocation.json)
+            is CliCommand.Demo -> error("demo is executed before workspace loading")
         }
+    }
+
+    private fun demo(command: CliCommand.Demo, json: Boolean): CliResult {
+        val outputExisted = when (fileSystem.kind(command.outputDirectory)) {
+            null -> false
+            FileKind.Directory -> {
+                if (fileSystem.children(command.outputDirectory).isNotEmpty()) {
+                    throw CliIoException("Output directory must be empty: ${command.outputDirectory}")
+                }
+                true
+            }
+            else -> throw CliIoException("Output path is not a directory: ${command.outputDirectory}")
+        }
+        val plan = DemoGenerator.plan(command.requestedCount, command.seed)
+
+        var attemptedCount = 0
+        try {
+            if (!outputExisted) fileSystem.createDirectories(command.outputDirectory)
+            plan.documents().forEach { document ->
+                val path = fileSystem.child(command.outputDirectory, document.fileName)
+                attemptedCount++
+                fileSystem.writeText(path, document.text)
+            }
+        } catch (exception: Throwable) {
+            for (index in attemptedCount - 1 downTo 0) {
+                val path = fileSystem.child(command.outputDirectory, plan.fileNameAt(index))
+                runCatching { fileSystem.delete(path, mustExist = false) }
+            }
+            if (!outputExisted) runCatching { fileSystem.delete(command.outputDirectory, mustExist = false) }
+            throw CliIoException(
+                "Cannot write demo data to ${command.outputDirectory}: ${exception.message ?: "I/O error"}",
+            )
+        }
+
+        val counts = plan.counts
+        val output = if (json) {
+            jsonObject(
+                "outputDirectory" to jsonString(command.outputDirectory),
+                "requestedCount" to jsonNumber(plan.requestedCount),
+                "generatedCount" to jsonNumber(plan.generatedCount),
+                "seed" to jsonNumber(plan.seed),
+                "counts" to jsonObject(
+                    "node" to jsonNumber(counts.getValue(CliKind.Node)),
+                    "media" to jsonNumber(counts.getValue(CliKind.Media)),
+                    "nodeType" to jsonNumber(counts.getValue(CliKind.NodeType)),
+                    "relType" to jsonNumber(counts.getValue(CliKind.RelType)),
+                    "timeline" to jsonNumber(counts.getValue(CliKind.Timeline)),
+                ),
+            ).encode() + "\n"
+        } else {
+            buildString {
+                append("Generated GraphMD demo data in ").append(command.outputDirectory).append('\n')
+                append("requested\t").append(plan.requestedCount).append('\n')
+                append("generated\t").append(plan.generatedCount).append('\n')
+                append("seed\t").append(plan.seed).append('\n')
+                append("node\t").append(counts.getValue(CliKind.Node)).append('\n')
+                append("media\t").append(counts.getValue(CliKind.Media)).append('\n')
+                append("node-type\t").append(counts.getValue(CliKind.NodeType)).append('\n')
+                append("rel-type\t").append(counts.getValue(CliKind.RelType)).append('\n')
+                append("timeline\t").append(counts.getValue(CliKind.Timeline)).append('\n')
+            }
+        }
+        return CliResult(stdout = output)
     }
 
     private fun search(
@@ -377,8 +442,8 @@ class GraphMdCli internal constructor(
         return CliResult(stdout = output, stderr = stderr, exitCode = errors)
     }
 
-    private fun usageError(message: String): CliResult =
-        CliResult(stderr = "error: $message\nTry 'graphmd --help' for usage.\n", exitCode = 2)
+    private fun usageError(message: String, exitCode: Int = 2): CliResult =
+        CliResult(stderr = "error: $message\nTry 'graphmd --help' for usage.\n", exitCode = exitCode)
 }
 
 private class TemporalView(

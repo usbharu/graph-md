@@ -68,15 +68,19 @@ class GraphDocumentAnalyzer {
         val normalized = text.replace("\r\n", "\n").replace('\r', '\n')
         val parsed = parser.parseDocument(normalized, sourcePath)
         val document = parsed.document
-        val lines = normalized.split('\n')
+        val hasLoneCarriageReturn = text.indices.any { index ->
+            text[index] == '\r' && text.getOrNull(index + 1) != '\n'
+        }
+        val analysisText = if (hasLoneCarriageReturn) normalized else text
+        val lines = analysisText.split('\n').map { it.removeSuffix("\r") }
         if (lines.firstOrNull() != "---") {
-            return GraphDocumentAnalysis(normalized, parsed, 0, emptyList(), emptyList(), emptyList(), emptyList())
+            return GraphDocumentAnalysis(analysisText, parsed, 0, emptyList(), emptyList(), emptyList(), emptyList())
         }
         val endLine = lines.drop(1).indexOfFirst { it == "---" || it == "..." }.let { if (it >= 0) it + 1 else -1 }
         if (endLine < 0) {
-            return GraphDocumentAnalysis(normalized, parsed, 0, emptyList(), emptyList(), emptyList(), emptyList())
+            return GraphDocumentAnalysis(analysisText, parsed, 0, emptyList(), emptyList(), emptyList(), emptyList())
         }
-        val lineStarts = computeLineStarts(normalized)
+        val lineStarts = computeLineStarts(analysisText)
         val definitions = mutableListOf<SymbolDefinition>()
         val references = mutableListOf<SymbolReference>()
         val propertyDefinitions = mutableListOf<PropertyDefinition>()
@@ -124,15 +128,18 @@ class GraphDocumentAnalyzer {
         }
 
         if (document is NodeDocument) {
-            val bodyOffset = lineStarts[endLine] + lines[endLine].length + 1
-            references += extractBodyReferences(document.body, bodyOffset)
-            references += extractInlineTimelineReferences(document.body, bodyOffset)
-            propertyReferences += extractBodyPropertyReferences(document.body, bodyOffset, document.type)
+            val bodyOffset = lineStarts[endLine] + lines[endLine].length +
+                if (analysisText.getOrNull(lineStarts[endLine] + lines[endLine].length) == '\r') 2 else 1
+            val body = analysisText.substring(bodyOffset.coerceAtMost(analysisText.length))
+            references += extractBodyReferences(body, bodyOffset)
+            references += extractInlineTimelineReferences(body, bodyOffset)
+            propertyReferences += extractBodyPropertyReferences(body, bodyOffset, document.type)
         }
 
-        val frontMatterEndOffset = lineStarts[endLine] + lines[endLine].length + 1
+        val frontMatterEndOffset = lineStarts[endLine] + lines[endLine].length +
+            if (analysisText.getOrNull(lineStarts[endLine] + lines[endLine].length) == '\r') 2 else 1
         return GraphDocumentAnalysis(
-            normalized,
+            analysisText,
             parsed,
             frontMatterEndOffset,
             definitions,
@@ -259,15 +266,14 @@ class GraphDocumentAnalyzer {
                     val closeParen = findUnescaped(masked, ')', closeLabel + 2)
                     if (closeParen != null) {
                         val raw = body.substring(closeLabel + 2, closeParen)
-                        val parsed = RelationTargetParser.parse(raw)
+                        val parsed = RelationTargetParser.parseDetailed(raw)
                         if (parsed != null) {
-                            val target = parsed.first
-                            val relType = parsed.second
-                            val targetStart = closeLabel + 2 + raw.indexOf(target)
-                            val relTypeToken = raw.substring(raw.indexOfFirst { it == ' ' || it == '\t' }).trim()
-                            val relTypeStart = closeLabel + 2 + raw.lastIndexOf(relTypeToken)
+                            val target = parsed.target
+                            val relType = parsed.relType
+                            val targetStart = closeLabel + 2 + parsed.targetRange.first
+                            val relTypeStart = closeLabel + 2 + parsed.relTypeRange.first
                             refs += SymbolReference(target, ReferenceTargetKind.Node, "relation.target", SourceRange(baseOffset + targetStart, baseOffset + targetStart + target.length))
-                            refs += SymbolReference(relType, ReferenceTargetKind.RelType, "relation.type", SourceRange(baseOffset + relTypeStart, baseOffset + relTypeStart + relTypeToken.length))
+                            refs += SymbolReference(relType, ReferenceTargetKind.RelType, "relation.type", SourceRange(baseOffset + relTypeStart, baseOffset + relTypeStart + parsed.relTypeRange.last - parsed.relTypeRange.first + 1))
                         }
                         index = closeParen + 1
                         continue
@@ -368,7 +374,16 @@ class GraphDocumentAnalyzer {
             if (kind == null) return
             structure.rootEntries(field).lastOrNull()?.let { entry ->
                 structure.scalarsFor(entry).forEach { scalar ->
-                    references += SymbolReference(scalar.value, kind, field, scalar.range)
+                    val range = if (
+                        document is RelTypeDocument &&
+                        scalar.raw.isQuotedScalar() &&
+                        scalar.range.end - scalar.range.start == scalar.raw.trim().length - 2
+                    ) {
+                        SourceRange(scalar.range.start - 1, scalar.range.end + 1)
+                    } else {
+                        scalar.range
+                    }
+                    references += SymbolReference(scalar.value, kind, field, range)
                 }
             }
         }
@@ -480,7 +495,8 @@ class GraphDocumentAnalyzer {
                     1,
                     token.length - 2,
                 )
-                token.matches(Regex("""[A-Za-z_][A-Za-z0-9_.:-]*""")) -> Triple(token, 0, token.length)
+                token.isNotEmpty() && token.none { it.isWhitespace() || it in setOf(',', '[', ']', '{', '}') } ->
+                    Triple(token, 0, token.length)
                 else -> return null
             }
             val start = absoluteStart + leading + contentOffset
@@ -604,6 +620,7 @@ class GraphDocumentAnalyzer {
                     path.firstOrNull() == "mappings" && candidate.key in setOf("from", "to")
                 document is NodeDocument && path.firstOrNull() == "props" -> {
                     candidate.key == "timeline" && (
+                            path.size == 2 && !candidate.id.matches(Regex("[A-Za-z_][A-Za-z0-9_.:-]*")) ||
                             "timecode" in numericKeysByPath[candidate.path].orEmpty() ||
                             numericKeysByPath[candidate.path].orEmpty().any { it in setOf("from", "to") } ||
                             containerKeysByPath[candidate.path].orEmpty().any { endpoint ->
@@ -855,6 +872,12 @@ class GraphDocumentAnalyzer {
                 trimmed.substring(1, trimmed.length - 1)
             else -> trimmed
         }
+    }
+
+    private fun String.isQuotedScalar(): Boolean {
+        val value = trim()
+        return value.length >= 2 &&
+            ((value.first() == '"' && value.last() == '"') || (value.first() == '\'' && value.last() == '\''))
     }
 
     private fun yamlMappingEntry(content: String, absoluteStart: Int): YamlMappingEntry? {
