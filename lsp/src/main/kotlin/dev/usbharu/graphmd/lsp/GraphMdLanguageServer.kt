@@ -3,8 +3,16 @@ package dev.usbharu.graphmd.lsp
 import dev.usbharu.graphmd.core.*
 import dev.usbharu.graphmd.core.model.Diagnostic
 import dev.usbharu.graphmd.core.model.*
+import dev.usbharu.graphmd.query.GraphSearchEngine
+import dev.usbharu.graphmd.query.gmql.GmqlExecutionOptions
+import dev.usbharu.graphmd.query.gmql.GmqlExecutionProfile
+import dev.usbharu.graphmd.query.gmql.GmqlValue
 import org.eclipse.lsp4j.*
+import org.eclipse.lsp4j.jsonrpc.ResponseErrorException
 import org.eclipse.lsp4j.jsonrpc.messages.Either
+import org.eclipse.lsp4j.jsonrpc.messages.Either3
+import org.eclipse.lsp4j.jsonrpc.messages.ResponseError
+import org.eclipse.lsp4j.jsonrpc.messages.ResponseErrorCode
 import org.eclipse.lsp4j.services.LanguageClient
 import org.eclipse.lsp4j.services.LanguageClientAware
 import org.eclipse.lsp4j.services.LanguageServer
@@ -15,16 +23,22 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.util.concurrent.CompletableFuture
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.EmptyCoroutineContext
+import kotlin.coroutines.startCoroutine
 import kotlin.io.path.extension
 import kotlin.io.path.isRegularFile
 import kotlin.io.path.readText
 
-class GraphMdLanguageServer : LanguageServer, LanguageClientAware {
+private val GRAPH_MD_ID_REGEX = Regex("[A-Za-z_][A-Za-z0-9_.:-]*")
+
+class GraphMdLanguageServer : LanguageServer, LanguageClientAware, GraphMdSearchService {
     private val workspaceIndex = GraphMdWorkspaceIndex()
     private val textDocumentService = GraphMdTextDocumentService(this, workspaceIndex)
     private val workspaceService = GraphMdWorkspaceService(this, workspaceIndex)
     private var client: LanguageClient? = null
     private var shutdownRequested = false
+    private val publishedDiagnosticUris = mutableSetOf<String>()
 
     override fun initialize(params: InitializeParams): CompletableFuture<InitializeResult> {
         val roots = params.workspaceFolders.orEmpty().map { Paths.get(URI.create(it.uri)) }
@@ -41,7 +55,7 @@ class GraphMdLanguageServer : LanguageServer, LanguageClientAware {
                     definitionProvider = Either.forLeft(true)
                     referencesProvider = Either.forLeft(true)
                     hoverProvider = Either.forLeft(true)
-                    renameProvider = Either.forLeft(true)
+                    renameProvider = Either.forRight(RenameOptions(true))
                     codeActionProvider = Either.forRight(
                         CodeActionOptions(listOf(CodeActionKind.QuickFix)).apply {
                             resolveProvider = false
@@ -73,11 +87,24 @@ class GraphMdLanguageServer : LanguageServer, LanguageClientAware {
         this.client = client
     }
 
+    override fun search(params: GraphMdSearchParams): CompletableFuture<GraphMdSearchResponse> =
+        CompletableFuture.supplyAsync { workspaceIndex.search(params) }
+
+    override fun searchMetadata(): CompletableFuture<GraphMdSearchMetadata> =
+        CompletableFuture.supplyAsync { workspaceIndex.searchMetadata() }
+
+    @Synchronized
     fun publishDiagnostics() {
         val client = client ?: return
-        workspaceIndex.diagnosticsByUri().forEach { (uri, diagnostics) ->
+        val diagnosticsByUri = workspaceIndex.diagnosticsByUri()
+        diagnosticsByUri.forEach { (uri, diagnostics) ->
             client.publishDiagnostics(PublishDiagnosticsParams(uri, diagnostics))
         }
+        (publishedDiagnosticUris - diagnosticsByUri.keys).forEach { uri ->
+            client.publishDiagnostics(PublishDiagnosticsParams(uri, emptyList()))
+        }
+        publishedDiagnosticUris.clear()
+        publishedDiagnosticUris += diagnosticsByUri.keys
     }
 
     fun languageClient(): LanguageClient? = client
@@ -129,6 +156,16 @@ private class GraphMdTextDocumentService(
         return CompletableFuture.completedFuture(index.rename(params.textDocument.uri, params.position, params.newName))
     }
 
+    override fun prepareRename(
+        params: PrepareRenameParams,
+    ): CompletableFuture<Either3<Range, PrepareRenameResult, PrepareRenameDefaultBehavior>?> {
+        return CompletableFuture.completedFuture(
+            index.prepareRename(params.textDocument.uri, params.position)?.let {
+                Either3.forSecond<Range, PrepareRenameResult, PrepareRenameDefaultBehavior>(it)
+            },
+        )
+    }
+
     override fun codeAction(params: CodeActionParams): CompletableFuture<List<Either<Command, CodeAction>>> {
         val actions = index.codeActions(params.textDocument.uri, params.context.diagnostics)
         return CompletableFuture.completedFuture(actions.map { Either.forRight(it) })
@@ -147,23 +184,43 @@ private class GraphMdWorkspaceService(
     }
 }
 
-private class GraphMdWorkspaceIndex {
+internal class GraphMdWorkspaceIndex(
+    private val compileSources: (List<SourceDocument>) -> GraphCompilationResult = GraphCompiler()::compileSources,
+) {
+    private data class WorkspaceSnapshot(
+        val generation: Long,
+        val documents: List<IndexedDocument>,
+    )
+
+    private data class CompiledWorkspace(
+        val generation: Long,
+        val documents: List<IndexedDocument>,
+        val compilation: GraphCompilationResult,
+    )
+
+    private data class CachedSearchEngine(
+        val generation: Long,
+        val engine: GraphSearchEngine,
+    )
+
     private val analyzer = GraphDocumentAnalyzer()
-    private val compiler = GraphCompiler()
     private var roots: List<Path> = emptyList()
     private val documents = linkedMapOf<String, IndexedDocument>()
     private val openDocuments = mutableSetOf<String>()
-    private var compiledCache: GraphCompilationResult? = null
+    private var workspaceGeneration = 0L
+    private var compiledCache: CompiledWorkspace? = null
+    private var searchEngineCache: CachedSearchEngine? = null
 
     fun setWorkspaceRoots(roots: List<Path>) {
-        this.roots = roots
+        synchronized(this) {
+            this.roots = roots
+        }
     }
 
     fun loadWorkspace() {
-        documents.clear()
-        openDocuments.clear()
-        compiledCache = null
-        roots.forEach { root ->
+        val loadedDocuments = linkedMapOf<String, IndexedDocument>()
+        val workspaceRoots = synchronized(this) { roots.toList() }
+        workspaceRoots.forEach { root ->
             if (!Files.exists(root)) return@forEach
             Files.walk(root).use { paths ->
                 paths.filter { it.isRegularFile() && it.extension == "md" }
@@ -176,42 +233,65 @@ private class GraphMdWorkspaceIndex {
                     }
                     .forEach { file ->
                         val uri = file.toUri().toString()
-                        upsert(uri, file.readText())
+                        loadedDocuments[uri] = indexedDocument(uri, file.readText())
                     }
             }
+        }
+        synchronized(this) {
+            documents.clear()
+            documents.putAll(loadedDocuments)
+            openDocuments.clear()
+            invalidateCompilation()
         }
     }
 
     fun open(uri: String, text: String) {
         val normalizedUri = normalizeUri(uri)
-        openDocuments += normalizedUri
-        upsertNormalized(normalizedUri, text)
+        val document = indexedDocument(normalizedUri, text)
+        synchronized(this) {
+            openDocuments += normalizedUri
+            upsertNormalized(document)
+        }
     }
 
     fun close(uri: String) {
         val normalizedUri = normalizeUri(uri)
-        openDocuments -= normalizedUri
-        reloadNormalized(normalizedUri)
+        val document = readDocument(normalizedUri)
+        synchronized(this) {
+            openDocuments -= normalizedUri
+            replaceNormalized(normalizedUri, document)
+        }
     }
 
     fun updateFromDisk(change: FileEvent) {
         val normalizedUri = normalizeUri(change.uri)
-        if (normalizedUri in openDocuments) return
-        when (change.type) {
-            FileChangeType.Deleted -> removeNormalized(normalizedUri)
-            else -> reloadNormalized(normalizedUri)
+        if (synchronized(this) { normalizedUri in openDocuments }) return
+        val document = when (change.type) {
+            FileChangeType.Deleted -> null
+            else -> readDocument(normalizedUri)
+        }
+        synchronized(this) {
+            if (normalizedUri in openDocuments) return
+            replaceNormalized(normalizedUri, document)
         }
     }
 
     fun upsert(uri: String, text: String) {
-        upsertNormalized(normalizeUri(uri), text)
+        val document = indexedDocument(normalizeUri(uri), text)
+        synchronized(this) {
+            upsertNormalized(document)
+        }
     }
 
-    private fun upsertNormalized(uri: String, text: String) {
+    private fun indexedDocument(uri: String, text: String): IndexedDocument {
         val path = Paths.get(URI.create(uri))
         val analysis = analyzer.analyze(text, path.toString())
-        documents[uri] = IndexedDocument(uri, path, text, analysis)
-        compiledCache = null
+        return IndexedDocument(uri, path, analysis.text, analysis)
+    }
+
+    private fun upsertNormalized(document: IndexedDocument) {
+        documents[document.uri] = document
+        invalidateCompilation()
     }
 
     fun reload(uri: String) {
@@ -219,12 +299,15 @@ private class GraphMdWorkspaceIndex {
     }
 
     private fun reloadNormalized(uri: String) {
-        val path = Paths.get(URI.create(uri))
-        if (!Files.exists(path)) {
-            removeNormalized(uri)
-            return
+        val document = readDocument(uri)
+        synchronized(this) {
+            replaceNormalized(uri, document)
         }
-        upsertNormalized(uri, path.readText())
+    }
+
+    private fun readDocument(uri: String): IndexedDocument? {
+        val path = Paths.get(URI.create(uri))
+        return if (Files.exists(path)) indexedDocument(uri, path.readText()) else null
     }
 
     fun remove(uri: String) {
@@ -232,20 +315,39 @@ private class GraphMdWorkspaceIndex {
     }
 
     private fun removeNormalized(uri: String) {
-        documents.remove(uri)
-        compiledCache = null
+        synchronized(this) {
+            replaceNormalized(uri, null)
+        }
     }
 
+    private fun replaceNormalized(uri: String, document: IndexedDocument?) {
+        if (document == null) {
+            documents.remove(uri)
+        } else {
+            documents[uri] = document
+        }
+        invalidateCompilation()
+    }
+
+    private fun documentSnapshot(uri: String): IndexedDocument? =
+        synchronized(this) { documents[uri] }
+
+    private fun documentsSnapshot(): List<IndexedDocument> =
+        synchronized(this) { documents.values.toList() }
+
     fun completions(uri: String, position: Position): List<CompletionItem> {
-        val document = documents[normalizeUri(uri)] ?: return emptyList()
+        val document = documentSnapshot(normalizeUri(uri)) ?: return emptyList()
         yamlFrontMatterCompletions(document, position)?.let { return it }
         exactPropsCompletions(document, position)?.let { return it }
         exactRelationPropsCompletions(document, position)?.let { return it }
-        val referenceKind = analyzer.inferCompletionKind(document.analysis, document.offsetAt(position)) ?: return emptyList()
+        val referenceKind = analyzer.inferCompletionKind(
+            document.analysis,
+            document.analysisOffsetAt(position),
+        ) ?: return emptyList()
         return contextualReferenceIds(document, position, referenceKind).map { id ->
             CompletionItem(id).apply {
                 this.kind = when (referenceKind) {
-                    ReferenceTargetKind.Node -> CompletionItemKind.Reference
+                    ReferenceTargetKind.Node, ReferenceTargetKind.Media -> CompletionItemKind.Reference
                     ReferenceTargetKind.NodeType, ReferenceTargetKind.RelType, ReferenceTargetKind.Timeline -> CompletionItemKind.Class
                 }
                 detail = referenceKind.name
@@ -254,69 +356,105 @@ private class GraphMdWorkspaceIndex {
     }
 
     fun definitions(uri: String, position: Position): List<Location> {
-        val document = documents[normalizeUri(uri)] ?: return emptyList()
-        val offset = document.offsetAt(position)
+        val documents = documentsSnapshot()
+        val document = documents.firstOrNull { it.uri == normalizeUri(uri) } ?: return emptyList()
+        val offset = document.analysisOffsetAt(position)
         val reference = analyzer.findReferenceAt(document.analysis, offset)
         if (reference != null) {
-            return resolve(reference.kind, reference.targetId).map { resolved ->
+            return resolve(reference.kind, reference.targetId, documents).map { resolved ->
                 Location(resolved.uri, resolved.range())
             }
+        }
+        val definition = analyzer.findDefinitionAt(document.analysis, offset)
+        if (definition != null) {
+            val self = Location(document.uri, document.analysisRangeOf(definition.range))
+            val candidates = symbolDefinitions(definition.kind, definition.id, documents)
+                .map { resolved -> Location(resolved.uri, resolved.range()) }
+                .distinct()
+                .sortedWith(
+                    compareBy<Location>(
+                        { it.uri },
+                        { it.range.start.line },
+                        { it.range.start.character },
+                        { it.range.end.line },
+                        { it.range.end.character },
+                    ),
+                )
+            return listOf(self) + candidates.filterNot { it == self }
         }
         val propertyReference = analyzer.findPropertyReferenceAt(document.analysis, offset)
             ?: analyzer.findPropertyDefinitionAt(document.analysis, offset)?.let {
                 PropertyReference(it.name, it.ownerId, it.ownerKind, it.range)
             }
             ?: return emptyList()
-        return resolveProperty(propertyReference).map { resolved ->
-            Location(resolved.document.uri, resolved.document.rangeOf(resolved.definition.range))
+        return resolveProperty(propertyReference, documents).map { resolved ->
+            Location(resolved.document.uri, resolved.document.analysisRangeOf(resolved.definition.range))
         }
     }
 
     fun references(uri: String, position: Position): List<Location> {
-        val document = documents[normalizeUri(uri)] ?: return emptyList()
-        val offset = document.offsetAt(position)
+        val documents = documentsSnapshot()
+        val document = documents.firstOrNull { it.uri == normalizeUri(uri) } ?: return emptyList()
+        val offset = document.analysisOffsetAt(position)
         val reference = analyzer.findReferenceAt(document.analysis, offset)?.let { it.kind to it.targetId }
             ?: analyzer.findDefinitionAt(document.analysis, offset)?.let { it.kind to it.id }
             ?: return emptyList()
 
         val locations = mutableListOf<Location>()
-        documents.values.forEach { indexed ->
+        documents.forEach { indexed ->
             indexed.analysis.definitions
-                .filter { it.kind == reference.first && it.id == reference.second }
-                .forEach { locations += Location(indexed.uri, indexed.rangeOf(it.range)) }
+                .filter { it.kind.sharesSymbolNamespaceWith(reference.first) && it.id == reference.second }
+                .forEach { locations += Location(indexed.uri, indexed.analysisRangeOf(it.range)) }
             indexed.analysis.references
-                .filter { it.kind == reference.first && it.targetId == reference.second }
-                .forEach { locations += Location(indexed.uri, indexed.rangeOf(it.range)) }
+                .filter { it.kind.acceptsDefinition(reference.first) && it.targetId == reference.second }
+                .forEach { locations += Location(indexed.uri, indexed.analysisRangeOf(it.range)) }
         }
         return locations
     }
 
     fun hover(uri: String, position: Position): Hover? {
-        val document = documents[normalizeUri(uri)] ?: return null
-        val offset = document.offsetAt(position)
+        val documents = documentsSnapshot()
+        val document = documents.firstOrNull { it.uri == normalizeUri(uri) } ?: return null
+        val offset = document.analysisOffsetAt(position)
+        val definition = analyzer.findDefinitionAt(document.analysis, offset)
         val symbol = analyzer.findReferenceAt(document.analysis, offset)?.let { it.kind to it.targetId }
-            ?: analyzer.findDefinitionAt(document.analysis, offset)?.let { it.kind to it.id }
+            ?: definition?.let { it.kind to it.id }
             ?: return null
-        val first = resolve(symbol.first, symbol.second).firstOrNull()
+        val resolved = if (definition != null) {
+            symbolDefinitions(symbol.first, symbol.second, documents)
+        } else {
+            resolve(symbol.first, symbol.second, documents)
+        }
+        val resolvedKinds = resolved.map { it.kind }.distinct()
+        val displayKind = definition?.kind ?: resolvedKinds.singleOrNull()
+        val displayName = if (
+            definition == null &&
+            resolvedKinds.toSet() == setOf(ReferenceTargetKind.Node, ReferenceTargetKind.Media)
+        ) {
+            "Node or Media"
+        } else {
+            (displayKind ?: symbol.first).displayName()
+        }
         val contents = MarkupContent().apply {
             kind = MarkupKind.MARKDOWN
             value = buildString {
                 append("**")
-                append(
-                    when (symbol.first) {
-                        ReferenceTargetKind.Node -> "Node"
-                        ReferenceTargetKind.NodeType -> "NodeType"
-                        ReferenceTargetKind.RelType -> "RelType"
-                        ReferenceTargetKind.Timeline -> "Timeline"
-                    },
-                )
+                append(displayName)
                 append("** `")
                 append(symbol.second)
                 append("`")
-                if (first != null) {
+                if (definition != null) {
                     append("\n\nDefined in `")
-                    append(first.path.fileName.toString())
+                    append(document.path.fileName.toString())
                     append("`")
+                } else if (resolved.size == 1) {
+                    append("\n\nDefined in `")
+                    append(resolved.single().path.fileName.toString())
+                    append("`")
+                } else if (resolved.size > 1) {
+                    append("\n\nAmbiguous: ")
+                    append(resolved.size)
+                    append(" definitions")
                 }
             }
         }
@@ -324,26 +462,73 @@ private class GraphMdWorkspaceIndex {
     }
 
     fun rename(uri: String, position: Position, newName: String): WorkspaceEdit? {
-        if (newName.isBlank() || newName.any { it.isWhitespace() }) return null
-        val document = documents[normalizeUri(uri)] ?: return null
-        val offset = document.offsetAt(position)
+        if (!GRAPH_MD_ID_REGEX.matches(newName)) {
+            throw renameFailure("New name '$newName' is not a valid GraphMD ID; expected [A-Za-z_][A-Za-z0-9_.:-]*")
+        }
+        val documents = documentsSnapshot()
+        val document = documents.firstOrNull { it.uri == normalizeUri(uri) } ?: return null
+        val offset = document.analysisOffsetAt(position)
         val symbol = analyzer.findReferenceAt(document.analysis, offset)?.let { it.kind to it.targetId }
             ?: analyzer.findDefinitionAt(document.analysis, offset)?.let { it.kind to it.id }
             ?: return null
+        validateRenameTarget(symbol, newName, documents)
         val changes = linkedMapOf<String, MutableList<TextEdit>>()
-        documents.values.forEach { indexed ->
+        documents.forEach { indexed ->
             indexed.analysis.definitions
-                .filter { it.kind == symbol.first && it.id == symbol.second }
-                .forEach { changes.getOrPut(indexed.uri) { mutableListOf() } += TextEdit(indexed.rangeOf(it.range), newName) }
+                .filter { it.kind.sharesSymbolNamespaceWith(symbol.first) && it.id == symbol.second }
+                .forEach {
+                    changes.getOrPut(indexed.uri) { mutableListOf() } +=
+                        TextEdit(indexed.analysisRangeOf(it.range), newName)
+                }
             indexed.analysis.references
-                .filter { it.kind == symbol.first && it.targetId == symbol.second }
-                .forEach { changes.getOrPut(indexed.uri) { mutableListOf() } += TextEdit(indexed.rangeOf(it.range), newName) }
+                .filter { it.kind.acceptsDefinition(symbol.first) && it.targetId == symbol.second }
+                .forEach {
+                    changes.getOrPut(indexed.uri) { mutableListOf() } +=
+                        TextEdit(indexed.analysisRangeOf(it.range), newName)
+                }
         }
         return WorkspaceEdit(changes)
     }
 
+    fun prepareRename(uri: String, position: Position): PrepareRenameResult? {
+        val documents = documentsSnapshot()
+        val document = documents.firstOrNull { it.uri == normalizeUri(uri) } ?: return null
+        val offset = document.offsetAt(position)
+        val symbolAtPosition = analyzer.findReferenceAt(document.analysis, offset)?.let {
+            Triple(it.kind, it.targetId, it.range)
+        } ?: analyzer.findDefinitionAt(document.analysis, offset)?.let {
+            Triple(it.kind, it.id, it.range)
+        } ?: return null
+        validateUnambiguousSource(symbolAtPosition.first to symbolAtPosition.second, documents)
+        return PrepareRenameResult(document.rangeOf(symbolAtPosition.third), symbolAtPosition.second)
+    }
+
+    private fun validateRenameTarget(
+        symbol: Pair<ReferenceTargetKind, String>,
+        newName: String,
+        documents: List<IndexedDocument>,
+    ) {
+        validateUnambiguousSource(symbol, documents)
+        if (newName == symbol.second) return
+        if (symbolDefinitions(symbol.first, newName, documents).isNotEmpty()) {
+            throw renameFailure("${symbol.first.displayName()} '$newName' is already defined")
+        }
+    }
+
+    private fun validateUnambiguousSource(
+        symbol: Pair<ReferenceTargetKind, String>,
+        documents: List<IndexedDocument>,
+    ) {
+        if (definitionsOf(symbol.first, documents).count { it.id == symbol.second } > 1) {
+            throw renameFailure("Cannot rename ambiguous ${symbol.first.displayName()} '${symbol.second}'")
+        }
+    }
+
+    private fun renameFailure(message: String): ResponseErrorException =
+        ResponseErrorException(ResponseError(ResponseErrorCode.RequestFailed, message, null))
+
     fun codeActions(uri: String, diagnostics: List<org.eclipse.lsp4j.Diagnostic>): List<CodeAction> {
-        val document = documents[normalizeUri(uri)] ?: return emptyList()
+        val document = documentSnapshot(normalizeUri(uri)) ?: return emptyList()
         return diagnostics
             .filter { it.source == null || it.source == "graphmd" }
             .flatMap { diagnostic -> codeActionsForDiagnostic(document, diagnostic) }
@@ -356,6 +541,9 @@ private class GraphMdWorkspaceIndex {
     ): List<CodeAction> = buildList {
         val message = diagnostic.message
 
+        if (message.startsWith("Ambiguous ") && " reference: " in message) {
+            return@buildList
+        }
         referenceTargetForDiagnostic(message)?.let { target ->
             val candidates = completionIds(target.kind)
                 .sortedWith(compareBy<String> { levenshtein(it.lowercase(), target.id.lowercase()) }.thenBy { it })
@@ -814,7 +1002,7 @@ private class GraphMdWorkspaceIndex {
                                 document,
                                 diagnostic,
                                 "Change relation type to '${rel.id}'",
-                                document.rangeOf(relReference.range),
+                                document.analysisRangeOf(relReference.range),
                                 rel.id,
                                 preferred = index == 0,
                             ),
@@ -906,6 +1094,7 @@ private class GraphMdWorkspaceIndex {
     private fun nextAvailableId(id: String, kindName: String): String {
         val kind = when (kindName) {
             "Node" -> ReferenceTargetKind.Node
+            "Media" -> ReferenceTargetKind.Media
             "NodeType" -> ReferenceTargetKind.NodeType
             "RelType" -> ReferenceTargetKind.RelType
             "Timeline" -> ReferenceTargetKind.Timeline
@@ -926,9 +1115,10 @@ private class GraphMdWorkspaceIndex {
         val folder = when (target.kind) {
             ReferenceTargetKind.NodeType, ReferenceTargetKind.RelType -> "types"
             ReferenceTargetKind.Timeline -> "timelines"
-            ReferenceTargetKind.Node -> "nodes"
+            ReferenceTargetKind.Node, ReferenceTargetKind.Media -> "nodes"
         }
-        val base = roots.firstOrNull { document.path.startsWith(it) }
+        val workspaceRoots = synchronized(this) { roots.toList() }
+        val base = workspaceRoots.firstOrNull { document.path.startsWith(it) }
             ?: document.path.parent?.takeUnless { it.fileName?.toString() in setOf("types", "timelines", "nodes") }
             ?: document.path.parent?.parent
             ?: return null
@@ -936,7 +1126,7 @@ private class GraphMdWorkspaceIndex {
         val definitionDirectory = preferredDirectory.takeIf { Files.isDirectory(it) } ?: base
         val newPath = definitionDirectory.resolve("${target.id}.md")
         val newUri = newPath.toUri().toString()
-        if (newUri in documents || Files.exists(newPath)) return null
+        if (documentSnapshot(newUri) != null || Files.exists(newPath)) return null
         val sourceType = (document.analysis.parsed.document as? NodeDocument)?.type
             ?: completionIds(ReferenceTargetKind.NodeType).firstOrNull()
             ?: "NodeType"
@@ -945,6 +1135,7 @@ private class GraphMdWorkspaceIndex {
             ReferenceTargetKind.RelType -> "---\nid: ${target.id}\nkind: RelType\n---\n"
             ReferenceTargetKind.Timeline -> "---\nid: ${target.id}\nkind: Timeline\ntimecode:\n  type: number\n---\n"
             ReferenceTargetKind.Node -> "---\nid: ${target.id}\nkind: Node\ntype: $sourceType\n---\n"
+            ReferenceTargetKind.Media -> "---\nid: ${target.id}\nkind: Media\ntype: $sourceType\nurl: \"\"\n---\n"
         }
         val changes = listOf<Either<TextDocumentEdit, ResourceOperation>>(
             Either.forRight(CreateFile(newUri, CreateFileOptions(false, true))),
@@ -981,7 +1172,7 @@ private class GraphMdWorkspaceIndex {
             }
             else -> null
         } ?: return null
-        val schemaDocument = documents.values.firstOrNull { it.path.toString() == targetSource } ?: return null
+        val schemaDocument = documentsSnapshot().firstOrNull { it.path.toString() == targetSource } ?: return null
         val insertion = schemaDocument.propSchemaInsertion(key)
         return quickFix(
             "Declare '$key' in ${schemaDocument.analysis.parsed.document?.id ?: "schema"}",
@@ -1005,6 +1196,7 @@ private class GraphMdWorkspaceIndex {
 
     private fun ReferenceTargetKind.displayName(): String = when (this) {
         ReferenceTargetKind.Node -> "Node"
+        ReferenceTargetKind.Media -> "Media"
         ReferenceTargetKind.NodeType -> "NodeType"
         ReferenceTargetKind.RelType -> "RelType"
         ReferenceTargetKind.Timeline -> "Timeline"
@@ -1030,12 +1222,25 @@ private class GraphMdWorkspaceIndex {
     }
 
     fun diagnosticsByUri(): Map<String, MutableList<org.eclipse.lsp4j.Diagnostic>> {
-        val compiled = compiledWorkspace()
+        val workspace = compiledWorkspaceSnapshot()
+        val compiled = workspace.compilation
+        val documents = workspace.documents.associateBy { it.uri }
         val diagnostics = linkedMapOf<String, MutableList<org.eclipse.lsp4j.Diagnostic>>()
         compiled.diagnostics.forEach { diagnostic ->
             val sourcePath = diagnostic.source?.path ?: return@forEach
             val uri = Path.of(sourcePath).toUri().toString()
             val document = documents[uri] ?: return@forEach
+            val referenceTarget = diagnostic
+                .takeIf { it.category == DiagnosticCategory.ReferenceError }
+                ?.let { referenceTargetForDiagnostic(it.message) }
+            if (referenceTarget != null && document.analysis.references.any { reference ->
+                    reference.kind == referenceTarget.kind &&
+                        reference.targetId == referenceTarget.id &&
+                        (referenceTarget.field == null || reference.field == referenceTarget.field)
+                }
+            ) {
+                return@forEach
+            }
             diagnostics.getOrPut(uri) { mutableListOf() } += org.eclipse.lsp4j.Diagnostic().apply {
                 severity = when (diagnostic.severity) {
                     Severity.Error -> DiagnosticSeverity.Error
@@ -1045,11 +1250,55 @@ private class GraphMdWorkspaceIndex {
                 source = "graphmd"
                 code = Either.forLeft(diagnostic.category.name)
                 range = inferredDiagnosticLspRange(document, diagnostic)
-                    ?: document.rangeOf(diagnosticSourceRange(document, diagnostic) ?: SourceRange(0, 0))
+                    ?: document.analysisRangeOf(diagnosticSourceRange(document, diagnostic) ?: SourceRange(0, 0))
+            }
+        }
+        val definitionsById = workspace.documents
+            .flatMap { it.analysis.definitions }
+            .groupBy { it.id }
+        workspace.documents.forEach { document ->
+            document.analysis.references.forEach { reference ->
+                val candidates = definitionsById[reference.targetId].orEmpty()
+                val matching = candidates.count { it.kind == reference.kind }
+                val message = when {
+                    matching > 1 -> "Ambiguous ${reference.kind.displayName()} reference: ${reference.targetId}"
+                    matching == 1 -> null
+                    candidates.isNotEmpty() -> {
+                        val actualKinds = candidates.map { it.kind.displayName() }.distinct().sorted().joinToString(", ")
+                        "Expected ${reference.kind.displayName()} but found $actualKinds: ${reference.targetId}"
+                    }
+                    else -> unresolvedReferenceMessage(reference)
+                }
+                if (message != null) {
+                    diagnostics.getOrPut(document.uri) { mutableListOf() } += org.eclipse.lsp4j.Diagnostic().apply {
+                        severity = DiagnosticSeverity.Error
+                        this.message = message
+                        source = "graphmd"
+                        code = Either.forLeft(DiagnosticCategory.ReferenceError.name)
+                        range = document.analysisRangeOf(reference.range)
+                    }
+                }
             }
         }
         documents.keys.forEach { uri -> diagnostics.putIfAbsent(uri, mutableListOf()) }
         return diagnostics
+    }
+
+    private fun unresolvedReferenceMessage(reference: SymbolReference): String = when {
+        reference.kind == ReferenceTargetKind.NodeType && reference.field == "extends" ->
+            "Unknown parent NodeType: ${reference.targetId}"
+        reference.kind == ReferenceTargetKind.RelType && reference.field == "extends" ->
+            "Unknown parent RelType: ${reference.targetId}"
+        reference.kind == ReferenceTargetKind.Timeline && reference.field == "extends" ->
+            "Unknown parent Timeline: ${reference.targetId}"
+        reference.kind == ReferenceTargetKind.NodeType ->
+            "Unknown NodeType: ${reference.targetId}"
+        reference.kind == ReferenceTargetKind.RelType ->
+            "Unknown RelType: ${reference.targetId}"
+        reference.kind == ReferenceTargetKind.Node ->
+            "Unknown Node target: ${reference.targetId}"
+        else ->
+            "Unknown Timeline: ${reference.targetId}"
     }
 
     private fun normalizeUri(uri: String): String =
@@ -1066,8 +1315,8 @@ private class GraphMdWorkspaceIndex {
 
     private fun yamlFrontMatterCompletions(document: IndexedDocument, position: Position): List<CompletionItem>? {
         val resolver = FrontMatterCompletionResolver(
-            text = document.text,
-            offset = document.offsetAt(position),
+            text = document.analysis.text,
+            offset = document.analysisOffsetAt(position),
             parsedDocument = document.analysis.parsed.document,
             nodeTypeIds = completionIds(ReferenceTargetKind.NodeType),
             relTypeIds = completionIds(ReferenceTargetKind.RelType),
@@ -1115,7 +1364,7 @@ private class GraphMdWorkspaceIndex {
             ?: frontMatterScalar(document.text, "type")
         val targetType = context.targetId?.let { target -> compiled.nodes.firstOrNull { it.id == target }?.type }
         return when (kind) {
-            ReferenceTargetKind.Node -> {
+            ReferenceTargetKind.Node, ReferenceTargetKind.Media -> {
                 val allowedTargets = context.relType?.let { rel -> compiled.relTypes.firstOrNull { it.id == rel }?.to }
                 compiled.nodes
                     .filter { node -> allowedTargets == null || allowedTargets.any { nodeTypeMatches(node.type, it, compiled.nodeTypes) } }
@@ -1159,11 +1408,192 @@ private class GraphMdWorkspaceIndex {
         )
     }
 
-    private fun compiledWorkspace(): GraphCompilationResult {
-        compiledCache?.let { return it }
-        val graphDocuments = documents.values.filter { it.isGraphDocumentCandidate() }
-        return compiler.compileSources(graphDocuments.map { SourceDocument(it.text, it.path.toString()) })
-            .also { compiledCache = it }
+    fun search(params: GraphMdSearchParams): GraphMdSearchResponse {
+        if (params.query.isBlank()) {
+            return GraphMdSearchResponse(
+                diagnostics = listOf(
+                    GraphMdSearchDiagnostic("GRAPHMD_SEARCH", "input", "Query must not be blank."),
+                ),
+            )
+        }
+        val parameters = try {
+            params.parameters.mapValues { (name, value) -> parseSearchParameter(name, value) }
+        } catch (exception: SearchParameterException) {
+            return GraphMdSearchResponse(
+                diagnostics = listOf(
+                    GraphMdSearchDiagnostic("GRAPHMD_PARAM", "type", exception.message ?: "Invalid parameter."),
+                ),
+            )
+        }
+        val (workspace, engine) = stableSearchWorkspace()
+        val compilation = workspace.compilation
+        val result = runSearchSuspend {
+            engine.queryGmql(
+                params.query,
+                parameters,
+                GmqlExecutionOptions(profile = GmqlExecutionProfile.SERVER),
+            )
+        }
+        val diagnostics = compilation.diagnostics
+            .filter { it.severity == Severity.Error }
+            .map {
+                GraphMdSearchDiagnostic(
+                    code = "GRAPHMD_COMPILE",
+                    kind = it.category.name.lowercase(),
+                    message = it.message,
+                )
+            } + result.diagnostics.map { it.toSearchDiagnostic() }
+        val columns = result.columns.map { GraphMdSearchColumn(it.name, it.type.wireName()) }
+        val idColumn = result.columns.indexOfFirst {
+            it.name.equals("id", ignoreCase = true) || it.name.equals("nodeId", ignoreCase = true)
+        }
+        val rows = result.rows.map { row ->
+            val relation = row.values.filterIsInstance<GmqlValue.RelationValue>().firstOrNull()
+                ?.id
+                ?.let { relationId -> engine.graph.relationAssertions.firstOrNull { it.id == relationId } }
+            val nodeId = row.values.filterIsInstance<GmqlValue.NodeValue>().firstOrNull()?.id?.value
+            val idValue = idColumn.takeIf { it >= 0 }
+                ?.let { row.values.getOrNull(it) as? GmqlValue.StringValue }
+                ?.value
+            val relationByStableKey = idValue?.let { stableKey ->
+                engine.graph.relationAssertions.firstOrNull { it.stableKey.value == stableKey }
+            }
+            GraphMdSearchRow(
+                values = row.values.map(GmqlValue::toWireValue),
+                location = relation?.source?.let { sourceLocation(it, workspace.documents) }
+                    ?: relationByStableKey?.source?.let { sourceLocation(it, workspace.documents) }
+                    ?: nodeId?.let { nodeLocation(it, workspace.documents) }
+                    ?: idValue?.let { nodeLocation(it, workspace.documents) },
+            )
+        }
+        return GraphMdSearchResponse(columns, rows, diagnostics)
+    }
+
+    fun searchMetadata(): GraphMdSearchMetadata {
+        val compiled = compiledWorkspace()
+        return GraphMdSearchMetadata(
+            nodeTypes = compiled.nodeTypes
+                .sortedBy { it.id }
+                .map { type ->
+                    GraphMdSearchNodeType(
+                        type.id,
+                        type.props.entries
+                            .sortedBy { it.key }
+                            .map { (name, schema) -> schema.toSearchProperty(name) },
+                    )
+                },
+            relationTypes = compiled.relTypes
+                .sortedBy { it.id }
+                .map { type ->
+                    GraphMdSearchRelationType(
+                        id = type.id,
+                        sourceTypes = type.from?.sorted(),
+                        targetTypes = type.to?.sorted(),
+                        properties = type.props.entries
+                            .sortedBy { it.key }
+                            .map { (name, schema) -> schema.toSearchProperty(name) },
+                    )
+                },
+            timelines = compiled.timelines.map { it.id }.distinct().sorted(),
+        )
+    }
+
+    private fun nodeLocation(
+        nodeId: String,
+        documents: List<IndexedDocument>,
+    ): GraphMdSearchLocation? =
+        resolve(ReferenceTargetKind.Node, nodeId, documents).firstOrNull()?.let { definition ->
+            GraphMdSearchLocation(
+                definition.uri,
+                definition.range(),
+            )
+        }
+
+    private fun sourceLocation(
+        source: SourceInfo,
+        documents: List<IndexedDocument>,
+    ): GraphMdSearchLocation? {
+        val document = documents.firstOrNull { indexed ->
+            indexed.path.toString() == source.path
+        } ?: return null
+        return GraphMdSearchLocation(
+            document.uri,
+            source.range?.let(document::bodyRangeOf) ?: document.rangeOf(SourceRange(0, 0)),
+        )
+    }
+
+    private fun List<IndexedDocument>.toSourceDocuments(): List<SourceDocument> =
+        this
+            .filter { it.isGraphDocumentCandidate() }
+            .map { SourceDocument(it.text, it.path.toString()) }
+
+    private fun invalidateCompilation() {
+        workspaceGeneration++
+        compiledCache = null
+        searchEngineCache = null
+    }
+
+    private fun compiledWorkspace(): GraphCompilationResult =
+        compiledWorkspaceSnapshot().compilation
+
+    private fun compiledWorkspaceSnapshot(): CompiledWorkspace {
+        while (true) {
+            val snapshot = synchronized(this) {
+                compiledCache
+                    ?.takeIf { it.generation == workspaceGeneration }
+                    ?.let { return it }
+                WorkspaceSnapshot(workspaceGeneration, documents.values.toList())
+            }
+            val candidate = CompiledWorkspace(
+                generation = snapshot.generation,
+                documents = snapshot.documents,
+                compilation = compileSources(snapshot.documents.toSourceDocuments()),
+            )
+            val current = synchronized(this) {
+                if (workspaceGeneration != snapshot.generation) {
+                    null
+                } else {
+                    compiledCache
+                        ?.takeIf { it.generation == snapshot.generation }
+                        ?: candidate.also { compiledCache = it }
+                }
+            }
+            if (current != null) return current
+        }
+    }
+
+    private fun stableSearchWorkspace(): Pair<CompiledWorkspace, GraphSearchEngine> {
+        while (true) {
+            val workspace = compiledWorkspaceSnapshot()
+            val engine = searchEngine(workspace)
+            if (synchronized(this) { workspaceGeneration == workspace.generation }) {
+                return workspace to engine
+            }
+        }
+    }
+
+    private fun searchEngine(workspace: CompiledWorkspace): GraphSearchEngine {
+        synchronized(this) {
+            searchEngineCache
+                ?.takeIf { it.generation == workspace.generation }
+                ?.let { return it.engine }
+        }
+        val candidate = GraphSearchEngine.build(
+            workspace.compilation,
+            workspace.documents.toSourceDocuments(),
+        )
+        return synchronized(this) {
+            if (workspaceGeneration != workspace.generation) {
+                candidate
+            } else {
+                searchEngineCache
+                    ?.takeIf { it.generation == workspace.generation }
+                    ?.engine
+                    ?: candidate.also {
+                        searchEngineCache = CachedSearchEngine(workspace.generation, it)
+                    }
+            }
+        }
     }
 
     private fun frontMatterScalar(text: String, key: String): String? {
@@ -1182,23 +1612,38 @@ private class GraphMdWorkspaceIndex {
 
     private fun completionIds(kind: ReferenceTargetKind): List<String> {
         return when (kind) {
-            ReferenceTargetKind.Node -> definitionsOf(kind).map { it.id }
-            ReferenceTargetKind.NodeType, ReferenceTargetKind.RelType -> definitionsOf(kind).filter { it.path.toString().contains("/types/") }.ifEmpty { definitionsOf(kind) }.map { it.id }
+            ReferenceTargetKind.Node -> definitionsCompatibleWith(kind).map { it.id }
+            ReferenceTargetKind.Media -> definitionsOf(kind).map { it.id }
+            ReferenceTargetKind.NodeType, ReferenceTargetKind.RelType -> definitionsOf(kind).map { it.id }
             ReferenceTargetKind.Timeline -> definitionsOf(kind).map { it.id }
         }.distinct().sorted()
     }
 
     private fun resolve(kind: ReferenceTargetKind, id: String): List<IndexedDefinition> {
-        return definitionsOf(kind).filter { it.id == id }
+        return definitionsCompatibleWith(kind).filter { it.id == id }
     }
 
-    private fun resolveProperty(reference: PropertyReference): List<IndexedPropertyDefinition> {
+    private fun resolve(
+        kind: ReferenceTargetKind,
+        id: String,
+        documents: List<IndexedDocument>,
+    ): List<IndexedDefinition> {
+        return definitionsCompatibleWith(kind, documents).filter { it.id == id }
+    }
+
+    private fun resolveProperty(reference: PropertyReference): List<IndexedPropertyDefinition> =
+        resolveProperty(reference, documentsSnapshot())
+
+    private fun resolveProperty(
+        reference: PropertyReference,
+        documents: List<IndexedDocument>,
+    ): List<IndexedPropertyDefinition> {
         fun resolveOwner(
             ownerId: String,
             visited: Set<String>,
         ): List<IndexedPropertyDefinition> {
             if (ownerId in visited) return emptyList()
-            val ownerDocuments = documents.values.filter { indexed ->
+            val ownerDocuments = documents.filter { indexed ->
                 val parsed = indexed.analysis.parsed.document
                 when (reference.ownerKind) {
                     PropertyOwnerKind.NodeType -> parsed is NodeTypeDocument && parsed.id == ownerId
@@ -1251,10 +1696,46 @@ private class GraphMdWorkspaceIndex {
     }
 
     private fun definitionsOf(kind: ReferenceTargetKind): List<IndexedDefinition> {
-        return documents.values.flatMap { indexed ->
+        val snapshot = synchronized(this) { documents.values.toList() }
+        return definitionsOf(kind, snapshot)
+    }
+
+    private fun definitionsCompatibleWith(kind: ReferenceTargetKind): List<IndexedDefinition> {
+        val snapshot = synchronized(this) { documents.values.toList() }
+        return definitionsCompatibleWith(kind, snapshot)
+    }
+
+    private fun definitionsCompatibleWith(
+        kind: ReferenceTargetKind,
+        documents: List<IndexedDocument>,
+    ): List<IndexedDefinition> {
+        return documents.flatMap { indexed ->
+            indexed.analysis.definitions
+                .filter { kind.acceptsDefinition(it.kind) }
+                .map { IndexedDefinition(indexed.uri, indexed.path, it.id, it.range, indexed, it.kind) }
+        }
+    }
+
+    private fun symbolDefinitions(
+        kind: ReferenceTargetKind,
+        id: String,
+        documents: List<IndexedDocument>,
+    ): List<IndexedDefinition> {
+        return documents.flatMap { indexed ->
+            indexed.analysis.definitions
+                .filter { it.kind.sharesSymbolNamespaceWith(kind) && it.id == id }
+                .map { IndexedDefinition(indexed.uri, indexed.path, it.id, it.range, indexed, it.kind) }
+        }
+    }
+
+    private fun definitionsOf(
+        kind: ReferenceTargetKind,
+        documents: List<IndexedDocument>,
+    ): List<IndexedDefinition> {
+        return documents.flatMap { indexed ->
             indexed.analysis.definitions
                 .filter { it.kind == kind }
-                .map { IndexedDefinition(indexed.uri, indexed.path, it.id, it.range, indexed) }
+                .map { IndexedDefinition(indexed.uri, indexed.path, it.id, it.range, indexed, it.kind) }
         }
     }
 
@@ -1268,7 +1749,7 @@ private class GraphMdWorkspaceIndex {
                         (target.field == null || ref.field == target.field)
                 }?.range
             }
-            if (sourceRange != null) return document.rangeOf(sourceRange)
+            if (sourceRange != null) return document.analysisRangeOf(sourceRange)
         }
         unknownFieldName(diagnostic.message)?.let { field -> document.yamlFieldKeyRange(field)?.let { return it } }
         Regex("""Unknown document kind: (.+)""").matchEntire(diagnostic.message)?.let {
@@ -1284,7 +1765,10 @@ private class GraphMdWorkspaceIndex {
         Regex("""(?:Node|NodeType|RelType|Timeline) id must be unique: (.+)""").matchEntire(diagnostic.message)?.let {
             return document.yamlScalarRange("id", it.groupValues[1])
         }
-        if (diagnostic.message.startsWith("id MUST match ")) {
+        if (
+            diagnostic.message.startsWith("id MUST match ") ||
+            diagnostic.message == "RelType id MUST NOT contain whitespace"
+        ) {
             frontMatterScalar(document.text, "id")
                 ?.let { document.yamlScalarRange("id", it) }
                 ?.let { return it }
@@ -1309,6 +1793,12 @@ private class GraphMdWorkspaceIndex {
     }
 
     private fun referenceTargetForDiagnostic(message: String): DiagnosticReferenceTarget? {
+        Regex("""^Ambiguous (Node|NodeType|RelType|Timeline) reference: (.+)$""").matchEntire(message)?.let {
+            return DiagnosticReferenceTarget(referenceTargetKind(it.groupValues[1]), it.groupValues[2], null)
+        }
+        Regex("""^Expected (Node|NodeType|RelType|Timeline) but found .+: (.+)$""").matchEntire(message)?.let {
+            return DiagnosticReferenceTarget(referenceTargetKind(it.groupValues[1]), it.groupValues[2], null)
+        }
         Regex("""^Unknown NodeType: (.+)$""").matchEntire(message)?.let {
             return DiagnosticReferenceTarget(ReferenceTargetKind.NodeType, it.groupValues[1], "type")
         }
@@ -1334,6 +1824,14 @@ private class GraphMdWorkspaceIndex {
             return DiagnosticReferenceTarget(ReferenceTargetKind.Timeline, it.groupValues[1], null)
         }
         return null
+    }
+
+    private fun referenceTargetKind(name: String): ReferenceTargetKind = when (name) {
+        "Node" -> ReferenceTargetKind.Node
+        "NodeType" -> ReferenceTargetKind.NodeType
+        "RelType" -> ReferenceTargetKind.RelType
+        "Timeline" -> ReferenceTargetKind.Timeline
+        else -> error("Unknown reference target kind: $name")
     }
 }
 
@@ -1372,62 +1870,88 @@ internal class FrontMatterCompletionResolver(
     private val nodePropsSchema: Map<String, ResolvedPropSchema> = emptyMap(),
 ) {
     fun resolve(): List<CompletionEntry>? {
-        val lines = text.replace("\r\n", "\n").split('\n')
+        val normalizedText = text.replace("\r\n", "\n").replace('\r', '\n')
+        val normalizedOffset = text
+            .take(offset.coerceIn(0, text.length))
+            .replace("\r\n", "\n")
+            .replace('\r', '\n')
+            .length
+        val lines = normalizedText.split('\n')
         if (lines.firstOrNull() != "---") return null
         val endLine = lines.drop(1).indexOfFirst { it == "---" || it == "..." }.let { if (it >= 0) it + 1 else -1 }
         if (endLine < 0) return null
         val lineStarts = computeLineStarts(lines)
-        if (offset >= lineStarts[endLine] + lines[endLine].length) return null
-        val lineIndex = lineStarts.indexOfLast { it <= offset }.coerceAtLeast(0)
+        if (normalizedOffset >= lineStarts[endLine] + lines[endLine].length) return null
+        val lineIndex = lineStarts.indexOfLast { it <= normalizedOffset }.coerceAtLeast(0)
         if (lineIndex == 0 || lineIndex >= endLine) return null
         val line = lines[lineIndex]
         val indent = indentOf(line)
         val trimmed = line.trimStart()
-        val cursorInLine = offset - lineStarts[lineIndex]
+        val cursorInLine = normalizedOffset - lineStarts[lineIndex]
         val beforeCursor = line.take(cursorInLine.coerceIn(0, line.length))
         val currentKeyPrefix = trimmed.takeWhile { it != ':' && !it.isWhitespace() }
         val usedTopLevelKeys = siblingKeysAtIndent(lines, lineIndex, 0)
+        val documentKind = parsedDocument?.kind ?: inferredDocumentKind(lines, endLine)
 
         if (trimmed.startsWith("-")) {
-            return listValueCompletions(lines, lineIndex, beforeCursor, parsedDocument)
+            return listValueCompletions(lines, lineIndex, beforeCursor, documentKind)
         }
 
         val keyMatch = Regex("""^([A-Za-z][A-Za-z0-9_-]*)?\s*:?(.*)$""").matchEntire(trimmed) ?: return null
         val keyCandidate = keyMatch.groupValues[1]
         val hasColon = ':' in trimmed
         if (!hasColon && indent == 0) {
-            return topLevelKeyCompletions(keyCandidate, usedTopLevelKeys)
+            return topLevelKeyCompletions(keyCandidate, usedTopLevelKeys, documentKind)
         }
 
         val path = contextPath(lines, lineIndex, indent, hasColon)
-        val valuePrefix = if (hasColon) beforeCursor.substringAfter(':', "").trimStart() else ""
-        nodePropsYamlCompletions(lines, lineIndex, indent, path, hasColon, currentKeyPrefix, valuePrefix)?.let { return it }
+        val valuePrefix = if (hasColon) scalarPrefix(beforeCursor.substringAfter(':', "")) else ""
+        nodePropsYamlCompletions(
+            lines,
+            lineIndex,
+            indent,
+            path,
+            hasColon,
+            currentKeyPrefix,
+            valuePrefix,
+            documentKind,
+        )?.let { return it }
         return when {
-            indent == 0 && keyCandidate.isNotEmpty() && !hasColon -> topLevelKeyCompletions(keyCandidate, usedTopLevelKeys)
+            indent == 0 && keyCandidate.isNotEmpty() && !hasColon ->
+                topLevelKeyCompletions(keyCandidate, usedTopLevelKeys, documentKind)
             hasColon && path == listOf("kind") -> enumCompletions(valuePrefix, listOf("Node", "Media", "NodeType", "RelType", "Timeline"), "kind")
-            hasColon && path == listOf("type") && parsedDocument is NodeDocument -> idCompletions(valuePrefix, nodeTypeIds, "NodeType")
-            hasColon && path == listOf("extends") && parsedDocument is NodeTypeDocument -> idCompletions(valuePrefix, nodeTypeIds, "NodeType")
-            hasColon && path == listOf("extends") && parsedDocument is RelTypeDocument -> idCompletions(valuePrefix, relTypeIds, "RelType")
-            hasColon && path == listOf("extends") && parsedDocument is TimelineDocument -> idCompletions(valuePrefix, timelineIds, "Timeline")
-            hasColon && parsedDocument is TimelineDocument && "mappings" in path && path.lastOrNull() in setOf("from", "to") ->
+            hasColon && path == listOf("type") && documentKind in setOf(DocumentKind.Node, DocumentKind.Media) ->
+                idCompletions(valuePrefix, nodeTypeIds, "NodeType")
+            hasColon && path == listOf("extends") && documentKind == DocumentKind.NodeType ->
+                idCompletions(valuePrefix, nodeTypeIds, "NodeType")
+            hasColon && path == listOf("extends") && documentKind == DocumentKind.RelType ->
+                idCompletions(valuePrefix, relTypeIds, "RelType")
+            hasColon && path == listOf("extends") && documentKind == DocumentKind.Timeline ->
+                idCompletions(valuePrefix, timelineIds, "Timeline")
+            hasColon && documentKind == DocumentKind.Timeline && "mappings" in path && path.lastOrNull() in setOf("from", "to") ->
                 idCompletions(valuePrefix, timelineIds, "Timeline")
             hasColon && (path == listOf("from") || path == listOf("to")) -> idCompletions(valuePrefix, nodeTypeIds, "NodeType")
-            hasColon && path.lastOrNull() == "required" ->
+            hasColon && path.lastOrNull() == "required" && isPropSchemaPath(path.dropLast(1), documentKind) ->
                 enumCompletions(valuePrefix, listOf("true", "false"), "boolean")
             hasColon && path == listOf("timecode", "type") ->
                 enumCompletions(valuePrefix, listOf("number"), "timecode type")
-            hasColon && path.lastOrNull() == "type" ->
+            hasColon && path.lastOrNull() == "type" &&
+                documentKind in setOf(DocumentKind.NodeType, DocumentKind.RelType) &&
+                isPropSchemaPath(path.dropLast(1), documentKind) ->
                 enumCompletions(valuePrefix, listOf("number", "string", "text", "instant", "duration", "array"), "prop type")
-            hasColon && path.lastOrNull() == "timeline" ->
+            hasColon && path.lastOrNull() == "timeline" && isPropSchemaPath(path.dropLast(1), documentKind) ->
                 timelineSelectorCompletions(valuePrefix)
-            hasColon && valuePrefix.isEmpty() -> nestedKeyCompletions(path, "", lines, lineIndex)
-            indent == 0 -> topLevelKeyCompletions(keyCandidate, usedTopLevelKeys)
-            else -> nestedKeyCompletions(path, currentKeyPrefix, lines, lineIndex)
+            hasColon && valuePrefix.isEmpty() -> nestedKeyCompletions(path, "", lines, lineIndex, documentKind)
+            indent == 0 -> topLevelKeyCompletions(keyCandidate, usedTopLevelKeys, documentKind)
+            else -> nestedKeyCompletions(path, currentKeyPrefix, lines, lineIndex, documentKind)
         }
     }
 
-    private fun topLevelKeyCompletions(prefix: String, usedKeys: Set<String>): List<CompletionEntry> {
-        val kind = parsedDocument?.kind ?: inferredDocumentKind()
+    private fun topLevelKeyCompletions(
+        prefix: String,
+        usedKeys: Set<String>,
+        kind: DocumentKind?,
+    ): List<CompletionEntry> {
         val keys = mutableListOf("id", "kind")
         when (kind) {
             DocumentKind.Node -> keys += listOf("type", "validTime", "props")
@@ -1453,8 +1977,9 @@ internal class FrontMatterCompletionResolver(
         hasColon: Boolean,
         keyPrefix: String,
         valuePrefix: String,
+        documentKind: DocumentKind?,
     ): List<CompletionEntry>? {
-        if (parsedDocument !is NodeDocument && inferredDocumentKind() !in setOf(DocumentKind.Node, DocumentKind.Media)) return null
+        if (documentKind !in setOf(DocumentKind.Node, DocumentKind.Media)) return null
         if (nodePropsSchema.isEmpty()) return null
         if (path.firstOrNull() != "props") return null
 
@@ -1481,7 +2006,7 @@ internal class FrontMatterCompletionResolver(
         val schema = parentContainer.properties[currentKey]
         return when {
             schema != null -> typedValueCompletions(schema, valuePrefix, yaml = true)
-            currentKey == "timeline" ->
+            currentKey == "timeline" && currentKey in parentContainer.specialKeys ->
                 idCompletions(valuePrefix, allowedTimelineIds(parentContainer.ownerSchema), "Timeline")
             else -> null
         }
@@ -1517,6 +2042,7 @@ internal class FrontMatterCompletionResolver(
         prefix: String,
         lines: List<String>,
         lineIndex: Int,
+        documentKind: DocumentKind?,
     ): List<CompletionEntry>? {
         if (
             path.lastOrNull() == "validTime" &&
@@ -1529,7 +2055,7 @@ internal class FrontMatterCompletionResolver(
             path.lastOrNull() == "validTime" -> listOf("timeline", "from", "to")
             path.takeLast(2).let { it == listOf("validTime", "from") || it == listOf("validTime", "to") } ->
                 listOf("value", "timecode")
-            isInsidePropSchema(path) -> when (siblingScalarValue(lines, lineIndex, "type")) {
+            isPropSchemaPath(path, documentKind) -> when (siblingScalarValue(lines, lineIndex, "type")) {
                 "instant", "duration" -> listOf("type", "required", "timeline")
                 "array" -> listOf("type", "required", "items")
                 else -> listOf("type", "required")
@@ -1595,13 +2121,12 @@ internal class FrontMatterCompletionResolver(
         lines: List<String>,
         lineIndex: Int,
         beforeCursor: String,
-        parsedDocument: GraphDocument?,
+        documentKind: DocumentKind?,
     ): List<CompletionEntry>? {
         val parentKey = enclosingListKey(lines, lineIndex) ?: return null
         val afterDash = beforeCursor.substringAfter('-', "")
         val hasSpaceAfterDash = afterDash.firstOrNull()?.isWhitespace() == true
         val prefix = afterDash.trimStart()
-        val documentKind = parsedDocument?.kind ?: inferredDocumentKind()
         return when (parentKey) {
             "extends" -> when (documentKind) {
                 DocumentKind.NodeType -> idCompletions(prefix, nodeTypeIds, "NodeType")
@@ -1751,16 +2276,53 @@ internal class FrontMatterCompletionResolver(
 
     private fun indentOf(line: String): Int = line.indexOfFirst { !it.isWhitespace() }.let { if (it < 0) line.length else it }
 
-    private fun isInsidePropSchema(path: List<String>): Boolean {
-        if (path.isEmpty()) return false
-        val propsIndex = path.indexOf("props")
-        val propertiesIndex = path.indexOf("properties")
-        return propsIndex >= 0 || propertiesIndex >= 0
+    private fun isPropSchemaPath(path: List<String>, documentKind: DocumentKind?): Boolean =
+        (documentKind == DocumentKind.NodeType || documentKind == DocumentKind.RelType) &&
+            path.size >= 2 &&
+            path.first() == "props" &&
+            path.drop(2).all { it == "items" }
+
+    private fun inferredDocumentKind(lines: List<String>, endLine: Int): DocumentKind? {
+        val raw = lines
+            .subList(1, endLine)
+            .firstNotNullOfOrNull { line ->
+                if (indentOf(line) != 0) return@firstNotNullOfOrNull null
+                val parts = line.split(':', limit = 2)
+                if (parts.size != 2 || parts[0].trim() != "kind") return@firstNotNullOfOrNull null
+                scalarPrefix(parts[1]).takeIf { it.isNotEmpty() }
+            }
+        return DocumentKind.entries.firstOrNull { it.name == raw }
     }
 
-    private fun inferredDocumentKind(): DocumentKind? {
-        val raw = Regex("""(?m)^kind\s*:\s*([A-Za-z]+)""").find(text)?.groupValues?.get(1)
-        return DocumentKind.entries.firstOrNull { it.name == raw }
+    private fun scalarPrefix(raw: String): String {
+        val value = raw.trimStart()
+        val quote = value.firstOrNull().takeIf { it == '"' || it == '\'' }
+        if (quote == null) {
+            val commentStart = value.indices.firstOrNull { index ->
+                value[index] == '#' && (index == 0 || value[index - 1].isWhitespace())
+            }
+            return value.substring(0, commentStart ?: value.length).trimEnd()
+        }
+
+        val content = StringBuilder()
+        var index = 1
+        while (index < value.length) {
+            val character = value[index]
+            if (quote == '"' && character == '\\' && index + 1 < value.length) {
+                content.append(value[index + 1])
+                index += 2
+                continue
+            }
+            if (quote == '\'' && character == '\'' && value.getOrNull(index + 1) == '\'') {
+                content.append('\'')
+                index += 2
+                continue
+            }
+            if (character == quote) break
+            content.append(character)
+            index++
+        }
+        return content.toString()
     }
 
     private fun nodePropsContainer(path: List<String>): NodePropsContainer? {
@@ -2346,7 +2908,21 @@ private data class IndexedDocument(
 ) {
     private val lineStarts: List<Int> = buildList {
         add(0)
-        text.forEachIndexed { index, char -> if (char == '\n') add(index + 1) }
+        var index = 0
+        while (index < text.length) {
+            when (text[index]) {
+                '\r' -> {
+                    if (text.getOrNull(index + 1) == '\n') index++
+                    add(index + 1)
+                }
+                '\n' -> add(index + 1)
+            }
+            index++
+        }
+    }
+    private val analysisLineStarts: List<Int> = buildList {
+        add(0)
+        analysis.text.forEachIndexed { index, char -> if (char == '\n') add(index + 1) }
     }
 
     fun offsetAt(position: Position): Int {
@@ -2354,8 +2930,25 @@ private data class IndexedDocument(
         return (lineStart + position.character).coerceAtMost(text.length)
     }
 
+    fun analysisOffsetAt(position: Position): Int {
+        val lineStart = analysisLineStarts.getOrElse(position.line) { analysis.text.length }
+        return (lineStart + position.character).coerceAtMost(analysis.text.length)
+    }
+
     fun rangeOf(sourceRange: SourceRange): Range {
         return Range(positionAt(sourceRange.start), positionAt(sourceRange.end))
+    }
+
+    fun analysisRangeOf(sourceRange: SourceRange): Range {
+        return Range(analysisPositionAt(sourceRange.start), analysisPositionAt(sourceRange.end))
+    }
+
+    fun bodyRangeOf(sourceRange: SourceRange): Range {
+        val bodyOffset = analysis.frontMatterEndOffset
+        return Range(
+            normalizedPositionAt(bodyOffset + sourceRange.start),
+            normalizedPositionAt(bodyOffset + sourceRange.end),
+        )
     }
 
     fun endRange(): Range = rangeOf(SourceRange(text.length, text.length))
@@ -2611,12 +3204,28 @@ private data class IndexedDocument(
         return Position(line, safeOffset - lineStarts[line])
     }
 
+    private fun normalizedPositionAt(offset: Int): Position {
+        return analysisPositionAt(offset)
+    }
+
+    private fun analysisPositionAt(offset: Int): Position {
+        val safeOffset = offset.coerceIn(0, analysis.text.length)
+        val line = analysisLineStarts.indexOfLast { it <= safeOffset }.coerceAtLeast(0)
+        return Position(line, safeOffset - analysisLineStarts[line])
+    }
+
     private fun sourceLines(): List<SourceLine> = buildList {
         var start = 0
-        text.split('\n').forEach { line ->
-            add(SourceLine(start, line))
-            start += line.length + 1
+        var index = 0
+        while (index < text.length) {
+            if (text[index] == '\r' || text[index] == '\n') {
+                add(SourceLine(start, text.substring(start, index)))
+                if (text[index] == '\r' && text.getOrNull(index + 1) == '\n') index++
+                start = index + 1
+            }
+            index++
         }
+        add(SourceLine(start, text.substring(start)))
     }
 
     private fun blockEndOffset(lines: List<SourceLine>, startIndex: Int, indent: Int): Int {
@@ -2688,8 +3297,9 @@ private data class IndexedDefinition(
     val id: String,
     val sourceRange: SourceRange,
     val document: IndexedDocument,
+    val kind: ReferenceTargetKind,
 ) {
-    fun range(): Range = document.rangeOf(sourceRange)
+    fun range(): Range = document.analysisRangeOf(sourceRange)
 }
 
 private data class DiagnosticReferenceTarget(
@@ -2702,3 +3312,73 @@ private data class IndexedPropertyDefinition(
     val document: IndexedDocument,
     val definition: PropertyDefinition,
 )
+
+private class SearchParameterException(message: String) : IllegalArgumentException(message)
+
+private fun parseSearchParameter(name: String, encoded: String): GmqlValue {
+    val value = encoded.trim()
+    return when {
+        value == "null" -> GmqlValue.NullValue
+        value.equals("true", ignoreCase = true) -> GmqlValue.BooleanValue(true)
+        value.equals("false", ignoreCase = true) -> GmqlValue.BooleanValue(false)
+        SEARCH_INTEGER.matches(value) -> value.toLongOrNull()?.let(GmqlValue::IntegerValue)
+            ?: throw SearchParameterException("Parameter '$name' is outside the Integer range.")
+        SEARCH_DECIMAL.matches(value) -> value.toDoubleOrNull()?.takeIf(Double::isFinite)
+            ?.let(GmqlValue::DecimalValue)
+            ?: throw SearchParameterException("Parameter '$name' is not a finite Decimal.")
+        value.startsWith('"') -> GmqlValue.StringValue(
+            decodeSearchString(value)
+                ?: throw SearchParameterException("Parameter '$name' contains an invalid quoted string."),
+        )
+        else -> GmqlValue.StringValue(encoded)
+    }
+}
+
+private fun decodeSearchString(encoded: String): String? {
+    if (encoded.length < 2 || encoded.last() != '"') return null
+    var index = 1
+    return buildString {
+        while (index < encoded.lastIndex) {
+            when (val character = encoded[index++]) {
+                '\\' -> {
+                    if (index >= encoded.lastIndex) return null
+                    append(
+                        when (val escaped = encoded[index++]) {
+                            '"', '\\', '/' -> escaped
+                            'b' -> '\b'
+                            'f' -> '\u000c'
+                            'n' -> '\n'
+                            'r' -> '\r'
+                            't' -> '\t'
+                            'u' -> {
+                                if (index + 4 > encoded.lastIndex) return null
+                                encoded.substring(index, index + 4).toIntOrNull(16)?.toChar()
+                                    ?.also { index += 4 } ?: return null
+                            }
+                            else -> return null
+                        },
+                    )
+                }
+                '"' -> return null
+                else -> append(character)
+            }
+        }
+    }
+}
+
+private fun <T> runSearchSuspend(block: suspend () -> T): T {
+    var outcome: Result<T>? = null
+    block.startCoroutine(
+        object : Continuation<T> {
+            override val context = EmptyCoroutineContext
+            override fun resumeWith(result: Result<T>) {
+                outcome = result
+            }
+        },
+    )
+    return checkNotNull(outcome) { "Search execution suspended unexpectedly." }.getOrThrow()
+}
+
+private val SEARCH_INTEGER = Regex("""[-+]?[0-9]+""")
+private val SEARCH_DECIMAL =
+    Regex("""[-+]?(?:(?:[0-9]+\.[0-9]*|[0-9]*\.[0-9]+)(?:[eE][-+]?[0-9]+)?|[0-9]+[eE][-+]?[0-9]+)""")

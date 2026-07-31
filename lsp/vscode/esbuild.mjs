@@ -3,9 +3,12 @@ import { build } from "esbuild";
 const production = process.argv.includes("--production");
 
 await build({
-  entryPoints: ["src/extension.ts"],
+  entryPoints: {
+    extension: "src/extension.ts",
+    "search-webview": "src/search-webview.ts",
+  },
   bundle: true,
-  outfile: "dist/extension.js",
+  outdir: "dist",
   platform: "node",
   format: "cjs",
   target: "node18",

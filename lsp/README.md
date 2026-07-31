@@ -19,6 +19,11 @@
   - `@props` / `@link` / relation の引数・空白・閉じ括弧・target/type 形式の修正
   - validTime の逆転、許可されない Timeline、duration 境界、relation endpoint 制約の修正
 - `@props(validTime=...){...}` と `@link(validTime=...){...}[label](target relType)` のシンタックスハイライト
+- GraphMD サイドバーから利用できるワークスペース検索
+  - ノード型、全文、Property、時点・期間、並び順を指定するノード検索フォーム
+  - Link 型、始点・終点の型/ID、Link 全文・Property、時間条件を指定する Link 検索フォーム
+  - 名前付きパラメータに対応した GMQL の直接実行
+  - 型付きの表形式結果と、結果行から定義元 Markdown への移動
 - `core` の `GraphCompiler` による未定義参照や制約違反の診断
 - Hover と references
 
@@ -29,7 +34,7 @@ pnpm install
 pnpm --dir lsp/vscode build  # Kotlin LSP と core/JS をビルドして server/ に同梱し、拡張を esbuild でバンドル
 ```
 
-`pnpm --dir lsp/vscode build` は内部で `./gradlew :lsp:installDist` を実行して LSP 配布物を `lsp/vscode/server/` にコピーし、`src/extension.ts` を `dist/extension.js` にバンドルします。Markdown プレビュー用プラグイン（`markdown-it-graphmd`）もバンドル済みです。
+`pnpm --dir lsp/vscode build` は内部で `./gradlew :lsp:installDist` を実行して LSP 配布物を `lsp/vscode/server/` にコピーし、拡張本体と検索 Webview を `dist/` にバンドルします。Markdown プレビュー用プラグイン（`markdown-it-graphmd`）もバンドル済みです。
 
 ## 配置ルール
 
@@ -45,6 +50,8 @@ pnpm --dir lsp/vscode build  # Kotlin LSP と core/JS をビルドして server/
 4. 起動した Extension Host で GraphMD のワークスペースを開く
 
 この拡張は同梱した `server/bin/lsp` を起動して Kotlin 製 LSP サーバへ接続します。
+検索はアクティビティバーの GraphMD アイコン、またはコマンドパレットの
+`GraphMD: 検索を開く` から利用できます。開いている未保存文書も検索対象に含まれます。
 
 ## 配布 (vsix)
 
@@ -63,6 +70,7 @@ pnpm --dir lsp/vscode package  # vscode:prepublish が server 同梱 + esbuild �
 - `@props` と relation 記法に Markdown 上でトークンスコープが付き、テーマに応じて色分けされる
 - 未定義の `NodeType` / `RelType` / Node 参照に diagnostics が出る
 - 参照上で hover と references が使える
+- フォーム検索と GMQL 検索の結果を表で確認し、行を選択して定義元へ移動できる
 
 ## 例
 

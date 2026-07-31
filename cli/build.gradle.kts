@@ -61,6 +61,7 @@ kotlin {
             kotlin.srcDir(generateCliVersion)
             dependencies {
                 implementation(project(":core"))
+                implementation(project(":query"))
                 implementation(libs.kotlinx.io.core)
             }
         }

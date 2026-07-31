@@ -6,8 +6,18 @@ class InlinePropsParseException(message: String) : IllegalArgumentException(mess
     internal var errorRange: SourceRange? = null
 }
 
+internal data class InlineTimelineReference(
+    val targetId: String,
+    val field: String,
+    val range: SourceRange,
+)
+
 class InlinePropsParser(private val input: String) {
     private var index: Int = 0
+    private val parsedTimelineReferences = mutableListOf<InlineTimelineReference>()
+
+    internal val timelineReferences: List<InlineTimelineReference>
+        get() = parsedTimelineReferences.toList()
 
     fun parseObject(): RawObject {
         skipHorizontalAndNewlines()
@@ -17,6 +27,18 @@ class InlinePropsParser(private val input: String) {
             fail("Unexpected trailing content")
         }
         return value
+    }
+
+    internal fun parseValidTimeArgument() {
+        skipHorizontalAndNewlines()
+        val name = parseIdentifier()
+        if (name != "validTime") fail("Expected validTime argument")
+        skipHorizontalAndNewlines()
+        expect('=')
+        skipHorizontalAndNewlines()
+        parseValidTimeExpression()
+        skipHorizontalAndNewlines()
+        if (!isEof()) fail("Unexpected trailing content")
     }
 
     private fun parseInlineObject(): RawObject {
@@ -31,7 +53,14 @@ class InlinePropsParser(private val input: String) {
             skipHorizontalAndNewlines()
             expect('=')
             skipHorizontalAndNewlines()
+            val valueStart = index
             var value = parseValue()
+            val valueEnd = index
+            if (key == "timeline" && value is RawString) {
+                timelineValueRange(valueStart, valueEnd)?.let { range ->
+                    parsedTimelineReferences += InlineTimelineReference(value.value, "timeline", range)
+                }
+            }
             annotation.textKey?.let { textKey ->
                 value = RawObject(mapOf(textKey to value))
             }
@@ -133,18 +162,37 @@ class InlinePropsParser(private val input: String) {
         if (tryConsume('[')) {
             skipHorizontalAndNewlines()
             while (!tryConsume(']')) {
-                entries += parseValidTimeEntry()
+                val entry = parseValidTimeEntry()
                 skipHorizontalAndNewlines()
-                if (tryConsume(',')) skipHorizontalAndNewlines() else if (peek() != ']') fail("validTime entries must be comma-separated")
+                when {
+                    tryConsume(',') -> {
+                        addTimelineReference(entry.reference)
+                        entries += entry.value
+                        skipHorizontalAndNewlines()
+                    }
+                    peek() == ']' || isEof() -> {
+                        addTimelineReference(entry.reference)
+                        entries += entry.value
+                    }
+                    else -> fail("validTime entries must be comma-separated")
+                }
             }
         } else {
-            entries += parseValidTimeEntry()
+            val entry = parseValidTimeEntry()
+            addTimelineReference(entry.reference)
+            entries += entry.value
         }
         return RawArray(entries)
     }
 
-    private fun parseValidTimeEntry(): RawObject {
+    private fun parseValidTimeEntry(): ParsedValidTimeEntry {
+        val timelineStart = index
         val timeline = parseIdentifier()
+        val reference = InlineTimelineReference(
+            timeline,
+            "validTime.timeline",
+            SourceRange(timelineStart, index),
+        )
         val values = linkedMapOf<String, RawValue>("timeline" to RawString(timeline))
         if (tryConsume('(')) {
             skipHorizontalAndNewlines()
@@ -166,12 +214,29 @@ class InlinePropsParser(private val input: String) {
                 if (tryConsume(',')) skipHorizontalAndNewlines() else if (peek() != ')') fail("validTime bounds must be comma-separated")
             }
         }
-        return RawObject(values)
+        return ParsedValidTimeEntry(RawObject(values), reference)
+    }
+
+    private fun addTimelineReference(reference: InlineTimelineReference) {
+        parsedTimelineReferences += reference
+    }
+
+    private fun timelineValueRange(start: Int, end: Int): SourceRange? {
+        if (start >= end) return null
+        return when (input[start]) {
+            '"' -> SourceRange(start + 1, (end - 1).coerceAtLeast(start + 1))
+            else -> SourceRange(start, end)
+        }
     }
 
     private data class KeyAnnotation(
         val textKey: String? = null,
         val validTime: RawArray? = null,
+    )
+
+    private data class ParsedValidTimeEntry(
+        val value: RawObject,
+        val reference: InlineTimelineReference,
     )
 
     private fun parseValue(): RawValue {

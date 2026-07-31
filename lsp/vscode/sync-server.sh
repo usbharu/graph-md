@@ -6,10 +6,8 @@ ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SRC_DIR="$ROOT/lsp/build/install/lsp"
 DEST_DIR="$SCRIPT_DIR/server"
 
-if [ ! -x "$SRC_DIR/bin/lsp" ] && [ ! -f "$SRC_DIR/bin/lsp.bat" ]; then
-  echo ">> Building Kotlin LSP distribution..."
-  "$ROOT/gradlew" -p "$ROOT" :lsp:installDist --quiet
-fi
+echo ">> Building Kotlin LSP distribution..."
+"$ROOT/gradlew" -p "$ROOT" :lsp:installDist --quiet
 
 rm -rf "$DEST_DIR"
 mkdir -p "$DEST_DIR"

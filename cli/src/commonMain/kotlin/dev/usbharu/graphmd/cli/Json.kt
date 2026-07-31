@@ -1,6 +1,8 @@
 package dev.usbharu.graphmd.cli
 
 import dev.usbharu.graphmd.core.model.*
+import dev.usbharu.graphmd.query.gmql.*
+import dev.usbharu.graphmd.query.model.*
 
 internal sealed interface JsonValue {
     data class Object(val values: Map<String, JsonValue>) : JsonValue
@@ -150,6 +152,61 @@ private fun TimelineSelector.toJson(): JsonValue = when (this) {
     is TimelineSelector.Id -> jsonObject("kind" to jsonString("id"), "id" to jsonString(id))
     is TimelineSelector.Mapped -> jsonObject("kind" to jsonString("mapped"), "to" to jsonString(to))
 }
+
+internal fun GmqlDiagnostic.toJson(): JsonValue = jsonObject(
+    "code" to jsonString(code),
+    "kind" to jsonString(kind.name.lowercase()),
+    "message" to jsonString(message),
+    "range" to (range?.let {
+        jsonObject("start" to jsonNumber(it.start), "end" to jsonNumber(it.end))
+    } ?: JsonValue.Null),
+)
+
+internal fun GmqlValue.toJson(): JsonValue = when (this) {
+    is GmqlValue.StringValue -> jsonString(value)
+    is GmqlValue.IntegerValue -> jsonNumber(value)
+    is GmqlValue.DecimalValue -> jsonNumber(value)
+    is GmqlValue.BooleanValue -> jsonBoolean(value)
+    GmqlValue.NullValue -> JsonValue.Null
+    is GmqlValue.NodeValue -> jsonObject(
+        "kind" to jsonString("node"),
+        "id" to jsonString(id.value),
+    )
+    is GmqlValue.RelationValue -> jsonObject(
+        "kind" to jsonString("relation"),
+        "assertionId" to jsonNumber(id.value),
+    )
+    is GmqlValue.TypeRefValue -> jsonObject(
+        "kind" to jsonString(if (relation) "relation-type" else "node-type"),
+        "name" to jsonString(name),
+    )
+    is GmqlValue.CollectionValue -> jsonArray(values.map(GmqlValue::toJson))
+    is GmqlValue.TemporalValue -> jsonArray(entries.map { entry ->
+        jsonObject(
+            "value" to entry.value.toJson(),
+            "validTime" to entry.validTime.toJson(),
+        )
+    })
+    is GmqlValue.TemporalExtentValue -> value.toJson()
+}
+
+private fun IntervalSet.toJson(): JsonValue = when {
+    isUniversal -> jsonObject("universal" to jsonBoolean(true), "intervals" to jsonArray(emptyList()))
+    else -> jsonObject(
+        "universal" to jsonBoolean(false),
+        "intervals" to jsonArray(intervals.map { interval ->
+            jsonObject(
+                "timeline" to jsonString(interval.timelineId.value),
+                "start" to interval.start.toJson(),
+                "end" to interval.end.toJson(),
+            )
+        }),
+    )
+}
+
+private fun IntervalBoundary?.toJson(): JsonValue = this?.let {
+    jsonObject("value" to jsonNumber(value), "inclusive" to jsonBoolean(inclusive))
+} ?: JsonValue.Null
 
 internal fun TimelineMapping.toJson(): JsonValue = when (this) {
     is OffsetTimelineMapping -> jsonObject(
