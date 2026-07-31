@@ -469,6 +469,35 @@ class GraphMdCliTest {
         assertTrue(result.stderr.contains("\"code\":\"GMQL2001\""), result.stderr)
     }
 
+    @Test
+    fun `search keeps valid nodes when another node has an unknown validTime timeline`() {
+        val fs = FakeFileSystem(
+            files = mapOf(
+                "/workspace/Person.md" to nodeType("Person"),
+                "/workspace/broken.md" to """
+                    ---
+                    id: broken
+                    kind: Node
+                    type: Person
+                    validTime:
+                      - timeline: MissingTimeline
+                    ---
+                """.trimIndent(),
+                "/workspace/good.md" to node("good", "Person"),
+            ),
+        )
+
+        val result = GraphMdCli(fs).run(
+            listOf("search", "MATCH (n:Person) RETURN ID(n) AS id ORDER BY id", "/workspace", "--json"),
+        )
+
+        assertEquals(1, result.exitCode)
+        assertTrue(result.stdout.contains("\"good\""))
+        assertFalse(result.stdout.contains("\"broken\""))
+        assertTrue(result.stderr.contains("Unknown Timeline: MissingTimeline"))
+        assertFalse(result.stderr.contains("Key is missing in the map"))
+    }
+
     private fun fixtureCli(): GraphMdCli = GraphMdCli(
         FakeFileSystem(
             files = mapOf(

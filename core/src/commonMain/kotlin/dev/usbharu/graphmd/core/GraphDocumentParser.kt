@@ -16,7 +16,7 @@ class GraphDocumentParser {
         sourcePath: String,
         diagnostics: MutableList<Diagnostic>,
     ): FrontMatterSplit? {
-        val normalized = text.replace("\r\n", "\n")
+        val normalized = text.replace("\r\n", "\n").replace('\r', '\n')
         val lines = normalized.split('\n')
         if (lines.firstOrNull() != "---") {
             diagnostics += syntaxError("Document MUST start with YAML front matter", sourcePath)
@@ -49,6 +49,11 @@ class GraphDocumentParser {
             diagnostics += schemaError("id MUST be non-empty", sourcePath)
             return null
         }
+        val kindName = root.requireString("kind", sourcePath, diagnostics)
+        if (kindName == "RelType" && id.any { it.isWhitespace() }) {
+            diagnostics += schemaError("RelType id MUST NOT contain whitespace", sourcePath, id)
+            return null
+        }
         if (!id.matches(Regex("""[A-Za-z_][A-Za-z0-9_.:-]*"""))) {
             diagnostics += schemaWarning(
                 "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*",
@@ -56,7 +61,7 @@ class GraphDocumentParser {
                 id,
             )
         }
-        val kindName = root.requireString("kind", sourcePath, diagnostics) ?: return null
+        if (kindName == null) return null
         return when (kindName) {
             "Node" -> parseNodeDocument(id, root, body, sourcePath, diagnostics, media = false)
             "Media" -> parseNodeDocument(id, root, body, sourcePath, diagnostics, media = true)
@@ -442,7 +447,7 @@ private class MiniYamlParser(
     private val sourcePath: String,
     private val diagnostics: MutableList<Diagnostic>,
 ) {
-    private val lines = text.split('\n').map { it.trimEnd() }
+    private val lines = text.split('\n').map { stripYamlComment(it).trimEnd() }
     private var index = 0
 
     fun parse(): YamlValue? {
@@ -510,7 +515,7 @@ private class MiniYamlParser(
             val indent = indentOf(line)
             if (indent < expectedIndent) break
             if (indent != expectedIndent || !line.drop(indent).startsWith("- ")) break
-            val remainder = stripYamlComment(line.drop(indent + 2)).trimEnd()
+            val remainder = line.drop(indent + 2)
             index++
             val value = when {
                 remainder.isBlank() -> parseNestedBlock(expectedIndent) ?: YamlNull
@@ -563,18 +568,23 @@ private class MiniYamlParser(
     }
 
     private fun parseInlineValue(raw: String): YamlValue {
-        val value = raw.trim()
+        val value = stripYamlTrailingComment(raw).trim()
         if (value.isEmpty()) return YamlNull
         if (value.startsWith("[") && value.endsWith("]")) {
             val inner = value.substring(1, value.lastIndex)
             if (inner.isBlank()) return YamlList(emptyList())
-            return YamlList(splitInlineList(inner).map(::parseInlineValue))
+            return YamlList(
+                splitYamlFlowItems(inner)
+                    .map { it.raw.trim() }
+                    .filter { it.isNotEmpty() }
+                    .map(::parseInlineValue),
+            )
         }
         if (value.startsWith("\"") && value.endsWith("\"") && value.length >= 2) {
-            return YamlString(parseQuoted(value.substring(1, value.length - 1)))
+            return YamlString(decodeYamlScalar(value))
         }
         if (value.startsWith("'") && value.endsWith("'") && value.length >= 2) {
-            return YamlString(value.substring(1, value.length - 1).replace("''", "'"))
+            return YamlString(decodeYamlScalar(value))
         }
         return when {
             value == "null" -> YamlNull
@@ -586,108 +596,24 @@ private class MiniYamlParser(
         }
     }
 
-    private fun parseQuoted(value: String): String {
-        val result = StringBuilder()
-        var i = 0
-        while (i < value.length) {
-            val ch = value[i]
-            if (ch != '\\') {
-                result.append(ch)
-                i++
-                continue
-            }
-            when (val next = value.getOrNull(i + 1)) {
-                'n' -> result.append('\n')
-                'r' -> result.append('\r')
-                't' -> result.append('\t')
-                '\\' -> result.append('\\')
-                '"' -> result.append('"')
-                else -> if (next != null) result.append(next)
-            }
-            i += 2
-        }
-        return result.toString()
-    }
-
-    private fun splitInlineList(value: String): List<String> {
-        val parts = mutableListOf<String>()
-        val current = StringBuilder()
-        var quote: Char? = null
-        var escaped = false
-        var index = 0
-        while (index < value.length) {
-            val ch = value[index]
-            when {
-                quote == '"' && escaped -> {
-                    escaped = false
-                    current.append(ch)
-                }
-                quote == '"' && ch == '\\' -> {
-                    escaped = true
-                    current.append(ch)
-                }
-                quote == '\'' && ch == '\'' && value.getOrNull(index + 1) == '\'' -> {
-                    current.append(ch)
-                    current.append(ch)
-                    index++
-                }
-                quote != null && ch == quote -> {
-                    quote = null
-                    current.append(ch)
-                }
-                quote == null && (ch == '"' || ch == '\'') -> {
-                    quote = ch
-                    current.append(ch)
-                }
-                quote == null && ch == ',' -> {
-                    parts += current.toString().trim()
-                    current.clear()
-                }
-                else -> current.append(ch)
-            }
-            index++
-        }
-        if (current.isNotEmpty()) parts += current.toString().trim()
-        return parts.filter { it.isNotEmpty() }
-    }
-
     private fun splitKeyValue(content: String): Pair<String, String?>? {
-        val colonIndex = content.indexOf(':')
+        val colonIndex = findYamlMappingColon(content)
         if (colonIndex <= 0) return null
-        val key = content.substring(0, colonIndex).trim()
+        val key = decodeYamlScalar(content.substring(0, colonIndex))
         if (key.isEmpty()) return null
         val rest = content.substring(colonIndex + 1)
-        val scalar = stripYamlComment(rest).trim()
-        return key to scalar.takeIf { it.isNotBlank() }
-    }
-
-    private fun stripYamlComment(value: String): String {
-        var quote: Char? = null
-        var escaped = false
-        value.forEachIndexed { index, char ->
-            when {
-                quote == '"' && escaped -> escaped = false
-                quote == '"' && char == '\\' -> escaped = true
-                quote == '\'' && char == '\'' &&
-                    (value.getOrNull(index + 1) == '\'' || value.getOrNull(index - 1) == '\'') -> Unit
-                quote != null && char == quote -> quote = null
-                quote == null && (char == '"' || char == '\'') -> quote = char
-                quote == null && char == '#' && (index == 0 || value[index - 1].isWhitespace()) ->
-                    return value.substring(0, index)
-            }
-        }
-        return value
+        return key to rest.takeIf { it.isNotBlank() }?.trim()
     }
 
     private fun looksLikeInlineMapEntry(content: String): Boolean {
-        val colonIndex = content.indexOf(':')
+        val colonIndex = findYamlMappingColon(content)
         if (colonIndex <= 0) return false
         val next = content.getOrNull(colonIndex + 1) ?: return true
         return next == ' ' || next == '\t'
     }
 
     private fun skipIgnorable() {
-        while (index < lines.size && (lines[index].isBlank() || lines[index].trimStart().startsWith("#"))) index++
+        while (index < lines.size && lines[index].isBlank()) index++
     }
 
     private fun indentOf(line: String): Int = line.indexOfFirst { !it.isWhitespace() }.let { if (it == -1) line.length else it }

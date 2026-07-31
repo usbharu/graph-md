@@ -27,7 +27,7 @@ internal object RelationTargetParser {
         if (typePart.first() == '"') {
             val quoted = parseQuotedRelationType(typePart) ?: return null
             val relType = quoted.first
-            if (relType.isEmpty()) return null
+            if (relType.isEmpty() || relType.any { it.isWhitespace() }) return null
             return Parsed(
                 target,
                 relType,
@@ -35,7 +35,7 @@ internal object RelationTargetParser {
                 leading + typeStart + 1 until leading + typeStart + quoted.second,
             )
         }
-        if (typePart.any { it == ' ' || it == '\t' || it == ')' }) return null
+        if (typePart.any { it.isWhitespace() || it == ')' }) return null
         return Parsed(
             target,
             typePart,
