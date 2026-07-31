@@ -576,6 +576,19 @@ class GraphCompiler(
         val resolved = mutableMapOf<String, NormalizedRelType>()
         val visiting = mutableSetOf<String>()
 
+        docs.forEach { doc ->
+            doc.from.orEmpty().forEach { nodeTypeId ->
+                if (nodeTypeId !in nodeTypeById) {
+                    diagnostics += referenceError("Unknown NodeType: $nodeTypeId", doc.sourcePath, doc.id)
+                }
+            }
+            doc.to.orEmpty().forEach { nodeTypeId ->
+                if (nodeTypeId !in nodeTypeById) {
+                    diagnostics += referenceError("Unknown NodeType: $nodeTypeId", doc.sourcePath, doc.id)
+                }
+            }
+        }
+
         fun resolve(id: String): NormalizedRelType? {
             resolved[id]?.let { return it }
             val doc = byId[id] ?: return null
