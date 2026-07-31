@@ -99,6 +99,7 @@ internal fun NormalizedValue.toJson(): JsonValue = when (this) {
         jsonObject(
             "value" to it.value.toJson(),
             "validTime" to jsonArray(it.validTime.map(ValidTime::toJson)),
+            "fallback" to jsonBoolean(it.isFallback),
         )
     })
     is ObjectValue -> JsonValue.Object(members.sortedByKey().mapValues { (_, entry) -> entry.toJson() })
@@ -119,6 +120,7 @@ internal fun NormalizedValue.toJson(): JsonValue = when (this) {
 internal fun NormalizedPropEntry.toJson(): JsonValue = jsonObject(
     "value" to value.toJson(),
     "validTime" to jsonArray(validTime.map(ValidTime::toJson)),
+    "fallback" to jsonBoolean(isFallback),
 )
 
 internal fun propertyEntriesToJson(
@@ -135,6 +137,7 @@ internal fun propertyEntriesToJson(
                     put("name", jsonString(name))
                     put("value", entry.value.toJson())
                     put("validTime", jsonArray(entry.validTime.map(ValidTime::toJson)))
+                    put("fallback", jsonBoolean(entry.isFallback))
                 },
             )
         }

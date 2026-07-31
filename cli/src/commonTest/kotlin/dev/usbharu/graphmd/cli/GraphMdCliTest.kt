@@ -341,12 +341,13 @@ class GraphMdCliTest {
         fun tableBlock(value: String): String = value.trimIndent().replace('→', '\t') + "\n"
 
         assertEquals(0, props.exitCode, props.stderr)
-        assertTrue(props.stdout.contains("anytime\tanytime\tCommonEra\n"))
-        assertTrue(props.stdout.contains("bounded\tbounded\tCommonEra: 10.0 – 20.0\n"))
-        assertTrue(props.stdout.contains("count\t2.0\t-\n"))
-        assertTrue(props.stdout.contains("enabled\ttrue\t-\n"))
-        assertTrue(props.stdout.contains("escaped\ta\\\\b\\tc\\nd\t-\n"))
-        assertTrue(props.stdout.contains("alice\tfull\tlabel\ttext {\t-\n"))
+        assertTrue(props.stdout.startsWith("OWNER_ID\tOWNER_VISIBILITY\tNAME\tVALUE\tVALID_TIME\tFALLBACK\n"))
+        assertTrue(props.stdout.contains("anytime\tanytime\tCommonEra\tfalse\n"))
+        assertTrue(props.stdout.contains("bounded\tbounded\tCommonEra: 10.0 – 20.0\tfalse\n"))
+        assertTrue(props.stdout.contains("count\t2.0\t-\ttrue\n"))
+        assertTrue(props.stdout.contains("enabled\ttrue\t-\ttrue\n"))
+        assertTrue(props.stdout.contains("escaped\ta\\\\b\\tc\\nd\t-\ttrue\n"))
+        assertTrue(props.stdout.contains("alice\tfull\tlabel\ttext {\t-\ttrue\n"))
         assertTrue(props.stdout.contains("\t\t\t    value: Display name\n"))
         assertTrue(props.stdout.contains("\t\t\t    value: 表示名\n"))
         assertEquals(0, shown.exitCode, shown.stderr)
@@ -354,7 +355,7 @@ class GraphMdCliTest {
             shown.stdout.contains(
                 tableBlock(
                     """
-                    happenedAt→instant {→-
+                    happenedAt→instant {→-→true
                     →  timeline: null
                     →  value: Today
                     →  timecode: 3.0
@@ -368,13 +369,15 @@ class GraphMdCliTest {
             shown.stdout.contains(
                 tableBlock(
                     """
-                    items→array [→-
+                    items→array [→-→true
                     →  [0]:
                     →    value: alpha
                     →    validTime: -
+                    →    fallback: true
                     →  [1]:
                     →    value: beta
                     →    validTime: Branch: Open (1.0) – Close (2.0)
+                    →    fallback: false
                     →]
                     """,
                 ),
@@ -384,13 +387,15 @@ class GraphMdCliTest {
             shown.stdout.contains(
                 tableBlock(
                     """
-                    label→text {→-
+                    label→text {→-→true
                     →  default:
                     →    value: Display name
                     →    validTime: -
+                    →    fallback: true
                     →  ja:
                     →    value: 表示名
                     →    validTime: -
+                    →    fallback: true
                     →}
                     """,
                 ),
@@ -400,27 +405,29 @@ class GraphMdCliTest {
             shown.stdout.contains(
                 tableBlock(
                     """
-                    metadata→object {→-
+                    metadata→object {→-→true
                     →  active:
                     →    value: true
                     →    validTime: -
+                    →    fallback: true
                     →  code:
                     →    value: sample
                     →    validTime: -
+                    →    fallback: true
                     →}
                     """,
                 ),
             ),
         )
-        assertTrue(props.stdout.contains("multiple\tmultiple\tCommonEra, Branch: 1.0 – 2.0\n"))
-        assertTrue(props.stdout.contains("nothing\tnull\t-\n"))
-        assertTrue(props.stdout.contains("openFrom\topen-from\tCommonEra: 10.0 –\n"))
-        assertTrue(props.stdout.contains("openTo\topen-to\tBranch: – 20.0\n"))
+        assertTrue(props.stdout.contains("multiple\tmultiple\tCommonEra, Branch: 1.0 – 2.0\tfalse\n"))
+        assertTrue(props.stdout.contains("nothing\tnull\t-\ttrue\n"))
+        assertTrue(props.stdout.contains("openFrom\topen-from\tCommonEra: 10.0 –\tfalse\n"))
+        assertTrue(props.stdout.contains("openTo\topen-to\tBranch: – 20.0\tfalse\n"))
         assertTrue(
             shown.stdout.contains(
                 tableBlock(
                     """
-                    period→duration {→-
+                    period→duration {→-→true
                     →  timeline: CommonEra
                     →  from:
                     →    timePoint {
@@ -439,14 +446,120 @@ class GraphMdCliTest {
                 ),
             ),
         )
-        assertTrue(props.stdout.contains("plain\tplain\t-\n"))
+        assertTrue(props.stdout.contains("plain\tplain\t-\ttrue\n"))
         assertFalse(props.stdout.contains("[{\"timeline\""))
 
-        assertTrue(shown.stdout.contains("bounded\tbounded\tCommonEra: 10.0 – 20.0\n"))
+        assertTrue(shown.stdout.contains("bounded\tbounded\tCommonEra: 10.0 – 20.0\tfalse\n"))
         assertFalse(shown.stdout.contains("[{\"timeline\""))
 
         assertEquals(0, json.exitCode, json.stderr)
         assertTrue(json.stdout.contains("\"validTime\":[{\"timeline\":\"CommonEra\""))
+        assertTrue(json.stdout.contains("\"fallback\":true"))
+        assertTrue(json.stdout.contains("\"value\":\"alpha\",\"validTime\":[],\"fallback\":true"))
+        assertTrue(json.stdout.contains("\"value\":\"beta\",\"validTime\":["))
+        assertTrue(json.stdout.contains("\"value\":\"Display name\",\"validTime\":[],\"fallback\":true"))
+    }
+
+    @Test
+    fun `fallback property values only appear outside explicit assertion time`() {
+        val fs = FakeFileSystem(
+            files = mapOf(
+                "/workspace/TimelineA.md" to timeline("TimelineA"),
+                "/workspace/TimelineB.md" to timeline("TimelineB"),
+                "/workspace/Person.md" to """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    props:
+                      age:
+                        type: number
+                      score:
+                        type: number
+                    ---
+                """.trimIndent(),
+                "/workspace/alice.md" to """
+                    ---
+                    id: alice
+                    kind: Node
+                    type: Person
+                    validTime:
+                      - timeline: TimelineA
+                      - timeline: TimelineB
+                    ---
+                    @props{
+                      age(validTime=TimelineA)=16,
+                      age=17,
+                      score(validTime=TimelineA(from=10,to=20))=1,
+                      score=2
+                    }
+                """.trimIndent(),
+            ),
+        )
+        val cli = GraphMdCli(fs)
+
+        val all = cli.run(listOf("show", "alice", "/workspace"))
+        val allJson = cli.run(listOf("props", "alice", "/workspace", "--json"))
+        val timelineA = cli.run(listOf("show", "alice", "/workspace", "--valid-time", "TimelineA"))
+        val timelineAJson = cli.run(
+            listOf("props", "alice", "/workspace", "--valid-time", "TimelineA", "--json"),
+        )
+        val timelineAProps = cli.run(
+            listOf("props", "alice", "/workspace", "--valid-time", "TimelineA"),
+        )
+        val timelineAShowJson = cli.run(
+            listOf("show", "alice", "/workspace", "--valid-time", "TimelineA", "--json"),
+        )
+        val timelineB = cli.run(listOf("show", "alice", "/workspace", "--valid-time", "TimelineB"))
+        val timelineBJson = cli.run(
+            listOf("props", "alice", "/workspace", "--valid-time", "TimelineB", "--json"),
+        )
+
+        assertEquals(0, all.exitCode, all.stderr)
+        assertTrue(all.stdout.contains("NAME\tVALUE\tVALID_TIME\tFALLBACK\n"))
+        assertTrue(all.stdout.contains("age\t16.0\tTimelineA\tfalse\n"))
+        assertTrue(all.stdout.contains("age\t17.0\tTimelineA, TimelineB\ttrue\n"))
+        assertTrue(allJson.stdout.contains("\"value\":16.0,\"validTime\":"))
+        assertTrue(allJson.stdout.contains("\"fallback\":false"))
+        assertTrue(allJson.stdout.contains("\"value\":17.0,\"validTime\":"))
+        assertTrue(allJson.stdout.contains("\"fallback\":true"))
+
+        assertEquals(0, timelineA.exitCode, timelineA.stderr)
+        assertTrue(timelineA.stdout.contains("age\t16.0\tTimelineA\tfalse\n"))
+        assertFalse(timelineA.stdout.contains("age\t17.0"))
+        assertTrue(timelineAJson.stdout.contains("\"value\":16.0"))
+        assertFalse(timelineAJson.stdout.contains("\"value\":17.0"))
+        assertTrue(timelineAProps.stdout.contains("age\t16.0\tTimelineA\tfalse\n"))
+        assertFalse(timelineAProps.stdout.contains("age\t17.0"))
+        assertTrue(timelineAShowJson.stdout.contains("\"value\":16.0"))
+        assertFalse(timelineAShowJson.stdout.contains("\"value\":17.0"))
+
+        assertEquals(0, timelineB.exitCode, timelineB.stderr)
+        assertFalse(timelineB.stdout.contains("age\t16.0"))
+        assertTrue(timelineB.stdout.contains("age\t17.0\tTimelineA, TimelineB\ttrue\n"))
+        assertFalse(timelineBJson.stdout.contains("\"value\":16.0"))
+        assertTrue(timelineBJson.stdout.contains("\"value\":17.0"))
+
+        val atStart = cli.run(
+            listOf("props", "alice", "/workspace", "--valid-time", "TimelineA(from=10,to=10)", "--json"),
+        )
+        val atEnd = cli.run(
+            listOf("props", "alice", "/workspace", "--valid-time", "TimelineA(from=20,to=20)", "--json"),
+        )
+        val outside = cli.run(
+            listOf("props", "alice", "/workspace", "--valid-time", "TimelineA(from=21,to=21)", "--json"),
+        )
+        val spanning = cli.run(
+            listOf("props", "alice", "/workspace", "--valid-time", "TimelineA(from=5,to=25)", "--json"),
+        )
+
+        assertTrue(atStart.stdout.contains("\"value\":1.0"))
+        assertFalse(atStart.stdout.contains("\"value\":2.0"))
+        assertTrue(atEnd.stdout.contains("\"value\":1.0"))
+        assertFalse(atEnd.stdout.contains("\"value\":2.0"))
+        assertFalse(outside.stdout.contains("\"value\":1.0"))
+        assertTrue(outside.stdout.contains("\"value\":2.0"))
+        assertTrue(spanning.stdout.contains("\"value\":1.0"))
+        assertTrue(spanning.stdout.contains("\"value\":2.0"))
     }
 
     @Test
@@ -1006,6 +1119,15 @@ class GraphMdCliTest {
         ---
         id: $id
         kind: NodeType
+        ---
+    """.trimIndent()
+
+    private fun timeline(id: String): String = """
+        ---
+        id: $id
+        kind: Timeline
+        timecode:
+          type: number
         ---
     """.trimIndent()
 

@@ -4,6 +4,10 @@ import dev.usbharu.graphmd.core.GraphCompiler
 import dev.usbharu.graphmd.core.model.*
 import dev.usbharu.graphmd.query.GraphSearchEngine
 import dev.usbharu.graphmd.query.gmql.*
+import dev.usbharu.graphmd.query.model.IntervalBoundary
+import dev.usbharu.graphmd.query.model.IntervalSet
+import dev.usbharu.graphmd.query.model.TemporalInterval
+import dev.usbharu.graphmd.query.model.TimelineId
 import kotlin.coroutines.*
 
 data class CliResult(
@@ -451,6 +455,14 @@ private class TemporalView(
     private val requested: ValidTimeFilter,
     private val requestedTimeline: NormalizedTimeline,
 ) {
+    private val requestedTimelineId = TimelineId(requested.timeline)
+    private val requestedWindow = IntervalSet.of(
+        TemporalInterval(
+            timelineId = requestedTimelineId,
+            start = requested.from?.let { IntervalBoundary(it, inclusive = true) },
+            end = requested.to?.let { IntervalBoundary(it, inclusive = true) },
+        ),
+    )
     private val nodesById = graph.nodes.associateBy { it.id }
     private val visibleRelations = graph.relations.filter { assertedAt(it.validTime) }
     private val linkedIds = visibleRelations.flatMapTo(hashSetOf()) { listOf(it.from, it.to) }
@@ -481,11 +493,25 @@ private class TemporalView(
     fun filterProperties(
         entries: Map<String, List<NormalizedPropEntry>>,
     ): Map<String, List<NormalizedPropEntry>> = entries.mapNotNull { (name, assertions) ->
-        assertions.mapNotNull(::filterEntry).takeIf { it.isNotEmpty() }?.let { name to it }
+        val timedUnion = assertions.filterNot { it.isFallback }.fold(IntervalSet.empty()) { result, assertion ->
+            result union requestedIntervals(assertion.validTime)
+        }
+        assertions.mapNotNull { filterEntry(it, timedUnion) }
+            .takeIf { it.isNotEmpty() }
+            ?.let { name to it }
     }.toMap(linkedMapOf())
 
-    private fun filterEntry(entry: NormalizedPropEntry): NormalizedPropEntry? {
-        val asserted = assertedAt(entry.validTime)
+    private fun filterEntry(
+        entry: NormalizedPropEntry,
+        timedUnion: IntervalSet = IntervalSet.empty(),
+    ): NormalizedPropEntry? {
+        val entryIntervals = requestedIntervals(entry.validTime)
+        val effectiveIntervals = if (entry.isFallback && !timedUnion.isEmpty) {
+            entryIntervals.subtract(timedUnion)
+        } else {
+            entryIntervals
+        }
+        val asserted = !(effectiveIntervals intersect requestedWindow).isEmpty
         val filtered = filterValue(entry.value)
         if (!asserted && !filtered.containsAssertion) return null
         return entry.copy(
@@ -525,20 +551,24 @@ private class TemporalView(
         else -> FilteredValue(value, containsAssertion = false)
     }
 
-    private fun assertedAt(validTimes: List<ValidTime>): Boolean = validTimes.any { validTime ->
-        if (
-            validTime.timeline != requested.timeline &&
-            validTime.timeline !in requestedTimeline.ancestorIds
-        ) {
-            return@any false
-        }
-        val requestedFrom = requested.from
-        val requestedTo = requested.to
-        val assertedFrom = validTime.from?.timecode
-        val assertedTo = validTime.to?.timecode
-        (requestedTo == null || assertedFrom == null || requestedTo >= assertedFrom) &&
-            (assertedTo == null || requestedFrom == null || assertedTo >= requestedFrom)
-    }
+    private fun assertedAt(validTimes: List<ValidTime>): Boolean =
+        !(requestedIntervals(validTimes) intersect requestedWindow).isEmpty
+
+    private fun requestedIntervals(validTimes: List<ValidTime>): IntervalSet = IntervalSet.of(
+        validTimes.mapNotNull { validTime ->
+            if (
+                validTime.timeline != requested.timeline &&
+                validTime.timeline !in requestedTimeline.ancestorIds
+            ) {
+                return@mapNotNull null
+            }
+            TemporalInterval(
+                timelineId = requestedTimelineId,
+                start = validTime.from?.timecode?.let { IntervalBoundary(it, inclusive = true) },
+                end = validTime.to?.timecode?.let { IntervalBoundary(it, inclusive = true) },
+            )
+        },
+    )
 }
 
 private data class FilteredValue(
@@ -937,7 +967,7 @@ private fun renderProperties(
     if (ownerId != null && ownerVisibility != null) {
         append("OWNER_ID\tOWNER_VISIBILITY\t")
     }
-    append("NAME\tVALUE\tVALID_TIME\n")
+    append("NAME\tVALUE\tVALID_TIME\tFALLBACK\n")
     entries.sortedByKey().forEach { (name, values) ->
         values.forEach { entry ->
             val continuationPrefix: String
@@ -949,7 +979,7 @@ private fun renderProperties(
             }
             val valueLines = renderPropertyValue(entry.value).lines()
             append(name).append('\t').append(valueLines.first()).append('\t')
-                .append(renderValidTimes(entry.validTime)).append('\n')
+                .append(renderValidTimes(entry.validTime)).append('\t').append(entry.isFallback).append('\n')
             valueLines.drop(1).forEach { line ->
                 append(continuationPrefix).append(line).append('\n')
             }
@@ -998,6 +1028,7 @@ private fun renderNestedEntries(
             append("  ").append(renderTabularText(name)).append(":\n")
             append(renderField("value", renderPropertyValue(entry.value), "    ")).append('\n')
             append("    validTime: ").append(renderValidTimes(entry.validTime)).append('\n')
+            append("    fallback: ").append(entry.isFallback).append('\n')
         }
         append('}')
     }
@@ -1011,6 +1042,7 @@ private fun renderArrayValue(value: ArrayValue): String {
             append("  [").append(index).append("]:\n")
             append(renderField("value", renderPropertyValue(element.value), "    ")).append('\n')
             append("    validTime: ").append(renderValidTimes(element.validTime)).append('\n')
+            append("    fallback: ").append(element.isFallback).append('\n')
         }
         append(']')
     }
