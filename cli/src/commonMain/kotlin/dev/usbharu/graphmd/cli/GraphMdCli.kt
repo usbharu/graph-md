@@ -944,10 +944,26 @@ private fun renderProperties(
                 append(ownerId).append('\t').append(ownerVisibility.wireName).append('\t')
             }
             append(name).append('\t').append(entry.value.toJson().encode()).append('\t')
-            append(jsonArray(entry.validTime.map(ValidTime::toJson)).encode()).append('\n')
+            append(renderValidTimes(entry.validTime)).append('\n')
         }
     }
 }
+
+private fun renderValidTimes(validTimes: List<ValidTime>): String =
+    if (validTimes.isEmpty()) {
+        "-"
+    } else {
+        validTimes.joinToString(", ") { validTime ->
+            val from = validTime.from?.timecode?.toString()
+            val to = validTime.to?.timecode?.toString()
+            when {
+                from == null && to == null -> validTime.timeline
+                from == null -> "${validTime.timeline}: – $to"
+                to == null -> "${validTime.timeline}: $from –"
+                else -> "${validTime.timeline}: $from – $to"
+            }
+        }
+    }
 
 private fun renderRelations(relations: List<NormalizedRelation>, view: TemporalView? = null): String = buildString {
     append("TYPE\tFROM\tFROM_VISIBILITY\tTO\tTO_VISIBILITY\tLABEL\tSOURCE\n")
