@@ -229,11 +229,16 @@ class TimelineCatalog private constructor(
 
     fun fromValidTimes(validTimes: List<ValidTime>): IntervalSet {
         if (validTimes.isEmpty()) return IntervalSet.universal()
-        return IntervalSet.of(validTimes.map { validTime ->
+        return IntervalSet.of(validTimes.mapNotNull { validTime ->
+            val timelineId = TimelineId(validTime.timeline)
+            if (timelineId !in byId) return@mapNotNull null
+            val from = validTime.from?.timecode
+            val to = validTime.to?.timecode
+            if (from != null && to != null && from > to) return@mapNotNull null
             normalize(
-                timelineId = TimelineId(validTime.timeline),
-                start = validTime.from?.let { IntervalBoundary(it.timecode, inclusive = true) },
-                end = validTime.to?.let { IntervalBoundary(it.timecode, inclusive = true) },
+                timelineId = timelineId,
+                start = from?.let { IntervalBoundary(it, inclusive = true) },
+                end = to?.let { IntervalBoundary(it, inclusive = true) },
             )
         })
     }
