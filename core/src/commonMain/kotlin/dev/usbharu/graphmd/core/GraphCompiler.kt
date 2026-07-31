@@ -1080,31 +1080,44 @@ class GraphCompiler(
         incoming: RawValue,
         schema: ResolvedPropSchema?,
     ): RawValue {
-        if (existing == null || schema?.type == PropType.array) return incoming
+        if (existing == null) return incoming
+        fun signature(value: RawValue): RawValidTimeKey {
+            val obj = value as? RawObject
+            return rawValidTimeKey(obj?.values?.get("validTime"))
+        }
+        if (schema?.type == PropType.array) {
+            val existingElements = (existing as? RawArray)?.values ?: return incoming
+            val incomingElements = (incoming as? RawArray)?.values ?: return incoming
+            fun elementSignature(value: RawValue): RawValidTimeKey {
+                val entry = value as? RawObject ?: return FallbackValidTimeKey
+                if ("value" !in entry.values || entry.values.keys.any { it !in setOf("value", "validTime") }) {
+                    return FallbackValidTimeKey
+                }
+                return signature(entry)
+            }
+            val merged = existingElements.toMutableList()
+            val incomingBySignature = incomingElements.groupBy(::elementSignature).toMutableMap()
+            if (incomingElements.isEmpty()) incomingBySignature[FallbackValidTimeKey] = emptyList()
+            incomingBySignature.forEach { (incomingSignature, candidates) ->
+                val firstMatch = merged.indexOfFirst { elementSignature(it) == incomingSignature }
+                if (firstMatch < 0) {
+                    merged += candidates
+                } else {
+                    merged.removeAll { elementSignature(it) == incomingSignature }
+                    merged.addAll(firstMatch, candidates)
+                }
+            }
+            return RawArray(merged)
+        }
         fun entries(value: RawValue): List<RawValue> =
             (value as? RawArray)?.values?.takeIf { values -> values.all { it is RawObject && "value" in it.values } }
                 ?: listOf(value)
-        fun signature(value: RawValue): String {
-            val obj = value as? RawObject
-            val validTime = obj?.values?.get("validTime") ?: return "<fallback>"
-            val entries = (validTime as? RawArray)?.values ?: return rawValueToJsonString(validTime)
-            return entries.map { entry ->
-                val time = entry as? RawObject ?: return@map rawValueToJsonString(entry)
-                fun point(name: String): String {
-                    val point = time.values[name] as? RawObject ?: return ""
-                    return listOf("value", "timecode").joinToString(";") { key ->
-                        point.values[key]?.let(::rawValueToJsonString) ?: ""
-                    }
-                }
-                "${(time.values["timeline"] as? RawString)?.value}|${point("from")}|${point("to")}"
-            }.sorted().joinToString("||")
-        }
         val merged = entries(existing).toMutableList()
         entries(incoming).forEach { candidate ->
             val index = merged.indexOfFirst { signature(it) == signature(candidate) }
             if (index >= 0) merged[index] = candidate else merged += candidate
         }
-        return if (merged.size == 1 && signature(merged.single()) == "<fallback>") merged.single() else RawArray(merged)
+        return if (merged.size == 1 && signature(merged.single()) == FallbackValidTimeKey) merged.single() else RawArray(merged)
     }
 
     private data class PropertyCandidate(
