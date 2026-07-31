@@ -2,21 +2,25 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { Executable, LanguageClient, LanguageClientOptions, ServerOptions, TransportKind } from "vscode-languageclient/node";
 import { graphMdPlugin } from "markdown-it-graphmd";
+import { relativeMarkdownHref } from "./preview-links";
 import {
-  loadPreviewTargetIndex,
-  PreviewSource,
+  isIndexedMarkdownPath,
+  previewIndexAliases,
+  readWorkspaceScanEntry,
+  PreviewDiskReadTracker,
+  PreviewIndexSource,
   PreviewTargetIndex,
-  resolveDocumentPreviewHref,
-  resolveMediaPreviewHref,
-} from "./preview-targets";
+  PreviewWorkspaceScanTracker,
+} from "./preview-target-index";
 import { GraphMdSearchViewProvider } from "./search-view";
 
 let client: LanguageClient | undefined;
-let previewTargets: PreviewTargetIndex = {
-  documentsById: new Map(),
-  mediaByAlias: new Map(),
-};
-let previewTargetRefreshGeneration = 0;
+const previewTargets = new PreviewTargetIndex();
+const diskReads = new PreviewDiskReadTracker();
+const workspaceScans = new PreviewWorkspaceScanTracker();
+let previewRefreshEnabled = false;
+let previewIndexActive = false;
+let diskMutationRevision = 0;
 const semanticLegend = new vscode.SemanticTokensLegend([
   "graphmdRelationOperator",
   "graphmdRelationLabel",
@@ -30,7 +34,15 @@ export interface GraphMdMarkdownApi {
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<GraphMdMarkdownApi> {
-  await refreshPreviewTargets();
+  previewRefreshEnabled = false;
+  previewIndexActive = true;
+  context.subscriptions.push({
+    dispose: () => {
+      previewRefreshEnabled = false;
+      previewIndexActive = false;
+      workspaceScans.cancel();
+    },
+  });
   const scriptName = process.platform === "win32" ? "lsp.bat" : "lsp";
   const command = context.asAbsolutePath(path.join("server", "bin", scriptName));
   const serverOptions: ServerOptions = {
@@ -40,9 +52,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<GraphM
 
   const watcher = vscode.workspace.createFileSystemWatcher("**/*.md");
   context.subscriptions.push(watcher);
-  context.subscriptions.push(watcher.onDidCreate(() => void refreshPreviewTargets()));
-  context.subscriptions.push(watcher.onDidChange(() => void refreshPreviewTargets()));
-  context.subscriptions.push(watcher.onDidDelete(() => void refreshPreviewTargets()));
+  context.subscriptions.push(watcher.onDidCreate(handleDiskTargetChange));
+  context.subscriptions.push(watcher.onDidChange(handleDiskTargetChange));
+  context.subscriptions.push(watcher.onDidDelete((uri) => deleteDiskTarget(uri)));
+  context.subscriptions.push(vscode.workspace.onDidOpenTextDocument(updateEditorOverlay));
+  context.subscriptions.push(vscode.workspace.onDidChangeTextDocument((event) => updateEditorOverlay(event.document)));
+  context.subscriptions.push(vscode.workspace.onDidSaveTextDocument(updateSavedDocument));
+  context.subscriptions.push(vscode.workspace.onDidCloseTextDocument(removeEditorOverlay));
+  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => {
+    void reconcileWorkspaceTargets();
+  }));
+  await reconcileWorkspaceTargets();
+  previewRefreshEnabled = true;
   context.subscriptions.push(
     vscode.languages.registerDocumentSemanticTokensProvider(
       { language: "markdown", scheme: "file" },
@@ -92,51 +113,173 @@ export async function activate(context: vscode.ExtensionContext): Promise<GraphM
   };
 }
 
-async function refreshPreviewTargets(): Promise<void> {
-  const generation = ++previewTargetRefreshGeneration;
-  const files = await vscode.workspace.findFiles("**/*.md", "**/{node_modules,.git,build,dist}/**");
-  const sources: PreviewSource[] = files.map((uri) => {
-    const workspaceRelativePaths: string[] = [];
-    for (const folder of vscode.workspace.workspaceFolders ?? []) {
-      const relative = path.relative(folder.uri.fsPath, uri.fsPath).replaceAll(path.sep, "/");
-      if (!relative.startsWith("..")) {
-        workspaceRelativePaths.push(relative);
-      }
-    }
+async function reconcileWorkspaceTargets(): Promise<void> {
+  const scanId = workspaceScans.begin();
+  const mutationAtStart = diskMutationRevision;
+  const folders = [...(vscode.workspace.workspaceFolders ?? [])];
+  const filesByFolder = await Promise.all(folders.map((folder) =>
+    vscode.workspace.findFiles(
+      new vscode.RelativePattern(folder, "**/*.md"),
+      "**/{node_modules,.git,build,dist}/**",
+    )));
+  if (!previewIndexActive || !workspaceScans.isCurrent(scanId)) return;
+  const files = [...new Map(filesByFolder.flat().map((uri) => [uri.toString(), uri])).values()];
+  const results = await Promise.all(files.map(async (uri) => {
+    const key = uri.toString();
+    const result = await readWorkspaceScanEntry(
+      scanId,
+      key,
+      workspaceScans,
+      diskReads,
+      () => vscode.workspace.fs.readFile(uri),
+      isFileNotFoundError,
+    );
+    if (result.kind !== "content") return { uri, result };
     return {
-      uri: uri.toString(),
-      filePath: uri.fsPath,
-      scheme: uri.scheme,
-      authority: uri.authority,
-      workspaceRelativePaths,
+      uri,
+      result: {
+        kind: "content" as const,
+        value: { source: indexSource(uri), text: Buffer.from(result.value).toString("utf8") },
+      },
     };
-  });
-  const next = await loadPreviewTargetIndex(sources, async (source) => {
-    const bytes = await vscode.workspace.fs.readFile(vscode.Uri.parse(source.uri));
-    return Buffer.from(bytes).toString("utf8");
-  });
-  if (generation === previewTargetRefreshGeneration) {
-    previewTargets = next;
+  }));
+  if (!previewIndexActive || !workspaceScans.isCurrent(scanId)) return;
+  if (mutationAtStart !== diskMutationRevision || results.some(({ result }) => result.kind === "stale")) {
+    void reconcileWorkspaceTargets();
+    return;
+  }
+  const currentContents = results.flatMap(({ result }) =>
+    result.kind === "content" ? [result.value] : []);
+  const preserveDiskSources = results.flatMap(({ uri, result }) =>
+    result.kind === "preserve" ? [indexSource(uri)] : []);
+  const overlays = vscode.workspace.textDocuments
+    .filter(isIndexedDocument)
+    .map((document) => ({ source: indexSource(document.uri), text: document.getText() }));
+  updatePreviewTargets(previewTargets.replace(currentContents, overlays, preserveDiskSources));
+}
+
+function isFileNotFoundError(error: unknown): boolean {
+  return error instanceof vscode.FileSystemError && error.code === "FileNotFound";
+}
+
+function handleDiskTargetChange(uri: vscode.Uri): void {
+  if (!previewIndexActive) return;
+  diskMutationRevision += 1;
+  if (!isIndexedUri(uri)) {
+    diskReads.begin(uri.toString());
+    updatePreviewTargets(previewTargets.deleteAll(uri.toString()));
+    return;
+  }
+  void readDiskTarget(uri);
+}
+
+async function readDiskTarget(uri: vscode.Uri): Promise<void> {
+  const key = uri.toString();
+  const generation = diskReads.begin(key);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const bytes = await vscode.workspace.fs.readFile(uri);
+      if (!previewIndexActive || !diskReads.isCurrent(key, generation)) return;
+      if (!isIndexedUri(uri)) {
+        updatePreviewTargets(previewTargets.deleteDisk(key));
+        return;
+      }
+      updatePreviewTargets(previewTargets.setDisk(indexSource(uri), Buffer.from(bytes).toString("utf8")));
+      return;
+    } catch (error) {
+      if (!previewIndexActive || !diskReads.isCurrent(key, generation)) return;
+      if (isFileNotFoundError(error)) {
+        updatePreviewTargets(previewTargets.deleteDisk(key));
+        return;
+      }
+      // Preserve the previous disk entry after bounded retries for transient
+      // provider failures such as EACCES or EBUSY.
+    }
+  }
+}
+
+function deleteDiskTarget(uri: vscode.Uri): void {
+  diskMutationRevision += 1;
+  const key = uri.toString();
+  diskReads.begin(key);
+  updatePreviewTargets(previewTargets.deleteDisk(key));
+}
+
+function updateEditorOverlay(document: vscode.TextDocument): void {
+  if (!isIndexedDocument(document)) {
+    updatePreviewTargets(previewTargets.deleteOverlay(document.uri.toString()));
+    return;
+  }
+  updatePreviewTargets(previewTargets.setOverlay(indexSource(document.uri), document.getText()));
+}
+
+function updateSavedDocument(document: vscode.TextDocument): void {
+  if (!isIndexedDocument(document)) return;
+  diskMutationRevision += 1;
+  diskReads.begin(document.uri.toString());
+  updatePreviewTargets(previewTargets.setDisk(indexSource(document.uri), document.getText()));
+  updateEditorOverlay(document);
+}
+
+function removeEditorOverlay(document: vscode.TextDocument): void {
+  if (!isIndexedDocument(document)) return;
+  updatePreviewTargets(previewTargets.deleteOverlay(document.uri.toString()));
+}
+
+function isIndexedDocument(document: vscode.TextDocument): boolean {
+  return document.languageId === "markdown" && isIndexedUri(document.uri);
+}
+
+function isIndexedUri(uri: vscode.Uri): boolean {
+  return uri.scheme === "file" && isIndexedMarkdownPath(uri.fsPath, workspaceRootPaths());
+}
+
+function indexSource(uri: vscode.Uri): PreviewIndexSource {
+  return {
+    uri: uri.toString(),
+    fsPath: uri.fsPath,
+    aliases: previewIndexAliases(uri.fsPath, workspaceRootPaths()),
+  };
+}
+
+function workspaceRootPaths(): string[] {
+  return (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
+}
+
+function updatePreviewTargets(changed: boolean): void {
+  if (changed && previewRefreshEnabled) {
+    void vscode.commands.executeCommand("markdown.preview.refresh");
   }
 }
 
 function resolveDocumentHref(target: string, env?: unknown): string | null {
+  const mediaTarget = previewTargets.snapshot.media.get(target);
+  if (mediaTarget) return mediaTarget;
+
+  const documentTarget = previewTargets.snapshot.documents.get(target);
+  const targetUri = documentTarget ? vscode.Uri.parse(documentTarget.uri) : undefined;
   const currentDocument = (env as { currentDocument?: vscode.Uri } | undefined)?.currentDocument;
-  return resolveDocumentPreviewHref(
-    previewTargets,
-    target,
-    currentDocument
-      ? {
-          filePath: currentDocument.fsPath,
-          scheme: currentDocument.scheme,
-          authority: currentDocument.authority,
-        }
-      : undefined,
-  );
+  if (
+    !targetUri ||
+    !currentDocument ||
+    targetUri.scheme !== currentDocument.scheme ||
+    targetUri.authority !== currentDocument.authority
+  ) {
+    return null;
+  }
+
+  return relativeMarkdownHref(currentDocument.fsPath, targetUri.fsPath);
 }
 
 function resolveMediaHref(href: string): string | null {
-  return resolveMediaPreviewHref(previewTargets, href);
+  const direct = previewTargets.snapshot.media.get(href);
+  if (direct) return direct;
+  try {
+    const decoded = decodeURIComponent(href);
+    return previewTargets.snapshot.media.get(decoded) ?? previewTargets.snapshot.media.get(path.basename(decoded)) ?? null;
+  } catch {
+    return previewTargets.snapshot.media.get(path.basename(href)) ?? null;
+  }
 }
 
 export async function deactivate(): Promise<void> {

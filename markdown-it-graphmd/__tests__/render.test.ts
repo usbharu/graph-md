@@ -51,9 +51,9 @@ describe("relation link", () => {
     expect(dataProps(html)).toBe('{"note":{"default":"close","ja":"親密"}}');
   });
 
-  it("supports double-quoted relType with spaces", () => {
+  it("rejects double-quoted relType values with spaces", () => {
     const html = render('@link{}[Bob](bob "best friend")');
-    expect(html).toContain('data-link-rel="best friend"');
+    expect(html).not.toContain("data-link-rel=");
   });
 
   it("unescapes and html-escapes the label", () => {
