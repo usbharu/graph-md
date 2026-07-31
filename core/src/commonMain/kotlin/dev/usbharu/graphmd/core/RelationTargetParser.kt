@@ -10,10 +10,10 @@ internal object RelationTargetParser {
         if (typePart.isEmpty()) return null
         if (typePart.first() == '"') {
             val relType = parseQuotedRelationType(typePart) ?: return null
-            if (relType.isEmpty()) return null
+            if (relType.isEmpty() || relType.any { it.isWhitespace() }) return null
             return target to relType
         }
-        if (typePart.any { it == ' ' || it == '\t' || it == ')' }) return null
+        if (typePart.any { it.isWhitespace() || it == ')' }) return null
         return target to typePart
     }
 
