@@ -55,7 +55,7 @@ class GraphDocumentAnalyzer {
     private val parser = GraphDocumentParser()
 
     fun analyze(text: String, sourcePath: String): GraphDocumentAnalysis {
-        val normalized = text.replace("\r\n", "\n")
+        val normalized = text.replace("\r\n", "\n").replace('\r', '\n')
         val parsed = parser.parseDocument(normalized, sourcePath)
         val document = parsed.document
         val lines = normalized.split('\n')
