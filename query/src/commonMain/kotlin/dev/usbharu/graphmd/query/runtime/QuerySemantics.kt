@@ -80,7 +80,7 @@ internal class QuerySemantics(
     private val timelineUniverse by lazy {
         IntervalSet.of(
             graph.timelineCatalog.timelines
-                .map { it.canonicalId }
+                .map { it.assertionScopeId }
                 .distinct()
                 .map { TemporalInterval(it) },
         )

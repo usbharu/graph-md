@@ -114,8 +114,10 @@ timeline domains implicitly.
 
 GraphMD source `validTime.from` and `validTime.to` remain inclusive.
 `TemporalWindow.Range` is explicitly half-open, while
-`TemporalWindow.ClosedRange` has inclusive endpoints. Timeline mappings are
-normalized onto a canonical axis before joins.
+`TemporalWindow.ClosedRange` has inclusive endpoints. Timeline inheritance
+shares one search assertion scope, while offset mappings only convert timecode
+coordinates onto a comparable canonical axis. A mapping by itself therefore
+does not make an assertion valid on the other Timeline.
 
 The internal temporal operators have explicit direction:
 
@@ -151,3 +153,6 @@ all shard names. The bundle stores logical assertions and the physical property,
 relation, interval, and full-text posting lists. Loading validates the format,
 analyzer version, referenced shards, checksum, and assertion references before
 the index can execute.
+Bundles created before assertion scopes distinguished Timeline inheritance from
+offset mappings remain readable, but must be regenerated to receive the new
+matching semantics.

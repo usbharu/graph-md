@@ -394,7 +394,7 @@ internal class GmqlExecutor(
     private val textById = graph.textAssertions.associateBy { it.id }
     private val timelineUniverse = IntervalSet.of(
         graph.timelineCatalog.timelines
-            .map { it.canonicalId }
+            .map { it.assertionScopeId }
             .distinct()
             .map(::TemporalInterval),
     )
@@ -832,25 +832,25 @@ internal class GmqlExecutor(
         if (valid == null) return binding.copy(matchedValidity = binding.validity)
         if (valid.operator == GmqlValidOperator.ANYTIME) {
             val filtered = valid.timeline?.let { timeline ->
-                val canonical = graph.timelineCatalog.normalize(TimelineId(timeline), null, null).timelineId
+                val assertedTimeline = graph.timelineCatalog.assertionScopeId(TimelineId(timeline))
                 if (binding.validity.isUniversal) IntervalSet.empty()
-                else IntervalSet.of(binding.validity.intervals.filter { it.timelineId == canonical })
+                else IntervalSet.of(binding.validity.intervals.filter { it.timelineId == assertedTimeline })
             } ?: binding.validity
             return filtered.takeUnless { it.isEmpty }?.let { binding.copy(validity = it, matchedValidity = it) }
         }
         val timeline = TimelineId(checkNotNull(valid.timeline))
-        val canonical = graph.timelineCatalog.normalize(timeline, null, null).timelineId
+        val assertedTimeline = graph.timelineCatalog.assertionScopeId(timeline)
         val scopedValidity = if (binding.validity.isUniversal) {
             IntervalSet.empty()
         } else {
-            IntervalSet.of(binding.validity.intervals.filter { it.timelineId == canonical })
+            IntervalSet.of(binding.validity.intervals.filter { it.timelineId == assertedTimeline })
         }
         if (scopedValidity.isEmpty) return null
         val window = when (valid.operator) {
             GmqlValidOperator.AT -> {
                 val expression = checkNotNull(valid.instant)
                 val instant = finiteTemporalBoundary(evaluate(expression, binding, parameters), expression.range)
-                IntervalSet.of(graph.timelineCatalog.normalize(
+                IntervalSet.of(graph.timelineCatalog.assertedInterval(
                     timeline, IntervalBoundary(instant, true), IntervalBoundary(instant, true),
                 ))
             }
@@ -869,7 +869,7 @@ internal class GmqlExecutor(
                     )
                 }
                 if (start != null && end != null && TemporalInterval.isEmpty(start, end)) return null
-                IntervalSet.of(graph.timelineCatalog.normalize(timeline, start, end))
+                IntervalSet.of(graph.timelineCatalog.assertedInterval(timeline, start, end))
             }
         }
         val matched = scopedValidity intersect window

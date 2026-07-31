@@ -105,6 +105,117 @@ class GraphSearchEngineTest {
         assertEquals(scanned, active)
         assertEquals(active, staticResult)
     }
+
+    @Test
+    fun `mapped timelines do not broaden a body block relation assertion`() {
+        val sources = listOf(
+            SourceDocument(
+                "---\nid: THE_IDOLMASTER\nkind: Timeline\ntimecode:\n  type: number\n---",
+                "/the-idolmaster.md",
+            ),
+            SourceDocument(
+                "---\nid: THE_IDOLMASTER2\nkind: Timeline\nextends: [THE_IDOLMASTER]\n---",
+                "/the-idolmaster2.md",
+            ),
+            SourceDocument(
+                """
+                ---
+                id: MILLION_LIVE
+                kind: Timeline
+                mappings:
+                  - kind: offset
+                    offset: 0
+                    from: THE_IDOLMASTER2
+                timecode:
+                  type: number
+                ---
+                """.trimIndent(),
+                "/million-live.md",
+            ),
+            SourceDocument("---\nid: Idol\nkind: NodeType\n---", "/idol.md"),
+            SourceDocument("---\nid: Production\nkind: NodeType\n---", "/production.md"),
+            SourceDocument(
+                "---\nid: affWith\nkind: RelType\nfrom: [Idol]\nto: [Production]\n---",
+                "/aff-with.md",
+            ),
+            SourceDocument(
+                """
+                ---
+                id: 765Production
+                kind: Node
+                type: Production
+                validTime:
+                  - timeline: THE_IDOLMASTER
+                  - timeline: THE_IDOLMASTER2
+                  - timeline: MILLION_LIVE
+                ---
+                """.trimIndent(),
+                "/765-production.md",
+            ),
+            SourceDocument(
+                """
+                ---
+                id: AmamiHaruka
+                kind: Node
+                type: Idol
+                validTime:
+                  - timeline: THE_IDOLMASTER
+                  - timeline: THE_IDOLMASTER2
+                  - timeline: MILLION_LIVE
+                ---
+                ::: validTime=MILLION_LIVE
+                @link[a](765Production affWith)
+                :::
+                """.trimIndent(),
+                "/amami-haruka.md",
+            ),
+        )
+        val compilation = GraphCompiler().compileSources(sources)
+        val engine = GraphSearchEngine.build(compilation, sources)
+        val millionLiveRelation = engine.graph.relationAssertions.single()
+        assertEquals(
+            setOf(TimelineId("MILLION_LIVE")),
+            millionLiveRelation.validTime.intervals.mapTo(linkedSetOf()) { it.timelineId },
+        )
+        val queryPrefix = "MATCH (source)-[link:affWith]->(target) VALID ON "
+        val querySuffix =
+            " ANYTIME RETURN ID(link), TYPE(link), ID(source), ID(target), VALIDITY()"
+        fun kotlinQuery(timeline: String) = GraphQuery(
+            root = NodePattern(id = NodeId("AmamiHaruka")),
+            temporalWindow = TemporalWindow.At(TimelineId(timeline), 0.0),
+            expression = GraphQueryExpression.Relation(
+                RelationPattern(
+                    typeId = RelationTypeId("affWith"),
+                    target = NodePattern(id = NodeId("765Production")),
+                ),
+            ),
+        )
+
+        val onMillionLive = runEngineSuspend {
+            engine.queryGmql(queryPrefix + "MILLION_LIVE" + querySuffix)
+        }
+        val onTheIdolmaster = runEngineSuspend {
+            engine.queryGmql(queryPrefix + "THE_IDOLMASTER" + querySuffix)
+        }
+        val loaded = GraphSearchEngine.loadStatic(engine.exportStatic())
+        val staticOnTheIdolmaster = runEngineSuspend {
+            loaded.queryGmql(queryPrefix + "THE_IDOLMASTER" + querySuffix)
+        }
+        val extendsScopeQuery =
+            "MATCH (source:Idol) VALID ON THE_IDOLMASTER2 ANYTIME RETURN ID(source)"
+        val onExtendedTimeline = runEngineSuspend { engine.queryGmql(extendsScopeQuery) }
+        val staticOnExtendedTimeline = runEngineSuspend { loaded.queryGmql(extendsScopeQuery) }
+        val kotlinOnMillionLive = runEngineSuspend { engine.search(kotlinQuery("MILLION_LIVE")) }
+        val kotlinOnTheIdolmaster = runEngineSuspend { engine.search(kotlinQuery("THE_IDOLMASTER")) }
+
+        assertEquals(1, onMillionLive.rows.size, onMillionLive.toString())
+        assertTrue(onTheIdolmaster.rows.isEmpty(), onTheIdolmaster.toString())
+        assertEquals(onTheIdolmaster, staticOnTheIdolmaster)
+        assertEquals(1, onExtendedTimeline.rows.size, onExtendedTimeline.toString())
+        assertEquals(onExtendedTimeline, staticOnExtendedTimeline)
+        assertEquals(1, kotlinOnMillionLive.matches.size, kotlinOnMillionLive.toString())
+        assertTrue(kotlinOnTheIdolmaster.matches.isEmpty(), kotlinOnTheIdolmaster.toString())
+    }
 }
 
 private fun <T> runEngineSuspend(block: suspend () -> T): T {

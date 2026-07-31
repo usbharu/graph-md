@@ -1085,6 +1085,8 @@ NodeおよびMediaの本文では、3個以上の連続したコロンをフェ�
 
 `validTime`の既定値は、Node、外側ブロック、内側ブロック、`@props`または`@link`、個別Propertyの順に解決する。最も近い明示値が上位の値を置換し、複数の時間を結合または交差しない。`validTime`を持たない名前付きブロックは、親ブロックまたはNodeの値を継承する。
 
+検索assertionでは、Timelineの`extends`で結ばれたTimelineを同じ主張スコープとして扱う。一方、offset mappingはtimecodeを比較可能な座標へ変換するだけであり、mappingだけで結ばれた別のTimelineへ主張を拡張してはならない。例えばNodeが`TimelineA`と`TimelineB`の両方で有効でも、mappingだけで接続された`validTime=TimelineB`の本文ブロック内にあるLinkは`VALID ON TimelineA`に一致しない。
+
 markdown-it実装は、構文的に完全な開始・終了フェンスだけを表示から除外し、wrapper要素を生成せず、内部のMarkdownを通常どおり描画する。不正または未閉鎖のフェンスは通常の本文として残す。
 
 検索索引ではフェンス行を本文から除外し、その位置で本文断片を分割する。各本文断片の時間は最内ブロックから継承し、`VALID ON`を含む時間条件へ反映する。既存の静的検索bundleの形式は変更しないが、新しいブロック時間を反映するには索引を再生成する必要がある。

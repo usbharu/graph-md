@@ -206,6 +206,7 @@ data class QueryTimeline(
     val id: TimelineId,
     val canonicalId: TimelineId,
     val offsetToCanonical: Double,
+    val assertionScopeId: TimelineId = id,
 )
 
 class TimelineCatalog private constructor(
@@ -227,6 +228,22 @@ class TimelineCatalog private constructor(
         )
     }
 
+    /**
+     * Builds a search validity scope. Timeline inheritance shares one scope;
+     * canonical conversion is available through [normalize], but a mapping
+     * must not make an assertion valid on every Timeline on that axis.
+     */
+    fun assertedInterval(
+        timelineId: TimelineId,
+        start: IntervalBoundary?,
+        end: IntervalBoundary?,
+    ): TemporalInterval {
+        return TemporalInterval(assertionScopeId(timelineId), start, end)
+    }
+
+    fun assertionScopeId(timelineId: TimelineId): TimelineId =
+        requireNotNull(byId[timelineId]) { "Unknown Timeline: ${timelineId.value}" }.assertionScopeId
+
     fun fromValidTimes(validTimes: List<ValidTime>): IntervalSet {
         if (validTimes.isEmpty()) return IntervalSet.universal()
         return IntervalSet.of(validTimes.mapNotNull { validTime ->
@@ -235,7 +252,7 @@ class TimelineCatalog private constructor(
             val from = validTime.from?.timecode
             val to = validTime.to?.timecode
             if (from != null && to != null && from > to) return@mapNotNull null
-            normalize(
+            assertedInterval(
                 timelineId = timelineId,
                 start = from?.let { IntervalBoundary(it, inclusive = true) },
                 end = to?.let { IntervalBoundary(it, inclusive = true) },
@@ -248,6 +265,26 @@ class TimelineCatalog private constructor(
     companion object {
         fun from(timelines: List<NormalizedTimeline>): TimelineCatalog {
             val ids = timelines.map { it.id }.toSet()
+            val inheritanceEdges = ids.associateWith { linkedSetOf<String>() }
+            timelines.forEach { timeline ->
+                timeline.ancestorIds.filter { it in ids }.forEach { ancestor ->
+                    inheritanceEdges.getValue(timeline.id).add(ancestor)
+                    inheritanceEdges.getValue(ancestor).add(timeline.id)
+                }
+            }
+
+            fun assertionScope(id: String): String {
+                val component = linkedSetOf(id)
+                val queue = ArrayDeque<String>()
+                queue.addLast(id)
+                while (queue.isNotEmpty()) {
+                    inheritanceEdges.getValue(queue.removeFirst()).forEach { related ->
+                        if (component.add(related)) queue.addLast(related)
+                    }
+                }
+                return component.minOrNull() ?: id
+            }
+
             return TimelineCatalog(timelines.map { timeline ->
                 val component = (timeline.mappedOffsets.keys + timeline.id).filter { it in ids }
                 val canonical = component.minOrNull() ?: timeline.id
@@ -259,6 +296,7 @@ class TimelineCatalog private constructor(
                     } else {
                         timeline.mappedOffsets.getValue(canonical)
                     },
+                    assertionScopeId = TimelineId(assertionScope(timeline.id)),
                 )
             })
         }

@@ -43,7 +43,7 @@ class IntervalSetTest {
     }
 
     @Test
-    fun `timeline catalog converts mapped axes to one canonical coordinate system`() {
+    fun `timeline catalog converts coordinates without losing asserted timeline identity`() {
         val catalog = TimelineCatalog.from(
             listOf(
                 NormalizedTimeline(
@@ -67,10 +67,51 @@ class IntervalSetTest {
             ),
         )
 
+        val canonicalA = catalog.normalize(
+            TimelineId("A"), IntervalBoundary(20.0, true), IntervalBoundary(30.0, true),
+        )
+        val canonicalB = catalog.normalize(
+            TimelineId("B"), IntervalBoundary(30.0, true), IntervalBoundary(40.0, true),
+        )
         val onA = catalog.fromValidTimes(listOf(ValidTime("A", TimePoint(20.0), TimePoint(30.0))))
         val onB = catalog.fromValidTimes(listOf(ValidTime("B", TimePoint(30.0), TimePoint(40.0))))
 
-        assertEquals(onA, onB)
+        assertEquals(canonicalA, canonicalB)
+        assertEquals(TimelineId("A"), onA.intervals.single().timelineId)
+        assertEquals(TimelineId("B"), onB.intervals.single().timelineId)
+        assertTrue((onA intersect onB).isEmpty)
+    }
+
+    @Test
+    fun `timeline inheritance shares assertion scope`() {
+        val catalog = TimelineCatalog.from(
+            listOf(
+                NormalizedTimeline(
+                    id = "Root",
+                    timecode = null,
+                    mappings = emptyList(),
+                    props = emptyMap(),
+                    ancestorIds = emptySet(),
+                    mappedOffsets = mapOf("Child" to 0.0),
+                    source = SourceInfo("root.md"),
+                ),
+                NormalizedTimeline(
+                    id = "Child",
+                    timecode = null,
+                    mappings = emptyList(),
+                    props = emptyMap(),
+                    ancestorIds = setOf("Root"),
+                    mappedOffsets = mapOf("Root" to 0.0),
+                    source = SourceInfo("child.md"),
+                ),
+            ),
+        )
+
+        val onRoot = catalog.fromValidTimes(listOf(ValidTime("Root")))
+        val onChild = catalog.fromValidTimes(listOf(ValidTime("Child")))
+
+        assertEquals(onRoot, onChild)
+        assertEquals(TimelineId("Child"), onRoot.intervals.single().timelineId)
     }
 
     @Test
