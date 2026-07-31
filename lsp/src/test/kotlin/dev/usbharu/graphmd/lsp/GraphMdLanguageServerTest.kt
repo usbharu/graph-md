@@ -1945,6 +1945,14 @@ class GraphMdLanguageServerTest {
             "timeline" to ResolvedPropSchema(type = PropType.string),
             "score" to ResolvedPropSchema(type = PropType.number),
             "labels" to ResolvedPropSchema(type = PropType.array, items = ResolvedPropSchema(type = PropType.string)),
+            "durations" to ResolvedPropSchema(
+                type = PropType.array,
+                items = ResolvedPropSchema(type = PropType.duration, timeline = TimelineSelector.Id("ThirdAge")),
+            ),
+            "matrix" to ResolvedPropSchema(
+                type = PropType.array,
+                items = ResolvedPropSchema(type = PropType.array, items = ResolvedPropSchema(type = PropType.number)),
+            ),
             "description" to ResolvedPropSchema(type = PropType.text),
             "activeDuring" to ResolvedPropSchema(type = PropType.duration, timeline = TimelineSelector.Id("ThirdAge")),
         )
@@ -1958,6 +1966,30 @@ class GraphMdLanguageServerTest {
         val string = resolve("name = ").single { it.label == "string" }
         assertEquals("\"\${1:value}\"", string.insertText)
         assertEquals(InsertTextFormat.Snippet, string.insertTextFormat)
+        assertEquals(
+            "name = \"\${1:value}\"",
+            resolve("name").single { it.label == "name" }.insertText,
+        )
+        assertEquals(
+            "activeDuring = { timeline = \${1:ThirdAge}, from = \${2:0}, to = \${3:0} }",
+            resolve("activeDuring").single { it.label == "activeDuring" }.insertText,
+        )
+        assertEquals(
+            "durations = [ { timeline = \${1:ThirdAge}, from = \${2:0}, to = \${3:0} } ]",
+            resolve("durations").single { it.label == "durations" }.insertText,
+        )
+        assertEquals(
+            "[ { timeline = \${1:ThirdAge}, from = \${2:0}, to = \${3:0} } ]",
+            resolve("durations = ").single().insertText,
+        )
+        assertEquals(
+            "matrix = [ [ \${1:0} ] ]",
+            resolve("matrix").single { it.label == "matrix" }.insertText,
+        )
+        assertEquals(
+            "labels = [ \"\${1:value}\" ]",
+            resolve("labels").single { it.label == "labels" }.insertText,
+        )
         assertEquals(listOf("string"), resolve("timeline = ").map { it.label })
         assertEquals(listOf("0"), resolve("score = ").map { it.label })
         assertEquals("[ \"\${1:value}\" ]", resolve("labels = ").single().insertText)
@@ -1969,6 +2001,21 @@ class GraphMdLanguageServerTest {
         assertEquals(listOf("ThirdAge"), resolve("activeDuring(validTime=Th").map { it.label })
         assertEquals(listOf("from", "to"), resolve("activeDuring(validTime=ThirdAge(").map { it.label })
         assertEquals(listOf("0"), resolve("activeDuring(validTime=ThirdAge(from=").map { it.label })
+    }
+
+    @Test
+    fun `relation props key completion uses the relation schema value shape`() {
+        val text = "@link{since}[Bob](bob \"friendOf\")"
+        val items = PropsCompletionContextResolver(
+            text = text,
+            offset = text.indexOf("since") + "since".length,
+            rootSchema = mapOf("since" to ResolvedPropSchema(type = PropType.number)),
+            timelineIds = emptyList(),
+            explicitBraceStart = text.indexOf('{'),
+        ).resolve()?.items.orEmpty()
+
+        assertEquals("since = 0", items.single { it.label == "since" }.insertText)
+        assertEquals(InsertTextFormat.PlainText, items.single { it.label == "since" }.insertTextFormat)
     }
 
     @Test
@@ -2269,6 +2316,7 @@ class GraphMdLanguageServerTest {
 
     @Test
     fun `server completion returns node props from workspace node type`() {
+        val timelineText = "---\nid: CommonEra\nkind: Timeline\ntimecode:\n  type: number\n---"
         val nodeTypeText = """
             ---
             id: Person
@@ -2291,6 +2339,7 @@ class GraphMdLanguageServerTest {
             """.trimIndent()
         val compiled = GraphCompiler().compileSources(
             listOf(
+                SourceDocument(timelineText, "/workspace/timelines/CommonEra.md"),
                 SourceDocument(nodeTypeText, "/workspace/types/Person.md"),
                 SourceDocument(nodeText, "/workspace/alice.md"),
             ),
@@ -2301,6 +2350,16 @@ class GraphMdLanguageServerTest {
         server.initialize(InitializeParams()).get()
         val textService = server.textDocumentService
 
+        textService.didOpen(
+            DidOpenTextDocumentParams(
+                TextDocumentItem(
+                    "file:///workspace/timelines/CommonEra.md",
+                    "markdown",
+                    1,
+                    timelineText,
+                ),
+            ),
+        )
         textService.didOpen(
             DidOpenTextDocumentParams(
                 TextDocumentItem(
@@ -2327,10 +2386,178 @@ class GraphMdLanguageServerTest {
                 TextDocumentIdentifier("file:///workspace/alice.md"),
                 Position(5, 7),
             ),
-        ).get().left.orEmpty().map { it.label }
+        ).get().left.orEmpty()
 
-        assertTrue("name" in items, items.joinToString())
-        assertTrue("birthDate" in items, items.joinToString())
+        assertTrue(items.any { it.label == "name" }, items.joinToString())
+        assertTrue(items.any { it.label == "birthDate" }, items.joinToString())
+        assertEquals("name = \"\${1:value}\"", items.single { it.label == "name" }.insertText)
+        assertEquals(
+            "birthDate = { timeline = \${1:CommonEra}, timecode = \${2:0} }",
+            items.single { it.label == "birthDate" }.insertText,
+        )
+        assertEquals(InsertTextFormat.Snippet, items.single { it.label == "birthDate" }.insertTextFormat)
+    }
+
+    @Test
+    fun `props snippet completion replaces only the current token`() {
+        val nodeTypeText = """
+            ---
+            id: Person
+            kind: NodeType
+            props:
+              name:
+                type: string
+            ---
+        """.trimIndent()
+        val propsLine = "@props{na, untouched = \"keep\"}"
+        val nodeText = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            ---
+            $propsLine
+        """.trimIndent()
+        val uri = "file:///workspace/alice.md"
+        val server = serverFixture(
+            mapOf(
+                "file:///workspace/types/Person.md" to nodeTypeText,
+                uri to nodeText,
+            ),
+        ).server
+        val line = nodeText.lines().lastIndex
+        val cursor = propsLine.indexOf("na") + "na".length
+
+        val item = server.textDocumentService.completion(
+            CompletionParams(TextDocumentIdentifier(uri), Position(line, cursor)),
+        ).get().left.single { it.label == "name" }
+        val edit = assertNotNull(item.textEdit?.left)
+
+        assertEquals(Range(Position(line, propsLine.indexOf("na")), Position(line, cursor)), edit.range)
+        assertEquals("name = \"\${1:value}\"", edit.newText)
+        assertEquals(
+            "@props{name = \"\${1:value}\", untouched = \"keep\"}",
+            propsLine.replaceRange(edit.range.start.character, edit.range.end.character, edit.newText),
+        )
+    }
+
+    @Test
+    fun `yaml props snippet completion preserves the rest of the line`() {
+        val nodeTypeText = """
+            ---
+            id: Person
+            kind: NodeType
+            props:
+              name:
+                type: string
+            ---
+        """.trimIndent()
+        val propsLine = "  na # keep"
+        val nodeText = """
+            ---
+            id: bob
+            kind: Node
+            type: Person
+            props:
+            $propsLine
+            ---
+        """.trimIndent()
+        val uri = "file:///workspace/bob.md"
+        val server = serverFixture(
+            mapOf(
+                "file:///workspace/types/Person.md" to nodeTypeText,
+                uri to nodeText,
+            ),
+        ).server
+        val line = nodeText.lines().indexOf(propsLine)
+        val cursor = propsLine.indexOf("na") + "na".length
+
+        val item = server.textDocumentService.completion(
+            CompletionParams(TextDocumentIdentifier(uri), Position(line, cursor)),
+        ).get().left.single { it.label == "name" }
+        val edit = assertNotNull(item.textEdit?.left)
+
+        assertEquals(Range(Position(line, propsLine.indexOf("na")), Position(line, cursor)), edit.range)
+        assertEquals(
+            "  name: \"\${1:value}\" # keep",
+            propsLine.replaceRange(edit.range.start.character, edit.range.end.character, edit.newText),
+        )
+    }
+
+    @Test
+    fun `front matter props key completion inserts every supported value shape`() {
+        val schema = mapOf(
+            "name" to ResolvedPropSchema(type = PropType.string),
+            "description" to ResolvedPropSchema(type = PropType.text),
+            "score" to ResolvedPropSchema(type = PropType.number),
+            "happenedAt" to ResolvedPropSchema(
+                type = PropType.instant,
+                timeline = TimelineSelector.Id("CommonEra"),
+            ),
+            "activeDuring" to ResolvedPropSchema(
+                type = PropType.duration,
+                timeline = TimelineSelector.Id("CommonEra"),
+            ),
+            "labels" to ResolvedPropSchema(
+                type = PropType.array,
+                items = ResolvedPropSchema(type = PropType.string),
+            ),
+            "durations" to ResolvedPropSchema(
+                type = PropType.array,
+                items = ResolvedPropSchema(type = PropType.duration, timeline = TimelineSelector.Id("CommonEra")),
+            ),
+            "matrix" to ResolvedPropSchema(
+                type = PropType.array,
+                items = ResolvedPropSchema(type = PropType.array, items = ResolvedPropSchema(type = PropType.number)),
+            ),
+        )
+        val text = "---\nid: alice\nkind: Node\ntype: Person\nprops:\n  \n---"
+        val items = FrontMatterCompletionResolver(
+            text = text,
+            offset = text.indexOf("  ") + 2,
+            parsedDocument = NodeDocument(id = "alice", type = "Person", sourcePath = "/tmp/alice.md"),
+            nodeTypeIds = listOf("Person"),
+            relTypeIds = emptyList(),
+            timelineIds = listOf("CommonEra"),
+            nodePropsSchema = schema,
+        ).resolve().orEmpty().associateBy { it.label }
+
+        assertEquals("name: \"\${1:value}\"", items.getValue("name").insertText)
+        assertEquals("description: \"\${1:text}\"", items.getValue("description").insertText)
+        assertEquals("score: 0", items.getValue("score").insertText)
+        assertEquals(
+            "happenedAt: { timeline: \${1:CommonEra}, timecode: \${2:0} }",
+            items.getValue("happenedAt").insertText,
+        )
+        assertEquals(
+            "activeDuring: { timeline: \${1:CommonEra}, from: \${2:0}, to: \${3:0} }",
+            items.getValue("activeDuring").insertText,
+        )
+        assertEquals("labels: [ \"\${1:value}\" ]", items.getValue("labels").insertText)
+        assertEquals(
+            "durations: [ { timeline: \${1:CommonEra}, from: \${2:0}, to: \${3:0} } ]",
+            items.getValue("durations").insertText,
+        )
+        assertEquals("matrix: [ [ \${1:0} ] ]", items.getValue("matrix").insertText)
+        assertEquals(InsertTextFormat.PlainText, items.getValue("score").insertTextFormat)
+        assertTrue(items.values.filter { it.label != "score" }.all { it.insertTextFormat == InsertTextFormat.Snippet })
+
+        val mediaText = "---\nid: image\nkind: Media\ntype: Image\nurl: image.png\nprops:\n  \n---"
+        val mediaItems = FrontMatterCompletionResolver(
+            text = mediaText,
+            offset = mediaText.indexOf("  ") + 2,
+            parsedDocument = NodeDocument(
+                id = "image",
+                type = "Image",
+                sourcePath = "/tmp/image.md",
+                documentKind = DocumentKind.Media,
+            ),
+            nodeTypeIds = listOf("Image"),
+            relTypeIds = emptyList(),
+            timelineIds = emptyList(),
+            nodePropsSchema = mapOf("caption" to ResolvedPropSchema(type = PropType.text)),
+        ).resolve().orEmpty()
+        assertEquals("caption: \"\${1:text}\"", mediaItems.single { it.label == "caption" }.insertText)
     }
 
     @Test
@@ -3739,6 +3966,34 @@ class GraphMdLanguageServerTest {
             )
         }
 
+    }
+
+    @Test
+    fun `property schema field completion inserts safe starter values`() {
+        fun complete(source: String): List<CompletionEntry> {
+            val offset = source.indexOf("<cursor>")
+            assertTrue(offset >= 0)
+            val text = source.replace("<cursor>", "")
+            return FrontMatterCompletionResolver(
+                text = text,
+                offset = offset,
+                parsedDocument = NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md"),
+                nodeTypeIds = emptyList(),
+                relTypeIds = emptyList(),
+                timelineIds = listOf("CommonEra"),
+            ).resolve().orEmpty()
+        }
+
+        val emptySchema = complete("---\nid: Person\nkind: NodeType\nprops:\n  name:\n    <cursor>\n---")
+        assertEquals("type: \${1:string}", emptySchema.single { it.label == "type" }.insertText)
+        assertEquals("required: \${1:false}", emptySchema.single { it.label == "required" }.insertText)
+        assertEquals(InsertTextFormat.Snippet, emptySchema.single { it.label == "type" }.insertTextFormat)
+
+        val arraySchema = complete(
+            "---\nid: Person\nkind: NodeType\nprops:\n  tags:\n    type: array\n    it<cursor>\n---",
+        )
+        assertEquals("items: \${1:string}", arraySchema.single { it.label == "items" }.insertText)
+        assertEquals(InsertTextFormat.Snippet, arraySchema.single { it.label == "items" }.insertTextFormat)
     }
 
     @Test

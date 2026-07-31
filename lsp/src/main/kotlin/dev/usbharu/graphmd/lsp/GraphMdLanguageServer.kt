@@ -31,6 +31,8 @@ import kotlin.io.path.isRegularFile
 import kotlin.io.path.readText
 
 private val GRAPH_MD_ID_REGEX = Regex("[A-Za-z_][A-Za-z0-9_.:-]*")
+private val COMPLETION_REPLACEMENT_TOKEN_REGEX =
+    Regex("""-?\d+(?:\.\d*)?|[A-Za-z_][A-Za-z0-9_]*(?:[.:-][A-Za-z0-9_]+)*""")
 private const val CREATE_DEFINITION_COMMAND = "graphmd.createDefinition"
 
 class GraphMdLanguageServer : LanguageServer, LanguageClientAware, GraphMdSearchService {
@@ -1388,8 +1390,9 @@ internal class GraphMdWorkspaceIndex(
             nodePropsSchema = ((document.analysis.parsed.document as? NodeDocument)?.type
                 ?: frontMatterScalar(document.text, "type"))?.let { nodeTypeSchema(it)?.props }.orEmpty(),
         )
+        val replacementRange = document.completionReplacementRange(position)
         return resolver.resolve()?.map { entry ->
-            entry.toCompletionItem()
+            entry.toCompletionItem(replacementRange)
         }
     }
 
@@ -1399,7 +1402,8 @@ internal class GraphMdWorkspaceIndex(
         val nodeType = parsed?.type ?: frontMatterScalar(document.text, "type") ?: return null
         val schema = nodeTypeSchema(nodeType)?.props ?: return null
         val context = PropsCompletionContextResolver(document.text, offset, schema, timelineIds()).resolve() ?: return null
-        return context.items.map { it.toCompletionItem() }
+        val replacementRange = document.completionReplacementRange(position)
+        return context.items.map { it.toCompletionItem(replacementRange) }
     }
 
     private fun linkSnippetCompletions(document: IndexedDocument, position: Position): List<CompletionItem>? {
@@ -1498,7 +1502,8 @@ internal class GraphMdWorkspaceIndex(
             timelineIds = timelineIds(),
             explicitBraceStart = relationContext.braceStart,
         ).resolve() ?: return null
-        return context.items.map { it.toCompletionItem() }
+        val replacementRange = document.completionReplacementRange(position)
+        return context.items.map { it.toCompletionItem(replacementRange) }
     }
 
     private fun contextualReferenceIds(
@@ -2015,17 +2020,77 @@ internal data class CompletionEntry(
     val insertTextFormat: InsertTextFormat = InsertTextFormat.PlainText,
 )
 
-private fun CompletionEntry.toCompletionItem(): CompletionItem = CompletionItem(label).also { item ->
+private fun CompletionEntry.toCompletionItem(replacementRange: Range? = null): CompletionItem = CompletionItem(label).also { item ->
     item.kind = kind
     item.insertText = insertText
     item.detail = detail
     item.insertTextFormat = insertTextFormat
+    if (replacementRange != null && insertText != label) {
+        item.textEdit = Either.forLeft(TextEdit(replacementRange, insertText))
+    }
     item.sortText = when (kind) {
         CompletionItemKind.Property, CompletionItemKind.Field -> "0-$label"
         CompletionItemKind.Reference -> "1-$label"
         else -> "2-$label"
     }
 }
+
+private fun propValueSnippet(
+    schema: ResolvedPropSchema,
+    separator: String,
+    timelineId: (ResolvedPropSchema) -> String?,
+): String = propValueSnippet(schema, separator, timelineId, 1).text
+
+private data class PropValueSnippet(
+    val text: String,
+    val nextPlaceholder: Int,
+)
+
+private fun propValueSnippet(
+    schema: ResolvedPropSchema,
+    separator: String,
+    timelineId: (ResolvedPropSchema) -> String?,
+    placeholder: Int,
+): PropValueSnippet = when (schema.type) {
+    PropType.string -> PropValueSnippet("\"${snippetPlaceholder(placeholder, "value")}\"", placeholder + 1)
+    PropType.text -> PropValueSnippet("\"${snippetPlaceholder(placeholder, "text")}\"", placeholder + 1)
+    PropType.number -> PropValueSnippet("0", placeholder)
+    PropType.instant -> PropValueSnippet(
+        "{ timeline$separator${snippetPlaceholder(placeholder, timelineId(schema).orEmpty())}, " +
+            "timecode$separator${snippetPlaceholder(placeholder + 1, "0")} }",
+        placeholder + 2,
+    )
+    PropType.duration -> PropValueSnippet(
+        "{ timeline$separator${snippetPlaceholder(placeholder, timelineId(schema).orEmpty())}, " +
+            "from$separator${snippetPlaceholder(placeholder + 1, "0")}, " +
+            "to$separator${snippetPlaceholder(placeholder + 2, "0")} }",
+        placeholder + 3,
+    )
+    PropType.array -> {
+        val element = schema.items?.let {
+            propArrayElementSnippet(it, separator, timelineId, placeholder)
+        } ?: PropValueSnippet(snippetPlaceholder(placeholder, "value"), placeholder + 1)
+        PropValueSnippet("[ ${element.text} ]", element.nextPlaceholder)
+    }
+}
+
+private fun propArrayElementSnippet(
+    schema: ResolvedPropSchema,
+    separator: String,
+    timelineId: (ResolvedPropSchema) -> String?,
+    placeholder: Int,
+): PropValueSnippet = when (schema.type) {
+    // Keep the existing numeric shortcut for instant array elements while still
+    // generating structured snippets for object-valued element types.
+    PropType.number, PropType.instant -> PropValueSnippet(snippetPlaceholder(placeholder, "0"), placeholder + 1)
+    else -> propValueSnippet(schema, separator, timelineId, placeholder)
+}
+
+private fun snippetPlaceholder(index: Int, defaultValue: String): String =
+    "${'$'}{$index:$defaultValue}"
+
+private fun propValueSnippetFormat(schema: ResolvedPropSchema): InsertTextFormat =
+    if (schema.type == PropType.number) InsertTextFormat.PlainText else InsertTextFormat.Snippet
 
 private data class RelationReferenceCompletionContext(
     val targetId: String?,
@@ -2199,11 +2264,15 @@ internal class FrontMatterCompletionResolver(
             .filter { it.startsWith(prefix) }
             .sorted()
             .map { key ->
+                val schema = properties[key]
                 CompletionEntry(
                     key,
                     CompletionItemKind.Field,
-                    "$key: ",
-                    properties[key]?.type?.name ?: "property",
+                    schema?.let {
+                        "$key: ${propValueSnippet(it, ": ") { allowedTimelineIds(it).firstOrNull() }}"
+                    } ?: "$key: ",
+                    schema?.type?.name ?: "property",
+                    schema?.let(::propValueSnippetFormat) ?: InsertTextFormat.PlainText,
                 )
             }
         return entries.ifEmpty { null }
@@ -2245,7 +2314,26 @@ internal class FrontMatterCompletionResolver(
         }
         return keys
             .filter { it.startsWith(prefix) && (it !in usedKeys || it == prefix) }
-            .map { CompletionEntry(it, CompletionItemKind.Field, "$it: ") }
+            .map { key ->
+                val schemaField = isPropSchemaPath(path, documentKind)
+                val insertText = when {
+                    schemaField && key == "type" -> "type: \${1:string}"
+                    schemaField && key == "required" -> "required: \${1:false}"
+                    schemaField && key == "items" -> "items: \${1:string}"
+                    else -> "$key: "
+                }
+                CompletionEntry(
+                    key,
+                    CompletionItemKind.Field,
+                    insertText,
+                    if (schemaField) "property schema" else null,
+                    if (schemaField && key in setOf("type", "required", "items")) {
+                        InsertTextFormat.Snippet
+                    } else {
+                        InsertTextFormat.PlainText
+                    },
+                )
+            }
     }
 
     private fun enumCompletions(prefix: String, values: List<String>, detail: String): List<CompletionEntry> =
@@ -2272,18 +2360,33 @@ internal class FrontMatterCompletionResolver(
             PropType.number -> listOf(CompletionEntry("0", CompletionItemKind.Value, "0", "number"))
             PropType.instant -> listOf(
                 CompletionEntry("0", CompletionItemKind.Value, "0", "instant timecode"),
-                CompletionEntry("instant", CompletionItemKind.Struct, "{ timeline$separator\${1:${allowedTimelineIds(schema).firstOrNull().orEmpty()}}, timecode$separator\${2:0} }", "instant", InsertTextFormat.Snippet),
+                CompletionEntry(
+                    "instant",
+                    CompletionItemKind.Struct,
+                    propValueSnippet(schema, separator) { allowedTimelineIds(it).firstOrNull() },
+                    "instant",
+                    InsertTextFormat.Snippet,
+                ),
             )
             PropType.duration -> listOf(
-                CompletionEntry("duration", CompletionItemKind.Struct, "{ timeline$separator\${1:${allowedTimelineIds(schema).firstOrNull().orEmpty()}}, from$separator\${2:0}, to$separator\${3:0} }", "duration", InsertTextFormat.Snippet),
+                CompletionEntry(
+                    "duration",
+                    CompletionItemKind.Struct,
+                    propValueSnippet(schema, separator) { allowedTimelineIds(it).firstOrNull() },
+                    "duration",
+                    InsertTextFormat.Snippet,
+                ),
             )
             PropType.array -> {
-                val element = when (schema.items?.type) {
-                    PropType.string, PropType.text -> "\"\${1:value}\""
-                    PropType.number, PropType.instant -> "\${1:0}"
-                    else -> "\${1:value}"
-                }
-                listOf(CompletionEntry("array", CompletionItemKind.Struct, "[ $element ]", schema.items?.let { "array<${it.type.name}>" } ?: "array", InsertTextFormat.Snippet))
+                listOf(
+                    CompletionEntry(
+                        "array",
+                        CompletionItemKind.Struct,
+                        propValueSnippet(schema, separator) { allowedTimelineIds(it).firstOrNull() },
+                        schema.items?.let { "array<${it.type.name}>" } ?: "array",
+                        InsertTextFormat.Snippet,
+                    ),
+                )
             }
         }
         return entries
@@ -2735,11 +2838,15 @@ internal class PropsPrefixScanner(
             .filter { it.startsWith(prefix) }
             .sorted()
             .map { key ->
+                val schema = frame.properties[key]
                 CompletionEntry(
                     label = key,
                     kind = CompletionItemKind.Property,
-                    insertText = "$key = ",
-                    detail = frame.properties[key]?.type?.name ?: "property",
+                    insertText = schema?.let {
+                        "$key = ${propValueSnippet(it, " = ") { allowedTimelineIds(it).firstOrNull() }}"
+                    } ?: "$key = ",
+                    detail = schema?.type?.name ?: "property",
+                    insertTextFormat = schema?.let(::propValueSnippetFormat) ?: InsertTextFormat.PlainText,
                 )
             }
         return if (entries.isEmpty()) null else PropsCompletionResult(entries)
@@ -2775,18 +2882,33 @@ internal class PropsPrefixScanner(
             PropType.number -> listOf(CompletionEntry("0", CompletionItemKind.Value, "0", "number")).filter { it.label.startsWith(prefix) }
             PropType.instant -> listOf(
                 CompletionEntry("0", CompletionItemKind.Value, "0", "instant timecode"),
-                CompletionEntry("{", CompletionItemKind.Struct, "{ timeline = \${1:${allowedTimelineIds(schema).firstOrNull().orEmpty()}}, timecode = \${2:0} }", "instant", InsertTextFormat.Snippet),
+                CompletionEntry(
+                    "{",
+                    CompletionItemKind.Struct,
+                    propValueSnippet(schema, " = ") { allowedTimelineIds(it).firstOrNull() },
+                    "instant",
+                    InsertTextFormat.Snippet,
+                ),
             ).filter { prefix.isEmpty() || it.label.startsWith(prefix) }
             PropType.duration -> listOf(
-                CompletionEntry("duration", CompletionItemKind.Struct, "{ timeline = \${1:${allowedTimelineIds(schema).firstOrNull().orEmpty()}}, from = \${2:0}, to = \${3:0} }", "duration", InsertTextFormat.Snippet),
+                CompletionEntry(
+                    "duration",
+                    CompletionItemKind.Struct,
+                    propValueSnippet(schema, " = ") { allowedTimelineIds(it).firstOrNull() },
+                    "duration",
+                    InsertTextFormat.Snippet,
+                ),
             )
             PropType.array -> {
-                val element = when (schema.items?.type) {
-                    PropType.string, PropType.text -> "\"\${1:value}\""
-                    PropType.number, PropType.instant -> "\${1:0}"
-                    else -> "\${1:value}"
-                }
-                listOf(CompletionEntry("array", CompletionItemKind.Struct, "[ $element ]", schema.items?.let { "array<${it.type.name}>" } ?: "array", InsertTextFormat.Snippet))
+                listOf(
+                    CompletionEntry(
+                        "array",
+                        CompletionItemKind.Struct,
+                        propValueSnippet(schema, " = ") { allowedTimelineIds(it).firstOrNull() },
+                        schema.items?.let { "array<${it.type.name}>" } ?: "array",
+                        InsertTextFormat.Snippet,
+                    ),
+                )
             }
         }
     }
@@ -3105,6 +3227,22 @@ private data class IndexedDocument(
     fun analysisOffsetAt(position: Position): Int {
         val lineStart = analysisLineStarts.getOrElse(position.line) { analysis.text.length }
         return (lineStart + position.character).coerceAtMost(analysis.text.length)
+    }
+
+    fun completionReplacementRange(position: Position): Range {
+        val lineStart = lineStarts.getOrElse(position.line) { text.length }
+        var lineEnd = lineStart
+        while (lineEnd < text.length && text[lineEnd] != '\r' && text[lineEnd] != '\n') {
+            lineEnd++
+        }
+        val line = text.substring(lineStart, lineEnd)
+        val cursor = position.character.coerceIn(0, line.length)
+        val token = COMPLETION_REPLACEMENT_TOKEN_REGEX.findAll(line).firstOrNull {
+            it.range.first < cursor && cursor <= it.range.last + 1
+        }
+        val start = token?.range?.first ?: cursor
+        val end = token?.range?.last?.plus(1) ?: cursor
+        return Range(Position(position.line, start), Position(position.line, end))
     }
 
     fun rangeOf(sourceRange: SourceRange): Range {
