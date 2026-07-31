@@ -1858,6 +1858,31 @@ private fun CompletionEntry.toCompletionItem(): CompletionItem = CompletionItem(
     }
 }
 
+private fun propValueSnippet(
+    schema: ResolvedPropSchema,
+    separator: String,
+    timelineId: String?,
+): String = when (schema.type) {
+    PropType.string -> "\"\${1:value}\""
+    PropType.text -> "\"\${1:text}\""
+    PropType.number -> "0"
+    PropType.instant ->
+        "{ timeline$separator\${1:${timelineId.orEmpty()}}, timecode$separator\${2:0} }"
+    PropType.duration ->
+        "{ timeline$separator\${1:${timelineId.orEmpty()}}, from$separator\${2:0}, to$separator\${3:0} }"
+    PropType.array -> {
+        val element = when (schema.items?.type) {
+            PropType.string, PropType.text -> "\"\${1:value}\""
+            PropType.number, PropType.instant -> "\${1:0}"
+            else -> "\${1:value}"
+        }
+        "[ $element ]"
+    }
+}
+
+private fun propValueSnippetFormat(schema: ResolvedPropSchema): InsertTextFormat =
+    if (schema.type == PropType.number) InsertTextFormat.PlainText else InsertTextFormat.Snippet
+
 private data class RelationReferenceCompletionContext(
     val targetId: String?,
     val relType: String?,
@@ -2030,11 +2055,15 @@ internal class FrontMatterCompletionResolver(
             .filter { it.startsWith(prefix) }
             .sorted()
             .map { key ->
+                val schema = properties[key]
                 CompletionEntry(
                     key,
                     CompletionItemKind.Field,
-                    "$key: ",
-                    properties[key]?.type?.name ?: "property",
+                    schema?.let {
+                        "$key: ${propValueSnippet(it, ": ", allowedTimelineIds(it).firstOrNull())}"
+                    } ?: "$key: ",
+                    schema?.type?.name ?: "property",
+                    schema?.let(::propValueSnippetFormat) ?: InsertTextFormat.PlainText,
                 )
             }
         return entries.ifEmpty { null }
@@ -2076,7 +2105,26 @@ internal class FrontMatterCompletionResolver(
         }
         return keys
             .filter { it.startsWith(prefix) && (it !in usedKeys || it == prefix) }
-            .map { CompletionEntry(it, CompletionItemKind.Field, "$it: ") }
+            .map { key ->
+                val schemaField = isPropSchemaPath(path, documentKind)
+                val insertText = when {
+                    schemaField && key == "type" -> "type: \${1:string}"
+                    schemaField && key == "required" -> "required: \${1:false}"
+                    schemaField && key == "items" -> "items: \${1:string}"
+                    else -> "$key: "
+                }
+                CompletionEntry(
+                    key,
+                    CompletionItemKind.Field,
+                    insertText,
+                    if (schemaField) "property schema" else null,
+                    if (schemaField && key in setOf("type", "required", "items")) {
+                        InsertTextFormat.Snippet
+                    } else {
+                        InsertTextFormat.PlainText
+                    },
+                )
+            }
     }
 
     private fun enumCompletions(prefix: String, values: List<String>, detail: String): List<CompletionEntry> =
@@ -2566,11 +2614,15 @@ internal class PropsPrefixScanner(
             .filter { it.startsWith(prefix) }
             .sorted()
             .map { key ->
+                val schema = frame.properties[key]
                 CompletionEntry(
                     label = key,
                     kind = CompletionItemKind.Property,
-                    insertText = "$key = ",
-                    detail = frame.properties[key]?.type?.name ?: "property",
+                    insertText = schema?.let {
+                        "$key = ${propValueSnippet(it, " = ", allowedTimelineIds(it).firstOrNull())}"
+                    } ?: "$key = ",
+                    detail = schema?.type?.name ?: "property",
+                    insertTextFormat = schema?.let(::propValueSnippetFormat) ?: InsertTextFormat.PlainText,
                 )
             }
         return if (entries.isEmpty()) null else PropsCompletionResult(entries)
