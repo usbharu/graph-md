@@ -1614,7 +1614,7 @@ internal class GraphMdWorkspaceIndex(
         return when (kind) {
             ReferenceTargetKind.Node -> definitionsCompatibleWith(kind).map { it.id }
             ReferenceTargetKind.Media -> definitionsOf(kind).map { it.id }
-            ReferenceTargetKind.NodeType, ReferenceTargetKind.RelType -> definitionsOf(kind).filter { it.path.toString().contains("/types/") }.ifEmpty { definitionsOf(kind) }.map { it.id }
+            ReferenceTargetKind.NodeType, ReferenceTargetKind.RelType -> definitionsOf(kind).map { it.id }
             ReferenceTargetKind.Timeline -> definitionsOf(kind).map { it.id }
         }.distinct().sorted()
     }
