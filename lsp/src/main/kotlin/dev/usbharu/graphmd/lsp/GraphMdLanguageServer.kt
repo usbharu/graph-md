@@ -1861,24 +1861,56 @@ private fun CompletionEntry.toCompletionItem(): CompletionItem = CompletionItem(
 private fun propValueSnippet(
     schema: ResolvedPropSchema,
     separator: String,
-    timelineId: String?,
-): String = when (schema.type) {
-    PropType.string -> "\"\${1:value}\""
-    PropType.text -> "\"\${1:text}\""
-    PropType.number -> "0"
-    PropType.instant ->
-        "{ timeline$separator\${1:${timelineId.orEmpty()}}, timecode$separator\${2:0} }"
-    PropType.duration ->
-        "{ timeline$separator\${1:${timelineId.orEmpty()}}, from$separator\${2:0}, to$separator\${3:0} }"
+    timelineId: (ResolvedPropSchema) -> String?,
+): String = propValueSnippet(schema, separator, timelineId, 1).text
+
+private data class PropValueSnippet(
+    val text: String,
+    val nextPlaceholder: Int,
+)
+
+private fun propValueSnippet(
+    schema: ResolvedPropSchema,
+    separator: String,
+    timelineId: (ResolvedPropSchema) -> String?,
+    placeholder: Int,
+): PropValueSnippet = when (schema.type) {
+    PropType.string -> PropValueSnippet("\"${snippetPlaceholder(placeholder, "value")}\"", placeholder + 1)
+    PropType.text -> PropValueSnippet("\"${snippetPlaceholder(placeholder, "text")}\"", placeholder + 1)
+    PropType.number -> PropValueSnippet("0", placeholder)
+    PropType.instant -> PropValueSnippet(
+        "{ timeline$separator${snippetPlaceholder(placeholder, timelineId(schema).orEmpty())}, " +
+            "timecode$separator${snippetPlaceholder(placeholder + 1, "0")} }",
+        placeholder + 2,
+    )
+    PropType.duration -> PropValueSnippet(
+        "{ timeline$separator${snippetPlaceholder(placeholder, timelineId(schema).orEmpty())}, " +
+            "from$separator${snippetPlaceholder(placeholder + 1, "0")}, " +
+            "to$separator${snippetPlaceholder(placeholder + 2, "0")} }",
+        placeholder + 3,
+    )
     PropType.array -> {
-        val element = when (schema.items?.type) {
-            PropType.string, PropType.text -> "\"\${1:value}\""
-            PropType.number, PropType.instant -> "\${1:0}"
-            else -> "\${1:value}"
-        }
-        "[ $element ]"
+        val element = schema.items?.let {
+            propArrayElementSnippet(it, separator, timelineId, placeholder)
+        } ?: PropValueSnippet(snippetPlaceholder(placeholder, "value"), placeholder + 1)
+        PropValueSnippet("[ ${element.text} ]", element.nextPlaceholder)
     }
 }
+
+private fun propArrayElementSnippet(
+    schema: ResolvedPropSchema,
+    separator: String,
+    timelineId: (ResolvedPropSchema) -> String?,
+    placeholder: Int,
+): PropValueSnippet = when (schema.type) {
+    // Keep the existing numeric shortcut for instant array elements while still
+    // generating structured snippets for object-valued element types.
+    PropType.number, PropType.instant -> PropValueSnippet(snippetPlaceholder(placeholder, "0"), placeholder + 1)
+    else -> propValueSnippet(schema, separator, timelineId, placeholder)
+}
+
+private fun snippetPlaceholder(index: Int, defaultValue: String): String =
+    "${'$'}{$index:$defaultValue}"
 
 private fun propValueSnippetFormat(schema: ResolvedPropSchema): InsertTextFormat =
     if (schema.type == PropType.number) InsertTextFormat.PlainText else InsertTextFormat.Snippet
@@ -2060,7 +2092,7 @@ internal class FrontMatterCompletionResolver(
                     key,
                     CompletionItemKind.Field,
                     schema?.let {
-                        "$key: ${propValueSnippet(it, ": ", allowedTimelineIds(it).firstOrNull())}"
+                        "$key: ${propValueSnippet(it, ": ") { allowedTimelineIds(it).firstOrNull() }}"
                     } ?: "$key: ",
                     schema?.type?.name ?: "property",
                     schema?.let(::propValueSnippetFormat) ?: InsertTextFormat.PlainText,
@@ -2151,18 +2183,33 @@ internal class FrontMatterCompletionResolver(
             PropType.number -> listOf(CompletionEntry("0", CompletionItemKind.Value, "0", "number"))
             PropType.instant -> listOf(
                 CompletionEntry("0", CompletionItemKind.Value, "0", "instant timecode"),
-                CompletionEntry("instant", CompletionItemKind.Struct, "{ timeline$separator\${1:${allowedTimelineIds(schema).firstOrNull().orEmpty()}}, timecode$separator\${2:0} }", "instant", InsertTextFormat.Snippet),
+                CompletionEntry(
+                    "instant",
+                    CompletionItemKind.Struct,
+                    propValueSnippet(schema, separator) { allowedTimelineIds(it).firstOrNull() },
+                    "instant",
+                    InsertTextFormat.Snippet,
+                ),
             )
             PropType.duration -> listOf(
-                CompletionEntry("duration", CompletionItemKind.Struct, "{ timeline$separator\${1:${allowedTimelineIds(schema).firstOrNull().orEmpty()}}, from$separator\${2:0}, to$separator\${3:0} }", "duration", InsertTextFormat.Snippet),
+                CompletionEntry(
+                    "duration",
+                    CompletionItemKind.Struct,
+                    propValueSnippet(schema, separator) { allowedTimelineIds(it).firstOrNull() },
+                    "duration",
+                    InsertTextFormat.Snippet,
+                ),
             )
             PropType.array -> {
-                val element = when (schema.items?.type) {
-                    PropType.string, PropType.text -> "\"\${1:value}\""
-                    PropType.number, PropType.instant -> "\${1:0}"
-                    else -> "\${1:value}"
-                }
-                listOf(CompletionEntry("array", CompletionItemKind.Struct, "[ $element ]", schema.items?.let { "array<${it.type.name}>" } ?: "array", InsertTextFormat.Snippet))
+                listOf(
+                    CompletionEntry(
+                        "array",
+                        CompletionItemKind.Struct,
+                        propValueSnippet(schema, separator) { allowedTimelineIds(it).firstOrNull() },
+                        schema.items?.let { "array<${it.type.name}>" } ?: "array",
+                        InsertTextFormat.Snippet,
+                    ),
+                )
             }
         }
         return entries
@@ -2619,7 +2666,7 @@ internal class PropsPrefixScanner(
                     label = key,
                     kind = CompletionItemKind.Property,
                     insertText = schema?.let {
-                        "$key = ${propValueSnippet(it, " = ", allowedTimelineIds(it).firstOrNull())}"
+                        "$key = ${propValueSnippet(it, " = ") { allowedTimelineIds(it).firstOrNull() }}"
                     } ?: "$key = ",
                     detail = schema?.type?.name ?: "property",
                     insertTextFormat = schema?.let(::propValueSnippetFormat) ?: InsertTextFormat.PlainText,
@@ -2658,18 +2705,33 @@ internal class PropsPrefixScanner(
             PropType.number -> listOf(CompletionEntry("0", CompletionItemKind.Value, "0", "number")).filter { it.label.startsWith(prefix) }
             PropType.instant -> listOf(
                 CompletionEntry("0", CompletionItemKind.Value, "0", "instant timecode"),
-                CompletionEntry("{", CompletionItemKind.Struct, "{ timeline = \${1:${allowedTimelineIds(schema).firstOrNull().orEmpty()}}, timecode = \${2:0} }", "instant", InsertTextFormat.Snippet),
+                CompletionEntry(
+                    "{",
+                    CompletionItemKind.Struct,
+                    propValueSnippet(schema, " = ") { allowedTimelineIds(it).firstOrNull() },
+                    "instant",
+                    InsertTextFormat.Snippet,
+                ),
             ).filter { prefix.isEmpty() || it.label.startsWith(prefix) }
             PropType.duration -> listOf(
-                CompletionEntry("duration", CompletionItemKind.Struct, "{ timeline = \${1:${allowedTimelineIds(schema).firstOrNull().orEmpty()}}, from = \${2:0}, to = \${3:0} }", "duration", InsertTextFormat.Snippet),
+                CompletionEntry(
+                    "duration",
+                    CompletionItemKind.Struct,
+                    propValueSnippet(schema, " = ") { allowedTimelineIds(it).firstOrNull() },
+                    "duration",
+                    InsertTextFormat.Snippet,
+                ),
             )
             PropType.array -> {
-                val element = when (schema.items?.type) {
-                    PropType.string, PropType.text -> "\"\${1:value}\""
-                    PropType.number, PropType.instant -> "\${1:0}"
-                    else -> "\${1:value}"
-                }
-                listOf(CompletionEntry("array", CompletionItemKind.Struct, "[ $element ]", schema.items?.let { "array<${it.type.name}>" } ?: "array", InsertTextFormat.Snippet))
+                listOf(
+                    CompletionEntry(
+                        "array",
+                        CompletionItemKind.Struct,
+                        propValueSnippet(schema, " = ") { allowedTimelineIds(it).firstOrNull() },
+                        schema.items?.let { "array<${it.type.name}>" } ?: "array",
+                        InsertTextFormat.Snippet,
+                    ),
+                )
             }
         }
     }

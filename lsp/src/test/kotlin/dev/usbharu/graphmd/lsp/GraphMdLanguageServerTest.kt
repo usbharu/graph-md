@@ -1830,6 +1830,14 @@ class GraphMdLanguageServerTest {
             "timeline" to ResolvedPropSchema(type = PropType.string),
             "score" to ResolvedPropSchema(type = PropType.number),
             "labels" to ResolvedPropSchema(type = PropType.array, items = ResolvedPropSchema(type = PropType.string)),
+            "durations" to ResolvedPropSchema(
+                type = PropType.array,
+                items = ResolvedPropSchema(type = PropType.duration, timeline = TimelineSelector.Id("ThirdAge")),
+            ),
+            "matrix" to ResolvedPropSchema(
+                type = PropType.array,
+                items = ResolvedPropSchema(type = PropType.array, items = ResolvedPropSchema(type = PropType.number)),
+            ),
             "description" to ResolvedPropSchema(type = PropType.text),
             "activeDuring" to ResolvedPropSchema(type = PropType.duration, timeline = TimelineSelector.Id("ThirdAge")),
         )
@@ -1850,6 +1858,18 @@ class GraphMdLanguageServerTest {
         assertEquals(
             "activeDuring = { timeline = \${1:ThirdAge}, from = \${2:0}, to = \${3:0} }",
             resolve("activeDuring").single { it.label == "activeDuring" }.insertText,
+        )
+        assertEquals(
+            "durations = [ { timeline = \${1:ThirdAge}, from = \${2:0}, to = \${3:0} } ]",
+            resolve("durations").single { it.label == "durations" }.insertText,
+        )
+        assertEquals(
+            "[ { timeline = \${1:ThirdAge}, from = \${2:0}, to = \${3:0} } ]",
+            resolve("durations = ").single().insertText,
+        )
+        assertEquals(
+            "matrix = [ [ \${1:0} ] ]",
+            resolve("matrix").single { it.label == "matrix" }.insertText,
         )
         assertEquals(
             "labels = [ \"\${1:value}\" ]",
@@ -2070,6 +2090,14 @@ class GraphMdLanguageServerTest {
                 type = PropType.array,
                 items = ResolvedPropSchema(type = PropType.string),
             ),
+            "durations" to ResolvedPropSchema(
+                type = PropType.array,
+                items = ResolvedPropSchema(type = PropType.duration, timeline = TimelineSelector.Id("CommonEra")),
+            ),
+            "matrix" to ResolvedPropSchema(
+                type = PropType.array,
+                items = ResolvedPropSchema(type = PropType.array, items = ResolvedPropSchema(type = PropType.number)),
+            ),
         )
         val text = "---\nid: alice\nkind: Node\ntype: Person\nprops:\n  \n---"
         val items = FrontMatterCompletionResolver(
@@ -2094,6 +2122,11 @@ class GraphMdLanguageServerTest {
             items.getValue("activeDuring").insertText,
         )
         assertEquals("labels: [ \"\${1:value}\" ]", items.getValue("labels").insertText)
+        assertEquals(
+            "durations: [ { timeline: \${1:CommonEra}, from: \${2:0}, to: \${3:0} } ]",
+            items.getValue("durations").insertText,
+        )
+        assertEquals("matrix: [ [ \${1:0} ] ]", items.getValue("matrix").insertText)
         assertEquals(InsertTextFormat.PlainText, items.getValue("score").insertTextFormat)
         assertTrue(items.values.filter { it.label != "score" }.all { it.insertTextFormat == InsertTextFormat.Snippet })
 
