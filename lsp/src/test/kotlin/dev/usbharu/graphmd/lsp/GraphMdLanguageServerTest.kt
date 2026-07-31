@@ -240,6 +240,47 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `search keeps working when a document references an unknown validTime timeline`() {
+        val root = Files.createTempDirectory("graphmd-search-invalid-timeline")
+        try {
+            Files.writeString(root.resolve("Person.md"), "---\nid: Person\nkind: NodeType\n---")
+            Files.writeString(
+                root.resolve("broken.md"),
+                """
+                    ---
+                    id: broken
+                    kind: Node
+                    type: Person
+                    validTime:
+                      - timeline: MissingTimeline
+                    ---
+                """.trimIndent(),
+            )
+            Files.writeString(
+                root.resolve("good.md"),
+                "---\nid: good\nkind: Node\ntype: Person\n---",
+            )
+            val server = GraphMdLanguageServer()
+            server.initialize(
+                InitializeParams().apply {
+                    workspaceFolders = listOf(WorkspaceFolder(root.toUri().toString(), "search"))
+                },
+            ).get()
+
+            val result = server.search(
+                GraphMdSearchParams("MATCH (node:Person) RETURN ID(node) AS id ORDER BY id"),
+            ).get()
+
+            assertEquals("good", result.rows.single().values.single())
+            assertTrue(result.diagnostics.any {
+                it.code == "GRAPHMD_COMPILE" && it.message.contains("Unknown Timeline: MissingTimeline")
+            })
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `document change while search compiles cannot populate stale caches`() {
         val compilationStarted = CountDownLatch(1)
         val releaseCompilation = CountDownLatch(1)

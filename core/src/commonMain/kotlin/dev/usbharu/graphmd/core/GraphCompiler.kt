@@ -296,9 +296,13 @@ class GraphCompiler(
         val ids = timelines.map { it.id }.toSet()
         val edges = ids.associateWith { mutableListOf<Edge>() }.toMutableMap()
 
-        fun connect(from: String, to: String, offset: Double, sourcePath: String) {
+        fun connect(from: String, to: String, offset: Double, sourcePath: String, documentId: String) {
+            if (from !in ids) {
+                diagnostics += referenceError("Unknown mapped Timeline: $from", sourcePath, documentId)
+                return
+            }
             if (to !in ids) {
-                diagnostics += referenceError("Unknown mapped Timeline: $to", sourcePath, from)
+                diagnostics += referenceError("Unknown mapped Timeline: $to", sourcePath, documentId)
                 return
             }
             edges.getValue(from) += Edge(to, offset)
@@ -306,7 +310,10 @@ class GraphCompiler(
         }
 
         docs.forEach { doc ->
-            doc.extends.forEach { parent -> if (parent in ids) connect(doc.id, parent, 0.0, doc.sourcePath) }
+            if (doc.id !in ids) return@forEach
+            doc.extends.forEach { parent ->
+                if (parent in ids) connect(doc.id, parent, 0.0, doc.sourcePath, doc.id)
+            }
             doc.mappings.forEach { mapping ->
                 if (mapping is OffsetTimelineMapping) {
                     when {
@@ -314,8 +321,8 @@ class GraphCompiler(
                             diagnostics += schemaError("offset mapping requires exactly one of from or to", doc.sourcePath, doc.id)
                         !mapping.offset.isFinite() ->
                             diagnostics += schemaError("mapping.offset MUST be finite", doc.sourcePath, doc.id)
-                        mapping.to != null -> connect(doc.id, mapping.to, mapping.offset, doc.sourcePath)
-                        mapping.from != null -> connect(mapping.from, doc.id, mapping.offset, doc.sourcePath)
+                        mapping.to != null -> connect(doc.id, mapping.to, mapping.offset, doc.sourcePath, doc.id)
+                        mapping.from != null -> connect(mapping.from, doc.id, mapping.offset, doc.sourcePath, doc.id)
                     }
                 }
             }
