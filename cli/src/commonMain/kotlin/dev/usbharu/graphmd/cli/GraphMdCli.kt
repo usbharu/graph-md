@@ -940,11 +940,19 @@ private fun renderProperties(
     append("NAME\tVALUE\tVALID_TIME\n")
     entries.sortedByKey().forEach { (name, values) ->
         values.forEach { entry ->
+            val continuationPrefix: String
             if (ownerId != null && ownerVisibility != null) {
                 append(ownerId).append('\t').append(ownerVisibility.wireName).append('\t')
+                continuationPrefix = "\t\t\t"
+            } else {
+                continuationPrefix = "\t"
             }
-            append(name).append('\t').append(renderPropertyValue(entry.value)).append('\t')
-            append(renderValidTimes(entry.validTime)).append('\n')
+            val valueLines = renderPropertyValue(entry.value).lines()
+            append(name).append('\t').append(valueLines.first()).append('\t')
+                .append(renderValidTimes(entry.validTime)).append('\n')
+            valueLines.drop(1).forEach { line ->
+                append(continuationPrefix).append(line).append('\n')
+            }
         }
     }
 }
@@ -955,20 +963,101 @@ private fun renderPropertyValue(value: NormalizedValue): String = when (value) {
     is dev.usbharu.graphmd.core.model.NumberValue -> value.value.toString()
     is BooleanValue -> value.value.toString()
     NullValue -> "null"
-    is TextValue -> value.values["default"]?.let(::renderTabularText) ?: value.toJson().encode()
-    else -> value.toJson().encode()
+    is TextValue -> renderNestedEntries("text", value.memberEntries)
+    is ArrayValue -> renderArrayValue(value)
+    is ObjectValue -> renderNestedEntries("object", value.members)
+    is InstantValue -> renderFields(
+        "instant",
+        listOf(
+            "timeline" to renderNullableText(value.timeline),
+            "value" to renderNullableText(value.value),
+            "timecode" to renderTimecode(value.timecode),
+        ),
+    )
+    is DurationValue -> renderFields(
+        "duration",
+        listOf(
+            "timeline" to renderNullableText(value.timeline),
+            "from" to (value.from?.let(::renderTemporalPoint) ?: "null"),
+            "to" to (value.to?.let(::renderTemporalPoint) ?: "null"),
+        ),
+    )
 }
 
 private fun renderTabularText(value: String): String =
-    value.replace("\t", "\\t").replace("\n", "\\n")
+    value.replace("\\", "\\\\").replace("\t", "\\t").replace("\r", "\\r").replace("\n", "\\n")
+
+private fun renderNestedEntries(
+    kind: String,
+    entries: Map<String, NormalizedPropEntry>,
+): String {
+    if (entries.isEmpty()) return "$kind {}"
+    return buildString {
+        append(kind).append(" {\n")
+        entries.sortedByKey().forEach { (name, entry) ->
+            append("  ").append(renderTabularText(name)).append(":\n")
+            append(renderField("value", renderPropertyValue(entry.value), "    ")).append('\n')
+            append("    validTime: ").append(renderValidTimes(entry.validTime)).append('\n')
+        }
+        append('}')
+    }
+}
+
+private fun renderArrayValue(value: ArrayValue): String {
+    if (value.elements.isEmpty()) return "array []"
+    return buildString {
+        append("array [\n")
+        value.elements.forEachIndexed { index, element ->
+            append("  [").append(index).append("]:\n")
+            append(renderField("value", renderPropertyValue(element.value), "    ")).append('\n')
+            append("    validTime: ").append(renderValidTimes(element.validTime)).append('\n')
+        }
+        append(']')
+    }
+}
+
+private fun renderFields(kind: String, fields: List<Pair<String, String>>): String = buildString {
+    append(kind).append(" {\n")
+    fields.forEach { (name, value) ->
+        append(renderField(name, value, "  ")).append('\n')
+    }
+    append('}')
+}
+
+private fun renderField(name: String, value: String, indent: String): String {
+    val lines = value.lines()
+    if (lines.size == 1) return "$indent$name: ${lines.single()}"
+    return buildString {
+        append(indent).append(name).append(":\n")
+        lines.forEachIndexed { index, line ->
+            append(indent).append("  ").append(line)
+            if (index != lines.lastIndex) append('\n')
+        }
+    }
+}
+
+private fun renderNullableText(value: String?): String = value?.let(::renderTabularText) ?: "null"
+
+private fun renderTimecode(value: TimecodeValue): String = when (value) {
+    is NumberTimecode -> value.value.toString()
+}
+
+private fun renderTemporalPoint(value: TemporalPoint): String = renderFields(
+    "timePoint",
+    listOf(
+        "timeline" to renderNullableText(value.timeline),
+        "value" to renderNullableText(value.value),
+        "timecode" to value.timecode.toString(),
+    ),
+)
 
 private fun renderValidTimes(validTimes: List<ValidTime>): String =
     if (validTimes.isEmpty()) {
         "-"
     } else {
         validTimes.joinToString(", ") { validTime ->
-            val from = validTime.from?.timecode?.toString()
-            val to = validTime.to?.timecode?.toString()
+            val from = validTime.from?.let(::renderValidTimePoint)
+            val to = validTime.to?.let(::renderValidTimePoint)
             when {
                 from == null && to == null -> validTime.timeline
                 from == null -> "${validTime.timeline}: – $to"
@@ -977,6 +1066,9 @@ private fun renderValidTimes(validTimes: List<ValidTime>): String =
             }
         }
     }
+
+private fun renderValidTimePoint(value: TimePoint): String =
+    value.value?.let { "${renderTabularText(it)} (${value.timecode})" } ?: value.timecode.toString()
 
 private fun renderRelations(relations: List<NormalizedRelation>, view: TemporalView? = null): String = buildString {
     append("TYPE\tFROM\tFROM_VISIBILITY\tTO\tTO_VISIBILITY\tLABEL\tSOURCE\n")
