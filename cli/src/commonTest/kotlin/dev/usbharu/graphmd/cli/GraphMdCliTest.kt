@@ -476,6 +476,32 @@ class GraphMdCliTest {
     }
 
     @Test
+    fun `human readable links render direct inherited and absent valid times`() {
+        val temporalCli = GraphMdCli(validTimeFixture())
+
+        val shown = temporalCli.run(listOf("show", "alice", "/workspace"))
+        val links = temporalCli.run(listOf("links", "alice", "/workspace"))
+        val timeless = GraphMdCli(linkFixture()).run(listOf("links", "alice", "/workspace"))
+        val header = "TYPE\tFROM\tFROM_VISIBILITY\tTO\tTO_VISIBILITY\tLABEL\tVALID_TIME\tSOURCE\n"
+        val direct = "related\talice\tfull\terin\tfull\tErin\tCommonEra: 12.0 – 18.0\t/workspace/alice.md\n"
+        val inherited = "related\talice\tfull\tbob\tfull\tBob\tCommonEra: 10.0 – 20.0\t/workspace/alice.md\n"
+        val absent = "friend\talice\tfull\tbob\tfull\tBob\t-\t/workspace/alice.md\n"
+
+        assertEquals(0, shown.exitCode, shown.stderr)
+        assertTrue(shown.stdout.contains(header))
+        assertTrue(shown.stdout.contains(direct))
+        assertTrue(shown.stdout.contains(inherited))
+
+        assertEquals(0, links.exitCode, links.stderr)
+        assertTrue(links.stdout.contains(header))
+        assertTrue(links.stdout.contains(direct))
+        assertTrue(links.stdout.contains(inherited))
+
+        assertEquals(0, timeless.exitCode, timeless.stderr)
+        assertTrue(timeless.stdout.contains(absent))
+    }
+
+    @Test
     fun `stats counts filtered graph items`() {
         val result = GraphMdCli(linkFixture()).run(
             listOf("stats", "/workspace", "--kind", "node", "--kind", "link", "--json"),
@@ -947,7 +973,7 @@ class GraphMdCliTest {
                   name(validTime=CommonEra(from=15,to=20)) = "new"
                 }
                 @link(validTime=CommonEra(from=12,to=18))[Erin](erin related)
-                @link(validTime=CommonEra(from=12,to=18))[Bob](bob related)
+                @link[Bob](bob related)
             """.trimIndent(),
             "/workspace/bob.md" to node("bob", "Person"),
             "/workspace/carol.md" to """

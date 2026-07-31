@@ -1071,13 +1071,15 @@ private fun renderValidTimePoint(value: TimePoint): String =
     value.value?.let { "${renderTabularText(it)} (${value.timecode})" } ?: value.timecode.toString()
 
 private fun renderRelations(relations: List<NormalizedRelation>, view: TemporalView? = null): String = buildString {
-    append("TYPE\tFROM\tFROM_VISIBILITY\tTO\tTO_VISIBILITY\tLABEL\tSOURCE\n")
+    append("TYPE\tFROM\tFROM_VISIBILITY\tTO\tTO_VISIBILITY\tLABEL\tVALID_TIME\tSOURCE\n")
     relations.forEach { relation ->
         append(relation.type).append('\t')
             .append(relation.from).append('\t')
             .append((view?.visibility(relation.from) ?: Visibility.Full).wireName).append('\t')
             .append(relation.to).append('\t')
             .append((view?.visibility(relation.to) ?: Visibility.Full).wireName).append('\t')
-            .append(relation.sourceLabel).append('\t').append(relation.source.path).append('\n')
+            .append(relation.sourceLabel).append('\t')
+            .append(renderValidTimes(relation.validTime)).append('\t')
+            .append(relation.source.path).append('\n')
     }
 }
