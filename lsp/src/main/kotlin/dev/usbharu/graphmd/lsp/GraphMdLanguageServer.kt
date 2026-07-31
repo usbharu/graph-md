@@ -32,6 +32,7 @@ class GraphMdLanguageServer : LanguageServer, LanguageClientAware, GraphMdSearch
     private val workspaceService = GraphMdWorkspaceService(this, workspaceIndex)
     private var client: LanguageClient? = null
     private var shutdownRequested = false
+    private val publishedDiagnosticUris = mutableSetOf<String>()
 
     override fun initialize(params: InitializeParams): CompletableFuture<InitializeResult> {
         val roots = params.workspaceFolders.orEmpty().map { Paths.get(URI.create(it.uri)) }
@@ -86,11 +87,18 @@ class GraphMdLanguageServer : LanguageServer, LanguageClientAware, GraphMdSearch
     override fun searchMetadata(): CompletableFuture<GraphMdSearchMetadata> =
         CompletableFuture.supplyAsync { workspaceIndex.searchMetadata() }
 
+    @Synchronized
     fun publishDiagnostics() {
         val client = client ?: return
-        workspaceIndex.diagnosticsByUri().forEach { (uri, diagnostics) ->
+        val diagnosticsByUri = workspaceIndex.diagnosticsByUri()
+        diagnosticsByUri.forEach { (uri, diagnostics) ->
             client.publishDiagnostics(PublishDiagnosticsParams(uri, diagnostics))
         }
+        (publishedDiagnosticUris - diagnosticsByUri.keys).forEach { uri ->
+            client.publishDiagnostics(PublishDiagnosticsParams(uri, emptyList()))
+        }
+        publishedDiagnosticUris.clear()
+        publishedDiagnosticUris += diagnosticsByUri.keys
     }
 
     fun languageClient(): LanguageClient? = client

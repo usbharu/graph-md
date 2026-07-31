@@ -1853,6 +1853,123 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `deleting a watched file clears its published diagnostics`() {
+        val root = Files.createTempDirectory("graphmd-lsp-delete-diagnostics")
+        try {
+            val file = root.resolve("timeline.md")
+            val uri = file.toUri().toString()
+            Files.writeString(file, graphDocument("INVALID ID@", "Timeline"))
+            val client = RecordingLanguageClient()
+            val server = initializedServer(root, client)
+
+            assertTrue(client.latest(uri).any { it.message == invalidIdWarning })
+            client.notifications.clear()
+
+            Files.delete(file)
+            server.workspaceService.didChangeWatchedFiles(
+                DidChangeWatchedFilesParams(listOf(FileEvent(uri, FileChangeType.Deleted))),
+            )
+
+            assertEquals(1, client.notifications.count { it.uri == uri })
+            assertTrue(client.notifications.single { it.uri == uri }.diagnostics.isEmpty())
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `deleting a clean watched file publishes one empty clear`() {
+        val root = Files.createTempDirectory("graphmd-lsp-delete-clean")
+        try {
+            val file = root.resolve("timeline.md")
+            val uri = file.toUri().toString()
+            Files.writeString(file, graphDocument("timeline", "Timeline"))
+            val client = RecordingLanguageClient()
+            val server = initializedServer(root, client)
+
+            assertTrue(client.latest(uri).isEmpty())
+            client.notifications.clear()
+
+            Files.delete(file)
+            server.workspaceService.didChangeWatchedFiles(
+                DidChangeWatchedFilesParams(listOf(FileEvent(uri, FileChangeType.Deleted))),
+            )
+            server.workspaceService.didChangeWatchedFiles(
+                DidChangeWatchedFilesParams(listOf(FileEvent(uri, FileChangeType.Deleted))),
+            )
+
+            assertEquals(1, client.notifications.count { it.uri == uri })
+            assertTrue(client.notifications.single { it.uri == uri }.diagnostics.isEmpty())
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `deleting an untracked non-markdown file does not publish diagnostics`() {
+        val root = Files.createTempDirectory("graphmd-lsp-delete-non-markdown")
+        try {
+            val file = root.resolve("notes.txt")
+            val uri = file.toUri().toString()
+            Files.writeString(file, "not markdown")
+            val client = RecordingLanguageClient()
+            val server = initializedServer(root, client)
+            client.notifications.clear()
+
+            Files.delete(file)
+            server.workspaceService.didChangeWatchedFiles(
+                DidChangeWatchedFilesParams(listOf(FileEvent(uri, FileChangeType.Deleted))),
+            )
+
+            assertTrue(client.notifications.none { it.uri == uri })
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `disk deletion keeps open overlay diagnostics and recreate publishes diagnostics again`() {
+        val root = Files.createTempDirectory("graphmd-lsp-delete-open-recreate")
+        try {
+            val file = root.resolve("timeline.md")
+            val uri = file.toUri().toString()
+            Files.writeString(file, graphDocument("timeline", "Timeline"))
+            val client = RecordingLanguageClient()
+            val server = initializedServer(root, client)
+            server.textDocumentService.didOpen(
+                DidOpenTextDocumentParams(
+                    TextDocumentItem(uri, "markdown", 1, graphDocument("INVALID ID@", "Timeline")),
+                ),
+            )
+            assertTrue(client.latest(uri).any { it.message == invalidIdWarning })
+            client.notifications.clear()
+
+            Files.delete(file)
+            server.workspaceService.didChangeWatchedFiles(
+                DidChangeWatchedFilesParams(listOf(FileEvent(uri, FileChangeType.Deleted))),
+            )
+            assertTrue(client.notifications.single { it.uri == uri }.diagnostics.any {
+                it.message == invalidIdWarning
+            })
+
+            server.textDocumentService.didClose(DidCloseTextDocumentParams(TextDocumentIdentifier(uri)))
+            assertTrue(client.latest(uri).isEmpty())
+            client.notifications.clear()
+
+            Files.writeString(file, graphDocument("INVALID ID@", "Timeline"))
+            server.workspaceService.didChangeWatchedFiles(
+                DidChangeWatchedFilesParams(listOf(FileEvent(uri, FileChangeType.Created))),
+            )
+
+            assertTrue(client.notifications.single { it.uri == uri }.diagnostics.any {
+                it.message == invalidIdWarning
+            })
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `watched file events do not replace open document diagnostics`() {
         val root = Files.createTempDirectory("graphmd-lsp-open-documents")
         try {
@@ -2598,6 +2715,17 @@ class GraphMdLanguageServerTest {
         kind: $kind
         ---
     """.trimIndent()
+
+    private fun initializedServer(root: Path, client: RecordingLanguageClient): GraphMdLanguageServer =
+        GraphMdLanguageServer().also { server ->
+            server.connect(client)
+            server.initialize(
+                InitializeParams().apply {
+                    workspaceFolders = listOf(WorkspaceFolder(root.toUri().toString(), "workspace"))
+                },
+            ).get()
+            server.initialized(InitializedParams())
+        }
 
     private class RecordingLanguageClient : LanguageClient {
         val notifications = mutableListOf<PublishDiagnosticsParams>()
