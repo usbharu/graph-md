@@ -665,6 +665,199 @@ class GraphDocumentAnalyzerTest {
     }
 
     @Test
+    fun `extracts legacy Property Schema timeline selector ids with precise ranges`() {
+        val text = """
+            ---
+            id: Event
+            kind: NodeType
+            props:
+              happenedAt:
+                type: instant
+                timeline:
+                  - CommonEra:
+                      mapped: true
+                  - id: 'ThirdAge' # explicit selector
+                    mapped: false
+              history:
+                type: array
+                items:
+                  type: instant
+                  timelines:
+                    - "Branch":
+                        mapped: false
+                    - { id: ProjectEra, mapped: true }
+              inline:
+                type: duration
+                timeline: [{ FlowEra: { mapped: false } }, { id: "QuotedEra", mapped: true }]
+            ---
+        """.trimIndent()
+
+        val analysis = analyzer.analyze(text, "/tmp/event.md")
+        val selectors = analysis.references.filter { it.kind == ReferenceTargetKind.Timeline }
+
+        assertEquals(
+            listOf("CommonEra", "ThirdAge", "Branch", "ProjectEra", "FlowEra", "QuotedEra"),
+            selectors.map { it.targetId },
+        )
+        selectors.forEach { reference ->
+            assertEquals(reference.targetId, analysis.text.substring(reference.range.start, reference.range.end))
+            assertEquals(reference.targetId, analyzer.findReferenceAt(analysis, reference.range.start + 1)?.targetId)
+        }
+        assertEquals(listOf("Event"), analysis.definitions.map { it.id })
+    }
+
+    @Test
+    fun `extracts current Property Schema timeline selector with quotes comments and CRLF`() {
+        val text = """
+            ---
+            id: Event
+            kind: RelType
+            props:
+              happenedAt:
+                type: instant
+                timeline: "CommonEra" # keep quotes on rename
+            ---
+        """.trimIndent().replace("\n", "\r\n")
+
+        val analysis = analyzer.analyze(text, "/tmp/event.md")
+        val reference = analysis.references.single { it.kind == ReferenceTargetKind.Timeline }
+
+        assertEquals("CommonEra", reference.targetId)
+        assertEquals("CommonEra", analysis.text.substring(reference.range.start, reference.range.end))
+        assertEquals('"', analysis.text[reference.range.start - 1])
+        assertEquals('"', analysis.text[reference.range.end])
+        assertEquals("Event", analysis.definitions.single().id)
+    }
+
+    @Test
+    fun `extracts explicit legacy selector id regardless of sibling order or extra fields`() {
+        fun selectorIds(kind: String): Pair<List<String>, List<String>> {
+            val text = """
+                ---
+                id: Event
+                kind: $kind
+                props:
+                  when:
+                    type: instant
+                    timeline:
+                      - id: IdFirst
+                        mapped: false
+                      - mapped: true
+                        id: MappedFirst
+                      - extra: ignored
+                        mapped: false
+                        id: WithExtra
+                      - CompactPlusTwo:
+                        mapped: true
+                      - CompactPlusFour:
+                          mapped: true
+                      - CompactDeep:
+                            mapped: true
+                      - BodyOrder:
+                        extra: ignored
+                        mapped: false
+                      - Ambiguous:
+                        id: NestedId
+                        mapped: true
+                      - id:
+                        id: NestedExplicitId
+                        mapped: false
+                      - mapped:
+                        id: NestedMappedId
+                        mapped: true
+                ---
+            """.trimIndent()
+            val analysis = analyzer.analyze(text, "/tmp/$kind.md")
+            return analysis.references.filter { it.kind == ReferenceTargetKind.Timeline }.map { it.targetId } to
+                analysis.definitions.map { it.id }
+        }
+
+        val expected = listOf(
+            "IdFirst",
+            "MappedFirst",
+            "WithExtra",
+            "CompactPlusTwo",
+            "CompactPlusFour",
+            "CompactDeep",
+            "BodyOrder",
+            "Ambiguous",
+        ) to listOf("Event")
+        assertEquals(expected, selectorIds("NodeType"))
+        assertEquals(expected, selectorIds("RelType"))
+    }
+
+    @Test
+    fun `decodes double quoted selector escapes while preserving raw ranges`() {
+        val text = """
+            ---
+            id: Event
+            kind: NodeType
+            props:
+              current:
+                type: instant
+                timeline: "Line\nEra"
+              explicit:
+                type: instant
+                timeline:
+                  - id: "Quote\"Era"
+                    mapped: false
+              compact:
+                type: instant
+                timeline:
+                  - "Slash\\Era":
+                      mapped: true
+              flow:
+                type: instant
+                timeline: [{ id: "Tab\tEra", mapped: false }]
+            ---
+        """.trimIndent()
+
+        val references = analyzer.analyze(text, "/tmp/event.md").references
+            .filter { it.kind == ReferenceTargetKind.Timeline }
+
+        assertEquals(listOf("Line\nEra", "Quote\"Era", "Slash\\Era", "Tab\tEra"), references.map { it.targetId })
+        assertEquals(
+            listOf("""Line\nEra""", """Quote\"Era""", """Slash\\Era""", """Tab\tEra"""),
+            references.map { text.substring(it.range.start, it.range.end) },
+        )
+    }
+
+    @Test
+    fun `indexes timeline fields only in direct or items Property Schema contexts`() {
+        val text = """
+            ---
+            id: Event
+            kind: NodeType
+            props:
+              direct:
+                type: instant
+                timeline: Direct
+                meta:
+                  timeline: Metadata
+              nested:
+                type: array
+                items:
+                  type: array
+                  metadata:
+                    timeline: ItemMetadata
+                  items:
+                    type: instant
+                    timeline: Nested
+              other:
+                type: string
+                unknown:
+                  items:
+                    timeline: UnknownItems
+            ---
+        """.trimIndent()
+
+        val references = analyzer.analyze(text, "/tmp/event.md").references
+            .filter { it.kind == ReferenceTargetKind.Timeline }
+
+        assertEquals(listOf("Direct", "Nested"), references.map { it.targetId })
+    }
+
+    @Test
     fun `extracts quoted nested Timeline scalars without quotes or false positives`() {
         val text = """
             ---

@@ -286,7 +286,7 @@ internal class GraphMdWorkspaceIndex(
     private fun indexedDocument(uri: String, text: String): IndexedDocument {
         val path = Paths.get(URI.create(uri))
         val analysis = analyzer.analyze(text, path.toString())
-        return IndexedDocument(uri, path, text, analysis)
+        return IndexedDocument(uri, path, analysis.text, analysis)
     }
 
     private fun upsertNormalized(document: IndexedDocument) {

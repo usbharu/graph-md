@@ -842,6 +842,119 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `legacy Property Schema timeline selectors support definition references rename and diagnostics`() {
+        val timelineUri = "file:///workspace/timelines/CommonEra.md"
+        val schemaUri = "file:///workspace/types/Event.md"
+        val schemaText = """
+            ---
+            id: Event
+            kind: NodeType
+            props:
+              compact:
+                type: instant
+                timeline:
+                  - CommonEra:
+                    mapped: false
+              explicit:
+                type: instant
+                timeline:
+                  - mapped: true
+                    extra: ignored
+                    id: "CommonEra"
+              missingCompact:
+                type: instant
+                timeline:
+                  - MissingCompact:
+                    mapped: false
+              missingExplicit:
+                type: instant
+                timeline:
+                  - mapped: false
+                    id: 'MissingExplicit'
+            ---
+        """.trimIndent()
+        val fixture = serverFixture(
+            mapOf(
+                timelineUri to "---\r\nid: CommonEra\r\nkind: Timeline\r\n---",
+                schemaUri to schemaText,
+            ),
+        )
+        val compactOffset = schemaText.indexOf("CommonEra:")
+        val explicitOffset = schemaText.indexOf("\"CommonEra\"") + 1
+
+        assertEquals(timelineUri, fixture.definitions(schemaUri, compactOffset + 1).single().uri)
+        assertEquals(timelineUri, fixture.definitions(schemaUri, explicitOffset + 1).single().uri)
+        assertEquals(3, fixture.references(schemaUri, compactOffset + 1).size)
+
+        val rename = assertNotNull(fixture.rename(schemaUri, explicitOffset + 1, "SharedEra"))
+        assertEquals(3, rename.changes.values.sumOf { it.size })
+        val timelineEdit = rename.changes.getValue(timelineUri).single()
+        assertEquals(Range(Position(1, 4), Position(1, 13)), timelineEdit.range)
+        val schemaEdits = rename.changes.getValue(schemaUri)
+        assertEquals(2, schemaEdits.size)
+        assertTrue(schemaEdits.all { it.newText == "SharedEra" })
+        assertEquals(
+            setOf(positionAt(schemaText, compactOffset), positionAt(schemaText, explicitOffset)),
+            schemaEdits.map { it.range.start }.toSet(),
+        )
+
+        val missingCompactOffset = schemaText.indexOf("MissingCompact:")
+        val missingExplicitOffset = schemaText.indexOf("'MissingExplicit'") + 1
+        val missingCompact = fixture.diagnostics.getValue(schemaUri).single { it.message == "Unknown Timeline: MissingCompact" }
+        val missingExplicit = fixture.diagnostics.getValue(schemaUri).single { it.message == "Unknown Timeline: MissingExplicit" }
+        assertEquals(positionAt(schemaText, missingCompactOffset), missingCompact.range.start)
+        assertEquals(positionAt(schemaText, missingCompactOffset + "MissingCompact".length), missingCompact.range.end)
+        assertEquals(positionAt(schemaText, missingExplicitOffset), missingExplicit.range.start)
+        assertEquals(positionAt(schemaText, missingExplicitOffset + "MissingExplicit".length), missingExplicit.range.end)
+    }
+
+    @Test
+    fun `double quoted selector escapes resolve rename and locate diagnostics by raw range`() {
+        val timelineUri = "file:///workspace/timelines/CommonqEra.md"
+        val schemaUri = "file:///workspace/types/EscapedEvent.md"
+        val timelineText = """
+            ---
+            id: "Common\qEra"
+            kind: Timeline
+            ---
+        """.trimIndent()
+        val schemaText = """
+            ---
+            id: EscapedEvent
+            kind: NodeType
+            props:
+              known:
+                type: instant
+                timeline: "Common\qEra"
+              missing:
+                type: instant
+                timeline:
+                  - id: "Missing\qEra"
+                    mapped: false
+            ---
+        """.trimIndent()
+        val fixture = serverFixture(mapOf(timelineUri to timelineText, schemaUri to schemaText))
+        val knownOffset = schemaText.indexOf("""Common\qEra""")
+
+        assertEquals(timelineUri, fixture.definitions(schemaUri, knownOffset + 1).single().uri)
+        assertEquals(2, fixture.references(schemaUri, knownOffset + 1).size)
+        val rename = assertNotNull(fixture.rename(schemaUri, knownOffset + 1, "RenamedEra"))
+        assertEquals(2, rename.changes.values.sumOf { it.size })
+        assertEquals(
+            Range(positionAt(schemaText, knownOffset), positionAt(schemaText, knownOffset + """Common\qEra""".length)),
+            rename.changes.getValue(schemaUri).single().range,
+        )
+
+        val missingRaw = """Missing\qEra"""
+        val missingOffset = schemaText.indexOf(missingRaw)
+        val diagnostic = fixture.diagnostics.getValue(schemaUri).single { it.message == "Unknown Timeline: MissingqEra" }
+        assertEquals(
+            Range(positionAt(schemaText, missingOffset), positionAt(schemaText, missingOffset + missingRaw.length)),
+            diagnostic.range,
+        )
+    }
+
+    @Test
     fun `nested front matter id and type do not participate in navigation rename or diagnostics`() {
         val typeUri = "file:///workspace/types/Person.md"
         val nodeUri = "file:///workspace/alice.md"
@@ -2898,6 +3011,11 @@ class GraphMdLanguageServerTest {
         ---
     """.trimIndent()
 
+    private fun positionAt(text: String, offset: Int): Position {
+        val line = text.substring(0, offset).count { it == '\n' }
+        val lineStart = text.lastIndexOf('\n', offset - 1).let { if (it < 0) 0 else it + 1 }
+        return Position(line, offset - lineStart)
+    }
     private fun initializedServer(root: Path, client: RecordingLanguageClient): GraphMdLanguageServer =
         GraphMdLanguageServer().also { server ->
             server.connect(client)
@@ -2960,6 +3078,28 @@ class GraphMdLanguageServerTest {
             return server.textDocumentService.definition(
                 DefinitionParams(TextDocumentIdentifier(uri), Position(line, offset - lineStart)),
             ).get().left.orEmpty()
+        }
+
+        fun references(uri: String, offset: Int): List<org.eclipse.lsp4j.Location> {
+            val text = documents.getValue(uri)
+            val line = text.substring(0, offset).count { it == '\n' }
+            val lineStart = text.lastIndexOf('\n', offset - 1).let { if (it < 0) 0 else it + 1 }
+            return server.textDocumentService.references(
+                ReferenceParams(
+                    TextDocumentIdentifier(uri),
+                    Position(line, offset - lineStart),
+                    ReferenceContext(true),
+                ),
+            ).get()
+        }
+
+        fun rename(uri: String, offset: Int, newName: String): org.eclipse.lsp4j.WorkspaceEdit? {
+            val text = documents.getValue(uri)
+            val line = text.substring(0, offset).count { it == '\n' }
+            val lineStart = text.lastIndexOf('\n', offset - 1).let { if (it < 0) 0 else it + 1 }
+            return server.textDocumentService.rename(
+                RenameParams(TextDocumentIdentifier(uri), Position(line, offset - lineStart), newName),
+            ).get()
         }
 
         fun actions(uri: String, message: String): List<CodeAction> {
