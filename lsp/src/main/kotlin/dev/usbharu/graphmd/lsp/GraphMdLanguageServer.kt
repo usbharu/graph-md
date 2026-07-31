@@ -1769,6 +1769,9 @@ internal class GraphMdWorkspaceIndex(
             diagnostic.message.startsWith("id MUST match ") ||
             diagnostic.message == "RelType id MUST NOT contain whitespace"
         ) {
+            document.analysis.definitions.singleOrNull()?.range
+                ?.let(document::analysisRangeOf)
+                ?.let { return it }
             frontMatterScalar(document.text, "id")
                 ?.let { document.yamlScalarRange("id", it) }
                 ?.let { return it }
@@ -2944,11 +2947,19 @@ private data class IndexedDocument(
     }
 
     fun bodyRangeOf(sourceRange: SourceRange): Range {
-        val bodyOffset = analysis.frontMatterEndOffset
-        return Range(
-            normalizedPositionAt(bodyOffset + sourceRange.start),
-            normalizedPositionAt(bodyOffset + sourceRange.end),
-        )
+        val bodyStart = positionAt(analysis.frontMatterEndOffset)
+        val normalizedBody = analysis.parsed.document?.body.orEmpty()
+        fun bodyPosition(offset: Int): Position {
+            val safeOffset = offset.coerceIn(0, normalizedBody.length)
+            val before = normalizedBody.substring(0, safeOffset)
+            val relativeLine = before.count { it == '\n' }
+            val relativeLineStart = before.lastIndexOf('\n').let { if (it < 0) 0 else it + 1 }
+            return Position(
+                bodyStart.line + relativeLine,
+                (if (relativeLine == 0) bodyStart.character else 0) + safeOffset - relativeLineStart,
+            )
+        }
+        return Range(bodyPosition(sourceRange.start), bodyPosition(sourceRange.end))
     }
 
     fun endRange(): Range = rangeOf(SourceRange(text.length, text.length))

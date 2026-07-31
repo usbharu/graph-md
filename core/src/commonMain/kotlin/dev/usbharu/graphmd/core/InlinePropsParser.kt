@@ -187,7 +187,7 @@ class InlinePropsParser(private val input: String) {
 
     private fun parseValidTimeEntry(): ParsedValidTimeEntry {
         val timelineStart = index
-        val timeline = parseIdentifier()
+        val timeline = parseReferenceId()
         val reference = InlineTimelineReference(
             timeline,
             "validTime.timeline",
@@ -227,6 +227,19 @@ class InlinePropsParser(private val input: String) {
             '"' -> SourceRange(start + 1, (end - 1).coerceAtLeast(start + 1))
             else -> SourceRange(start, end)
         }
+    }
+
+    private fun parseReferenceId(): String {
+        val start = index
+        if (peek() in setOf('"', '\'')) fail("Expected unquoted reference ID")
+        while (peek()?.let { char ->
+                !char.isWhitespace() && char !in setOf(',', '(', ')', '[', ']', '{', '}', '=')
+            } == true
+        ) {
+            advance()
+        }
+        if (index == start) fail("Expected reference ID")
+        return input.substring(start, index)
     }
 
     private data class KeyAnnotation(

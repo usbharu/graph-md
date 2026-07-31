@@ -5,6 +5,7 @@ import kotlinx.io.buffered
 import kotlinx.io.files.Path
 import kotlinx.io.files.SystemFileSystem
 import kotlinx.io.readByteArray
+import kotlinx.io.writeString
 
 internal enum class FileKind { File, Directory, Other }
 
@@ -13,6 +14,10 @@ internal interface CliFileSystem {
     fun canonical(path: String): String
     fun children(path: String): List<String>
     fun readText(path: String): String
+    fun child(path: String, name: String): String
+    fun createDirectories(path: String)
+    fun writeText(path: String, text: String)
+    fun delete(path: String, mustExist: Boolean = true)
 }
 
 internal object SystemCliFileSystem : CliFileSystem {
@@ -32,6 +37,20 @@ internal object SystemCliFileSystem : CliFileSystem {
 
     override fun readText(path: String): String =
         SystemFileSystem.source(Path(path)).buffered().use { it.readByteArray().decodeToString() }
+
+    override fun child(path: String, name: String): String = Path(Path(path), name).toString()
+
+    override fun createDirectories(path: String) {
+        SystemFileSystem.createDirectories(Path(path))
+    }
+
+    override fun writeText(path: String, text: String) {
+        SystemFileSystem.sink(Path(path)).buffered().use { it.writeString(text) }
+    }
+
+    override fun delete(path: String, mustExist: Boolean) {
+        SystemFileSystem.delete(Path(path), mustExist)
+    }
 }
 
 internal class WorkspaceLoader(

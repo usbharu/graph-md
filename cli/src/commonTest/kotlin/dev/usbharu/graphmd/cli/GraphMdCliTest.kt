@@ -1,11 +1,94 @@
 package dev.usbharu.graphmd.cli
 
+import dev.usbharu.graphmd.core.GraphCompiler
+import dev.usbharu.graphmd.core.model.CompileOptions
+import dev.usbharu.graphmd.core.model.SourceDocument
+import dev.usbharu.graphmd.core.model.ValidationMode
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class GraphMdCliTest {
+    @Test
+    fun `demo generates a valid minimum dataset and reports its seed`() {
+        val fs = FakeFileSystem(emptyMap())
+
+        val result = GraphMdCli(fs).run(listOf("demo", "/demo", "--count", "3", "--seed", "42", "--json"))
+
+        assertEquals(0, result.exitCode, result.stderr)
+        assertTrue(result.stdout.contains("\"requestedCount\":3"))
+        assertTrue(result.stdout.contains("\"generatedCount\":8"))
+        assertTrue(result.stdout.contains("\"seed\":42"))
+        assertEquals(8, fs.contentsUnder("/demo").size)
+        val generated = fs.contentsUnder("/demo").values
+        assertTrue(generated.count { "kind: Timeline" in it } >= 2)
+        assertTrue(generated.count { "kind: NodeType" in it } >= 2)
+        assertTrue(generated.count { "kind: RelType" in it } >= 2)
+        assertTrue(generated.any { "kind: Media" in it })
+        assertTrue(generated.any { "@link(" in it })
+        assertTrue(generated.any { "この" in it })
+        assertTrue(generated.any { "This " in it })
+    }
+
+    @Test
+    fun `demo is reproducible with a seed and varies with another seed`() {
+        val first = FakeFileSystem(emptyMap())
+        val second = FakeFileSystem(emptyMap())
+        val different = FakeFileSystem(emptyMap())
+
+        assertEquals(0, GraphMdCli(first).run(listOf("demo", "/demo", "--count", "20", "--seed", "7")).exitCode)
+        assertEquals(0, GraphMdCli(second).run(listOf("demo", "/demo", "--count", "20", "--seed", "7")).exitCode)
+        assertEquals(0, GraphMdCli(different).run(listOf("demo", "/demo", "--count", "20", "--seed", "8")).exitCode)
+
+        assertEquals(first.contentsUnder("/demo"), second.contentsUnder("/demo"))
+        assertFalse(first.contentsUnder("/demo") == different.contentsUnder("/demo"))
+    }
+
+    @Test
+    fun `streamed demo documents pass strict validation with multi-parent inheritance`() {
+        val plan = DemoGenerator.plan(requestedCount = 250, requestedSeed = 99)
+        val compilation = GraphCompiler(CompileOptions(mode = ValidationMode.Strict)).compileSources(
+            plan.documents().map { SourceDocument(it.text, it.fileName) }.toList(),
+        )
+
+        assertEquals(250, plan.generatedCount)
+        assertTrue(compilation.diagnostics.isEmpty(), compilation.diagnostics.joinToString("\n") { it.message })
+    }
+
+    @Test
+    fun `million document plan stays lazy and derives final file name`() {
+        val plan = DemoGenerator.plan(requestedCount = 1_000_000, requestedSeed = 42)
+
+        assertEquals(1_000_000, plan.generatedCount)
+        assertEquals(3, plan.documents().take(3).count())
+        assertTrue(plan.fileNameAt(plan.generatedCount - 1).startsWith("media-"))
+    }
+
+    @Test
+    fun `demo rejects invalid arguments and non-empty output`() {
+        val invalidCount = GraphMdCli(FakeFileSystem(emptyMap())).run(listOf("demo", "/demo", "--count", "0"))
+        val missingCount = GraphMdCli(FakeFileSystem(emptyMap())).run(listOf("demo", "/demo"))
+        val nonEmptyFs = FakeFileSystem(mapOf("/demo/keep.txt" to "keep"))
+        val nonEmpty = GraphMdCli(nonEmptyFs).run(listOf("demo", "/demo", "--count", "8"))
+
+        assertEquals(1, invalidCount.exitCode)
+        assertEquals(1, missingCount.exitCode)
+        assertEquals(1, nonEmpty.exitCode)
+        assertEquals(mapOf("/demo/keep.txt" to "keep"), nonEmptyFs.contentsUnder("/demo"))
+    }
+
+    @Test
+    fun `demo removes files and a newly created directory after write failure`() {
+        val fs = FakeFileSystem(emptyMap(), failWriteAt = 2)
+
+        val result = GraphMdCli(fs).run(listOf("demo", "/demo", "--count", "8", "--seed", "42"))
+
+        assertEquals(1, result.exitCode)
+        assertTrue(fs.contentsUnder("/demo").isEmpty())
+        assertEquals(null, fs.kind("/demo"))
+    }
+
     @Test
     fun `list supports repeated kind and type filters`() {
         val cli = fixtureCli()
@@ -720,10 +803,13 @@ class GraphMdCliTest {
 }
 
 private class FakeFileSystem(
-    private val files: Map<String, String>,
+    files: Map<String, String>,
     private val aliases: Map<String, String> = emptyMap(),
+    private val failWriteAt: Int? = null,
 ) : CliFileSystem {
-    private val directories: Set<String> = buildSet {
+    private val mutableFiles = files.toMutableMap()
+    private var writeCount = 0
+    private val directories: MutableSet<String> = buildSet {
         add("/")
         files.keys.forEach { file ->
             var current = file.substringBeforeLast('/', missingDelimiterValue = "/")
@@ -733,10 +819,10 @@ private class FakeFileSystem(
                 current = current.substringBeforeLast('/', missingDelimiterValue = "/")
             }
         }
-    }
+    }.toMutableSet()
 
     override fun kind(path: String): FileKind? = when (canonical(path)) {
-        in files -> FileKind.File
+        in mutableFiles -> FileKind.File
         in directories -> FileKind.Directory
         else -> null
     }
@@ -751,11 +837,41 @@ private class FakeFileSystem(
 
     override fun children(path: String): List<String> {
         val prefix = canonical(path).let { if (it == "/") "/" else "$it/" }
-        return (files.keys + directories)
+        return (mutableFiles.keys + directories)
             .filter { it.startsWith(prefix) && it != path }
             .filter { it.removePrefix(prefix).let { rest -> '/' !in rest } }
             .distinct()
     }
 
-    override fun readText(path: String): String = files.getValue(canonical(path))
+    override fun readText(path: String): String = mutableFiles.getValue(canonical(path))
+
+    override fun child(path: String, name: String): String =
+        canonical(path).let { if (it == "/") "/$name" else "$it/$name" }
+
+    override fun createDirectories(path: String) {
+        val canonical = canonical(path)
+        var current = canonical
+        while (current.isNotEmpty()) {
+            directories += current
+            if (current == "/") break
+            current = current.substringBeforeLast('/', missingDelimiterValue = "/")
+        }
+    }
+
+    override fun writeText(path: String, text: String) {
+        writeCount++
+        if (writeCount == failWriteAt) error("simulated write failure")
+        mutableFiles[canonical(path)] = text
+    }
+
+    override fun delete(path: String, mustExist: Boolean) {
+        val canonical = canonical(path)
+        val removed = mutableFiles.remove(canonical) != null || directories.remove(canonical)
+        if (mustExist && !removed) error("Path does not exist: $path")
+    }
+
+    fun contentsUnder(path: String): Map<String, String> {
+        val prefix = canonical(path).let { if (it == "/") "/" else "$it/" }
+        return mutableFiles.filterKeys { it.startsWith(prefix) }.toSortedMap()
+    }
 }

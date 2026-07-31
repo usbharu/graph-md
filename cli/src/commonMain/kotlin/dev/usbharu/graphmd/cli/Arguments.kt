@@ -92,12 +92,19 @@ internal sealed interface CliCommand {
         override val paths: List<String>,
         val parameters: Map<String, String>,
     ) : CliCommand
+
+    data class Demo(
+        val outputDirectory: String,
+        val requestedCount: Int,
+        val seed: Int?,
+        override val paths: List<String> = emptyList(),
+    ) : CliCommand
 }
 
 internal sealed interface ParseResult {
     data class Run(val command: CliCommand, val json: Boolean) : ParseResult
     data class Print(val text: String) : ParseResult
-    data class Error(val message: String) : ParseResult
+    data class Error(val message: String, val exitCode: Int = 2) : ParseResult
 }
 
 internal object CliArguments {
@@ -116,7 +123,7 @@ internal object CliArguments {
         return try {
             ParseResult.Run(parseCommand(operation, tokens), json)
         } catch (exception: CliUsageException) {
-            ParseResult.Error(exception.message ?: "Invalid arguments")
+            ParseResult.Error(exception.message ?: "Invalid arguments", if (operation == "demo") 1 else 2)
         }
     }
 
@@ -207,6 +214,17 @@ internal object CliArguments {
                 }
                 CliCommand.Search(query, queryFile, paths, parameters)
             }
+            "demo" -> {
+                parsed.reject(setOf("count", "seed"))
+                if (parsed.positionals.size != 1) usage("demo requires exactly one output directory")
+                val count = checkNotNull(parsed.singleValue("count", required = true))
+                    .toIntOrNull()
+                    ?.takeIf { it > 0 }
+                    ?: usage("--count must be a positive integer")
+                val seed = parsed.singleValue("seed", required = false)?.toIntOrNull()
+                    ?: if ("seed" in parsed.values) usage("--seed must be an integer") else null
+                CliCommand.Demo(parsed.positionals.single(), count, seed)
+            }
             else -> usage("Unknown operation: $operation")
         }
     }
@@ -242,7 +260,7 @@ internal object CliArguments {
                     flags += name
                     index++
                 }
-                "kind", "type", "direction", "valid-time", "query-file", "param" -> {
+                "kind", "type", "direction", "valid-time", "query-file", "param", "count", "seed" -> {
                     val value = inlineValue ?: tokens.getOrNull(index + 1)?.takeUnless { it.startsWith("--") }
                         ?: usage("--$name requires a value")
                     values.getOrPut(name) { mutableListOf() } += value
@@ -295,6 +313,13 @@ internal object CliArguments {
 
     private fun ParsedTokens.flag(name: String): Boolean = name in flags
 
+    private fun ParsedTokens.singleValue(name: String, required: Boolean): String? {
+        val specified = values[name].orEmpty()
+        if (specified.size > 1) usage("--$name may only be specified once")
+        if (required && specified.isEmpty()) usage("--$name is required")
+        return specified.singleOrNull()
+    }
+
     private fun ParsedTokens.reject(allowed: Set<String>) {
         val supplied = values.keys + flags
         val invalid = supplied.firstOrNull { it !in allowed } ?: return
@@ -314,6 +339,7 @@ internal object CliArguments {
           lint    Validate GraphMD documents
           stats   Show graph statistics
           search  Execute a GMQL query
+          demo    Generate random, valid GraphMD demo data
 
         Global options:
           --json       Emit JSON
@@ -334,6 +360,7 @@ internal object CliArguments {
             Usage: graphmd search QUERY [paths...] [--param NAME=VALUE]... [--json]
                    graphmd search --query-file FILE [paths...] [--param NAME=VALUE]... [--json]
         """.trimIndent() + "\n"
+        "demo" -> "Usage: graphmd demo DIR --count N [--seed INT] [--json]\n"
         else -> rootHelp()
     }
 }
