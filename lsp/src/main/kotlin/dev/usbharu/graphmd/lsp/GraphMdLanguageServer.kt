@@ -31,6 +31,7 @@ import kotlin.io.path.isRegularFile
 import kotlin.io.path.readText
 
 private val GRAPH_MD_ID_REGEX = Regex("[A-Za-z_][A-Za-z0-9_.:-]*")
+private const val CREATE_DEFINITION_COMMAND = "graphmd.createDefinition"
 
 class GraphMdLanguageServer : LanguageServer, LanguageClientAware, GraphMdSearchService {
     private val workspaceIndex = GraphMdWorkspaceIndex()
@@ -783,12 +784,14 @@ internal class GraphMdWorkspaceIndex(
     private fun quickFix(
         title: String,
         diagnostic: org.eclipse.lsp4j.Diagnostic,
-        edit: WorkspaceEdit,
+        edit: WorkspaceEdit?,
         preferred: Boolean = false,
+        command: Command? = null,
     ): CodeAction = CodeAction(title).apply {
         kind = CodeActionKind.QuickFix
         diagnostics = listOf(diagnostic)
         this.edit = edit
+        this.command = command
         isPreferred = preferred
     }
 
@@ -1127,16 +1130,37 @@ internal class GraphMdWorkspaceIndex(
         val newPath = definitionDirectory.resolve("${target.id}.md")
         val newUri = newPath.toUri().toString()
         if (documentSnapshot(newUri) != null || Files.exists(newPath)) return null
-        val sourceType = (document.analysis.parsed.document as? NodeDocument)?.type
-            ?: completionIds(ReferenceTargetKind.NodeType).firstOrNull()
-            ?: "NodeType"
-        val content = when (target.kind) {
-            ReferenceTargetKind.NodeType -> "---\nid: ${target.id}\nkind: NodeType\nprops:\n---\n"
-            ReferenceTargetKind.RelType -> "---\nid: ${target.id}\nkind: RelType\n---\n"
-            ReferenceTargetKind.Timeline -> "---\nid: ${target.id}\nkind: Timeline\ntimecode:\n  type: number\n---\n"
-            ReferenceTargetKind.Node -> "---\nid: ${target.id}\nkind: Node\ntype: $sourceType\n---\n"
-            ReferenceTargetKind.Media -> "---\nid: ${target.id}\nkind: Media\ntype: $sourceType\nurl: \"\"\n---\n"
+
+        val nodeTypeIds = completionIds(ReferenceTargetKind.NodeType)
+        if (target.kind == ReferenceTargetKind.Node || target.kind == ReferenceTargetKind.Media) {
+            if (nodeTypeIds.isEmpty()) return null
+            val choices = nodeTypeIds.map { nodeTypeId ->
+                mapOf(
+                    "label" to nodeTypeId,
+                    "content" to definitionContent(target, nodeTypeId),
+                )
+            }
+            return quickFix(
+                title = "Create ${target.kind.displayName()} '${target.id}'",
+                diagnostic = diagnostic,
+                edit = null,
+                command = Command(
+                    "Create ${target.kind.displayName()} '${target.id}'",
+                    CREATE_DEFINITION_COMMAND,
+                    listOf(
+                        mapOf(
+                            "uri" to newUri,
+                            "kind" to target.kind.displayName(),
+                            "id" to target.id,
+                            "choices" to choices,
+                        ),
+                    ),
+                ),
+                preferred = completionIds(target.kind).isEmpty(),
+            )
         }
+
+        val content = definitionContent(target, null)
         val changes = listOf<Either<TextDocumentEdit, ResourceOperation>>(
             Either.forRight(CreateFile(newUri, CreateFileOptions(false, true))),
             Either.forLeft(
@@ -1152,6 +1176,14 @@ internal class GraphMdWorkspaceIndex(
             WorkspaceEdit(changes),
             preferred = completionIds(target.kind).isEmpty(),
         )
+    }
+
+    private fun definitionContent(target: DiagnosticReferenceTarget, nodeTypeId: String?): String = when (target.kind) {
+        ReferenceTargetKind.NodeType -> "---\nid: ${target.id}\nkind: NodeType\nprops:\n---\n"
+        ReferenceTargetKind.RelType -> "---\nid: ${target.id}\nkind: RelType\n---\n"
+        ReferenceTargetKind.Timeline -> "---\nid: ${target.id}\nkind: Timeline\ntimecode:\n  type: number\n---\n"
+        ReferenceTargetKind.Node -> "---\nid: ${target.id}\nkind: Node\ntype: ${requireNotNull(nodeTypeId)}\n---\n"
+        ReferenceTargetKind.Media -> "---\nid: ${target.id}\nkind: Media\ntype: ${requireNotNull(nodeTypeId)}\nurl: \"\"\n---\n"
     }
 
     private fun declarationActionForUnknownProperty(

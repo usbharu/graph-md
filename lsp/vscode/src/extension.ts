@@ -13,8 +13,10 @@ import {
   PreviewWorkspaceScanTracker,
 } from "./preview-target-index";
 import { GraphMdSearchViewProvider } from "./search-view";
+import { parseCreateDefinitionCommandArgs, selectedCreateDefinition } from "./create-definition";
 
 let client: LanguageClient | undefined;
+const createDefinitionCommand = "graphmd.createDefinition";
 const previewTargets = new PreviewTargetIndex();
 const diskReads = new PreviewDiskReadTracker();
 const workspaceScans = new PreviewWorkspaceScanTracker();
@@ -62,6 +64,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<GraphM
   context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => {
     void reconcileWorkspaceTargets();
   }));
+  context.subscriptions.push(
+    vscode.commands.registerCommand(createDefinitionCommand, createDefinitionFromQuickPick),
+  );
   await reconcileWorkspaceTargets();
   previewRefreshEnabled = true;
   context.subscriptions.push(
@@ -272,6 +277,41 @@ function resolveMediaHrefFromIndex(href: string): string | null {
 
 export async function deactivate(): Promise<void> {
   await client?.stop();
+}
+
+async function createDefinitionFromQuickPick(rawArgs: unknown): Promise<void> {
+  const args = parseCreateDefinitionCommandArgs(rawArgs);
+  if (!args) return;
+
+  const selected = await vscode.window.showQuickPick(
+    args.choices.map((choice) => ({
+      label: choice.label,
+      detail: `${args.kind} の type として作成`,
+    })),
+    {
+      title: `${args.kind} '${args.id}' の NodeType を選択`,
+      placeHolder: "使用する NodeType を選択してください",
+      ignoreFocusOut: true,
+    },
+  );
+  const definition = selectedCreateDefinition(args, selected?.label);
+  if (!definition) return;
+
+  const uri = vscode.Uri.parse(definition.uri);
+  const edit = new vscode.WorkspaceEdit();
+  edit.createFile(uri, { overwrite: false, ignoreIfExists: false });
+  edit.insert(uri, new vscode.Position(0, 0), definition.content);
+
+  try {
+    const applied = await vscode.workspace.applyEdit(edit);
+    if (!applied) {
+      void vscode.window.showErrorMessage(`Failed to create ${args.kind} '${args.id}'.`);
+    }
+  } catch (error) {
+    void vscode.window.showErrorMessage(
+      `Failed to create ${args.kind} '${args.id}': ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 function executable(command: string): Executable {
