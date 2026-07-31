@@ -1931,18 +1931,19 @@ internal class FrontMatterCompletionResolver(
             hasColon && documentKind == DocumentKind.Timeline && "mappings" in path && path.lastOrNull() in setOf("from", "to") ->
                 idCompletions(valuePrefix, timelineIds, "Timeline")
             hasColon && (path == listOf("from") || path == listOf("to")) -> idCompletions(valuePrefix, nodeTypeIds, "NodeType")
-            hasColon && path.lastOrNull() == "required" ->
+            hasColon && path.lastOrNull() == "required" && isPropSchemaPath(path.dropLast(1), documentKind) ->
                 enumCompletions(valuePrefix, listOf("true", "false"), "boolean")
             hasColon && path == listOf("timecode", "type") ->
                 enumCompletions(valuePrefix, listOf("number"), "timecode type")
-            hasColon && documentKind in setOf(DocumentKind.NodeType, DocumentKind.RelType) &&
-                isPropSchemaTypePath(path) ->
+            hasColon && path.lastOrNull() == "type" &&
+                documentKind in setOf(DocumentKind.NodeType, DocumentKind.RelType) &&
+                isPropSchemaPath(path.dropLast(1), documentKind) ->
                 enumCompletions(valuePrefix, listOf("number", "string", "text", "instant", "duration", "array"), "prop type")
-            hasColon && path.lastOrNull() == "timeline" ->
+            hasColon && path.lastOrNull() == "timeline" && isPropSchemaPath(path.dropLast(1), documentKind) ->
                 timelineSelectorCompletions(valuePrefix)
-            hasColon && valuePrefix.isEmpty() -> nestedKeyCompletions(path, "", lines, lineIndex)
+            hasColon && valuePrefix.isEmpty() -> nestedKeyCompletions(path, "", lines, lineIndex, documentKind)
             indent == 0 -> topLevelKeyCompletions(keyCandidate, usedTopLevelKeys, documentKind)
-            else -> nestedKeyCompletions(path, currentKeyPrefix, lines, lineIndex)
+            else -> nestedKeyCompletions(path, currentKeyPrefix, lines, lineIndex, documentKind)
         }
     }
 
@@ -2005,7 +2006,7 @@ internal class FrontMatterCompletionResolver(
         val schema = parentContainer.properties[currentKey]
         return when {
             schema != null -> typedValueCompletions(schema, valuePrefix, yaml = true)
-            currentKey == "timeline" ->
+            currentKey == "timeline" && currentKey in parentContainer.specialKeys ->
                 idCompletions(valuePrefix, allowedTimelineIds(parentContainer.ownerSchema), "Timeline")
             else -> null
         }
@@ -2041,6 +2042,7 @@ internal class FrontMatterCompletionResolver(
         prefix: String,
         lines: List<String>,
         lineIndex: Int,
+        documentKind: DocumentKind?,
     ): List<CompletionEntry>? {
         if (
             path.lastOrNull() == "validTime" &&
@@ -2053,7 +2055,7 @@ internal class FrontMatterCompletionResolver(
             path.lastOrNull() == "validTime" -> listOf("timeline", "from", "to")
             path.takeLast(2).let { it == listOf("validTime", "from") || it == listOf("validTime", "to") } ->
                 listOf("value", "timecode")
-            isInsidePropSchema(path) -> when (siblingScalarValue(lines, lineIndex, "type")) {
+            isPropSchemaPath(path, documentKind) -> when (siblingScalarValue(lines, lineIndex, "type")) {
                 "instant", "duration" -> listOf("type", "required", "timeline")
                 "array" -> listOf("type", "required", "items")
                 else -> listOf("type", "required")
@@ -2274,12 +2276,11 @@ internal class FrontMatterCompletionResolver(
 
     private fun indentOf(line: String): Int = line.indexOfFirst { !it.isWhitespace() }.let { if (it < 0) line.length else it }
 
-    private fun isInsidePropSchema(path: List<String>): Boolean {
-        return path.size >= 2 && path.first() == "props"
-    }
-
-    private fun isPropSchemaTypePath(path: List<String>): Boolean =
-        path.size >= 3 && path.first() == "props" && path.last() == "type"
+    private fun isPropSchemaPath(path: List<String>, documentKind: DocumentKind?): Boolean =
+        (documentKind == DocumentKind.NodeType || documentKind == DocumentKind.RelType) &&
+            path.size >= 2 &&
+            path.first() == "props" &&
+            path.drop(2).all { it == "items" }
 
     private fun inferredDocumentKind(lines: List<String>, endLine: Int): DocumentKind? {
         val raw = lines
