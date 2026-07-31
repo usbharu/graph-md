@@ -21,10 +21,11 @@ internal data class MarkdownLinkReplacement(
 internal object MarkdownTextExtractor {
     fun extract(source: String, linkTitles: List<MarkdownLinkReplacement> = emptyList()): List<ExtractedText> {
         val bodyStart = frontMatterEnd(source)
+        val bodyOffsets = normalizedBodyOffsets(source, bodyStart)
         val replacements = linkTitles.mapNotNull { replacement ->
-            val start = bodyStart + replacement.bodyRange.start
-            val end = bodyStart + replacement.bodyRange.end
-            if (start < bodyStart || start >= end || end > source.length) {
+            val start = bodyOffsets.getOrNull(replacement.bodyRange.start)
+            val end = bodyOffsets.getOrNull(replacement.bodyRange.end)
+            if (start == null || end == null || start >= end) {
                 null
             } else {
                 AbsoluteLinkReplacement(start, end, replacement.text)
@@ -142,6 +143,17 @@ internal object MarkdownTextExtractor {
             offset = (lineEnd + 1).coerceAtMost(source.length)
         }
         return 0
+    }
+
+    private fun normalizedBodyOffsets(source: String, bodyStart: Int): IntArray {
+        val offsets = ArrayList<Int>(source.length - bodyStart + 1)
+        offsets += bodyStart
+        var sourceOffset = bodyStart
+        while (sourceOffset < source.length) {
+            sourceOffset += if (source.startsWith("\r\n", sourceOffset)) 2 else 1
+            offsets += sourceOffset
+        }
+        return offsets.toIntArray()
     }
 
     private data class AbsoluteLinkReplacement(

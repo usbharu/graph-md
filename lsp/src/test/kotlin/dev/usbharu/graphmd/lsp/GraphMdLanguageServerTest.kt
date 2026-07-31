@@ -312,7 +312,7 @@ class GraphMdLanguageServerTest {
             ---
             Plain source prose.
             @link[Old link title](bob friendOf)
-            """.trimIndent(),
+            """.trimIndent().replace("\n", "\r\n"),
         )
         index.upsert(
             targetUri,
@@ -342,7 +342,7 @@ class GraphMdLanguageServerTest {
             ---
             Plain source prose.
             @link[New link title](bob friendOf)
-            """.trimIndent(),
+            """.trimIndent().replace("\n", "\r\n"),
         )
 
         assertTrue(nodeSearch("Old link title").rows.isEmpty())
