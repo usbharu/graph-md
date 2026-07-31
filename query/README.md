@@ -20,6 +20,12 @@ Pass the original `SourceDocument` list when building if normal Markdown body
 text should be searchable. Without it, normalized property strings and relation
 labels are still indexed.
 
+Named body-block fence lines are omitted from searchable text and split the
+surrounding fragments. A fragment inherits the innermost block's `validTime`;
+a names-only block inherits its parent block or node time. This is resolved
+while rebuilding the index from `SourceDocument`, without changing the static
+bundle schema.
+
 ## Building and searching
 
 ```kotlin
@@ -108,8 +114,10 @@ timeline domains implicitly.
 
 GraphMD source `validTime.from` and `validTime.to` remain inclusive.
 `TemporalWindow.Range` is explicitly half-open, while
-`TemporalWindow.ClosedRange` has inclusive endpoints. Timeline mappings are
-normalized onto a canonical axis before joins.
+`TemporalWindow.ClosedRange` has inclusive endpoints. Timeline inheritance
+shares one search assertion scope, while offset mappings only convert timecode
+coordinates onto a comparable canonical axis. A mapping by itself therefore
+does not make an assertion valid on the other Timeline.
 
 The internal temporal operators have explicit direction:
 
@@ -120,6 +128,8 @@ The internal temporal operators have explicit direction:
 
 Every relation traversal intersects the current binding, relation, target node,
 target property, and text assertion times. Empty intersections are discarded.
+Body text assertions use the innermost named block's resolved time, so the same
+full-text term can match or fail under `VALID ON` depending on its source block.
 
 ## Static distribution
 
@@ -143,3 +153,6 @@ all shard names. The bundle stores logical assertions and the physical property,
 relation, interval, and full-text posting lists. Loading validates the format,
 analyzer version, referenced shards, checksum, and assertion references before
 the index can execute.
+Bundles created before assertion scopes distinguished Timeline inheritance from
+offset mappings remain readable, but must be regenerated to receive the new
+matching semantics.

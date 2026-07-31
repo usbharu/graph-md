@@ -224,3 +224,119 @@ describe("@props", () => {
     expect(JSON.parse(dataProps(html) ?? "null").name).toEqual({ "lang:ja": "アリス", "lang:us": "Alice" });
   });
 });
+
+describe("named body blocks", () => {
+  it("renders valid block boundaries transparently", () => {
+    const html = render(
+      "::: history annotation validTime=CommonEra(from=0 ,to=1)\n## Heading\n\nBody **text**\n:::",
+    );
+
+    expect(html).toContain("<h2>Heading</h2>");
+    expect(html).toContain("<p>Body <strong>text</strong></p>");
+    expect(html).not.toContain(":::");
+    expect(html).not.toContain("graphmd-block");
+  });
+
+  it("supports nested fences whose lengths increase by more than one", () => {
+    const html = render(
+      [
+        "::: outer validTime=CommonEra",
+        "outer",
+        "::::: inner note validTime=Branch",
+        "inner",
+        ":::::",
+        "after inner",
+        ":::",
+      ].join("\n"),
+    );
+
+    expect(html).toContain("<p>outer</p>");
+    expect(html).toContain("<p>inner</p>");
+    expect(html).toContain("<p>after inner</p>");
+    expect(html).not.toContain(":::::");
+  });
+
+  it("does not treat block-looking lines inside code fences as boundaries", () => {
+    const html = render(
+      "::: outer\n```\n::: code validTime=Hidden\n:::\n```\n:::",
+    );
+
+    expect(html).toContain("::: code validTime=Hidden");
+    expect(html).toContain(":::");
+    expect(html).toContain("<pre><code>");
+  });
+
+  it("does not recognize nested block fences in list or quote containers", () => {
+    const html = render(
+      [
+        "::: outer",
+        "- list item",
+        "  ::::: list-block",
+        "  :::::",
+        "> ::::: quote-block",
+        "> :::::",
+        "",
+        "after",
+        ":::",
+      ].join("\n"),
+    );
+
+    expect(html).toContain("::::: list-block");
+    expect(html).toContain("::::: quote-block");
+    expect(html).toContain("<p>after</p>");
+    expect(html).not.toContain("::: outer");
+  });
+
+  it("uses CommonMark list padding when excluding fence-shaped list content", () => {
+    const html = render(
+      [
+        "::: outer",
+        "-     item",
+        "  ::::: fake",
+        ":::",
+      ].join("\n"),
+    );
+
+    expect(html).not.toContain("::: outer");
+    expect(html).toContain("::::: fake");
+  });
+
+  it("keeps a nested opening fence that is not longer than its parent", () => {
+    const html = render(
+      [
+        "::: outer",
+        "::: invalid-inner",
+        ":::",
+        ":::",
+      ].join("\n"),
+    );
+
+    expect(html).toContain("::: invalid-inner");
+    expect(html).toContain("<p>:::</p>");
+  });
+
+  it("keeps completed child fences inside an unclosed parent", () => {
+    const html = render(
+      [
+        "::: outer",
+        "::::: child",
+        "text",
+        ":::::",
+      ].join("\n"),
+    );
+
+    expect(html).toContain("::: outer");
+    expect(html).toContain("::::: child");
+    expect(html).toContain(":::::");
+  });
+
+  it("keeps malformed and unclosed blocks as ordinary markdown", () => {
+    const invalid = render("::: history validTime=Broken(from=)\ntext\n:::");
+    const emptyValidTime = render("::: history validTime=[]\ntext\n:::");
+    const unclosed = render("::: history validTime=CommonEra\ntext");
+
+    expect(invalid).toContain("::: history");
+    expect(emptyValidTime).toContain("::: history");
+    expect(unclosed).toContain("::: history");
+  });
+});

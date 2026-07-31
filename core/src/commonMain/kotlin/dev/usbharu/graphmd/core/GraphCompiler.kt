@@ -103,6 +103,15 @@ class GraphCompiler(
             )
             val extraction = extractor.extract(document.body, document.sourcePath, document.id)
             diagnostics += extraction.diagnostics
+            extraction.blocks.forEach { block ->
+                diagnostics += validateValidTimes(
+                    block.validTime,
+                    timelineById,
+                    referenceCandidates,
+                    document.sourcePath,
+                    document.id,
+                )
+            }
 
             val mergedProps = LinkedHashMap<String, RawValue>()
             mergedProps.putAll(document.props)

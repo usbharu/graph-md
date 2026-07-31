@@ -1059,6 +1059,38 @@ Aliceの名前は@props{name = "Alice"}です。
 }
 ```
 
+#### 名前付き本文ブロック
+
+NodeおよびMediaの本文では、3個以上の連続したコロンをフェンスとして、名前付きブロックを記述できる。ブロック名は将来の拡張用メタデータであり、この仕様の時点ではグラフの意味論やレンダリング結果を変更しない。
+
+```markdown
+::: history validTime=CommonEra(from=0 ,to=1)
+外側の本文
+::::: spoiler annotation validTime=Branch
+内側の本文
+:::::
+:::
+```
+
+開始フェンスのheaderには、ブロック名と`validTime`を空白区切りで任意順に複数記述できる。ブロック名は`[A-Za-z_][A-Za-z0-9_.:-]*`に一致しなければならない。名前の出現順と重複は保持し、未知の名前も正当なブロック名として受理する。`validTime`と`=`の前後には空白を記述できる。
+
+`validTime`式の括弧、配列、オブジェクトおよび文字列の内部にある空白はheaderの区切りではない。したがって、`validTime=CommonEra(from=0 ,to=1) history`ではvalidTime式を最後まで解析した後に`history`をブロック名として読む。同じ開始行に複数の`validTime`がある場合はすべてを構文検証し、最後の指定を採用する。途中に不正な指定があれば、後続の指定が正常でも開始行全体を構文エラーとする。
+
+フェンスには次の規則を適用する。
+
+- 行頭には最大3文字の空白を許可する。コードブロック、リストおよび引用の接頭辞内ではフェンスとして認識しない。
+- 入れ子の開始フェンスは親より多いコロンを持たなければならない。差は1でなくてもよく、例えば3個、5個、8個と入れ子にできる。
+- 終了フェンスは対応する開始フェンスと同数のコロンだけを記述する。最内ブロックと異なる個数では閉じず、1行で複数階層を閉じることもできない。
+- headerを持たないフェンスは終了フェンスとして扱う。未閉鎖、孤立した終了フェンス、個数が一致しない終了フェンス、および親以下の個数で開始する入れ子は構文エラーである。不完全な範囲にはブロックの時間意味論を適用しない。
+
+`validTime`の既定値は、Node、外側ブロック、内側ブロック、`@props`または`@link`、個別Propertyの順に解決する。最も近い明示値が上位の値を置換し、複数の時間を結合または交差しない。`validTime`を持たない名前付きブロックは、親ブロックまたはNodeの値を継承する。
+
+検索assertionでは、Timelineの`extends`で結ばれたTimelineを同じ主張スコープとして扱う。一方、offset mappingはtimecodeを比較可能な座標へ変換するだけであり、mappingだけで結ばれた別のTimelineへ主張を拡張してはならない。例えばNodeが`TimelineA`と`TimelineB`の両方で有効でも、mappingだけで接続された`validTime=TimelineB`の本文ブロック内にあるLinkは`VALID ON TimelineA`に一致しない。
+
+markdown-it実装は、構文的に完全な開始・終了フェンスだけを表示から除外し、wrapper要素を生成せず、内部のMarkdownを通常どおり描画する。不正または未閉鎖のフェンスは通常の本文として残す。
+
+検索索引ではフェンス行を本文から除外し、その位置で本文断片を分割する。各本文断片の時間は最内ブロックから継承し、`VALID ON`を含む時間条件へ反映する。既存の静的検索bundleの形式は変更しないが、新しいブロック時間を反映するには索引を再生成する必要がある。
+
 #### グラフ志向リンク
 
 RelTypeで定義されたリンクで、Propertyを持つ 各PropertyはvalidTimeで主張するTimelineと期間を表現できる
@@ -1129,7 +1161,7 @@ Markdown拡張記法パーサに依存する(Kotlin/JS)
 LSP4Jで構築する
 markdown-itプラグインなどでプレビューをGraphMD対応させる
 
-LSPはワークスペース内のMarkdownファイルを走査し、frontmatterに現れるすべての`id`定義とID参照、およびNodeまたはMediaのMarkdown本文に現れるすべてのID参照を索引化する。NodeType、RelType、Timelineの本文は通常のMarkdown本文として扱い、GraphMDのID参照を索引化しない。ここでいうIDには、少なくともNode、Media、NodeType、RelType、Timelineの`id`、`type`、`extends`、timeline selector、validTimeの`timeline`、instantおよびdurationの`timeline`、`@link`のリンク先`id`とRelType、および拡張記法の値としてIDを取る箇所を含む。引用符の有無、配列内、ネストしたProperty内、`@link`のProperty部の省略有無によって索引対象から除外してはならない。
+LSPはワークスペース内のMarkdownファイルを走査し、frontmatterに現れるすべての`id`定義とID参照、およびNodeまたはMediaのMarkdown本文に現れるすべてのID参照を索引化する。NodeType、RelType、Timelineの本文は通常のMarkdown本文として扱い、GraphMDのID参照を索引化しない。ここでいうIDには、少なくともNode、Media、NodeType、RelType、Timelineの`id`、`type`、`extends`、timeline selector、validTimeの`timeline`、instantおよびdurationの`timeline`、`@link`のリンク先`id`とRelType、名前付き本文ブロックで採用された最後の`validTime`、および拡張記法の値としてIDを取る箇所を含む。引用符の有無、配列内、ネストしたProperty内、`@link`のProperty部の省略有無によって索引対象から除外してはならない。名前付き本文ブロックのフェンス、ブロック名、`validTime`はsyntax highlightingの対象とする。
 
 索引化したすべてのID定義およびID参照に対して、LSPは次の機能を提供しなければならない。
 

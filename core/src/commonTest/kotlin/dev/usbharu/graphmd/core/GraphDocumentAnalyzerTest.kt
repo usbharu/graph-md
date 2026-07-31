@@ -260,6 +260,31 @@ class GraphDocumentAnalyzerTest {
     }
 
     @Test
+    fun `indexes only the winning validTime from complete body block headers`() {
+        val text = """
+            ---
+            id: node
+            kind: Node
+            type: Type
+            ---
+            ::: history validTime=Discarded validTime = Active(from=0 ,to=1)
+            prose
+            :::
+            ```
+            ::: code validTime=Hidden
+            :::
+            ```
+            ::::: incomplete validTime=Incomplete
+        """.trimIndent()
+
+        val analysis = analyzer.analyze(text, "/tmp/block.md")
+        val timelines = analysis.references.filter { it.kind == ReferenceTargetKind.Timeline }
+
+        assertEquals(listOf("Active"), timelines.map { it.targetId })
+        assertEquals("Active", text.substring(timelines.single().range.start, timelines.single().range.end))
+    }
+
+    @Test
     fun `returns empty analysis when front matter is never closed`() {
         val text = "---\nid: alice\nkind: Node"
         val analysis = analyzer.analyze(text, "/tmp/open.md")
@@ -1602,6 +1627,51 @@ class GraphDocumentAnalyzerTest {
         assertEquals(ReferenceTargetKind.RelType, analyzer.inferCompletionKind(analysis, text.indexOf("friendOf")))
         assertNull(analyzer.inferCompletionKind(analysis, text.indexOf("@link")))
         assertNull(analyzer.inferCompletionKind(analysis, text.indexOf("tail")))
+    }
+
+    @Test
+    fun `limits body validTime completion to timeline tokens in GraphMD syntax outside code`() {
+        val text = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            ---
+            ::: history validTime=[FirstEra, SecondEra(from=1,to=2)] annotation
+            body
+            :::
+            @props(validTime=DirectiveEra){age=1}
+            @props{age(validTime=[PropertyEra, OtherEra])=2}
+            @link(validTime=LinkEra)[Bob](bob friendOf)
+            prose validTime=NotGraphMd
+            ```markdown
+            ::: hidden validTime=CodeEra
+            @props(validTime=CodeDirective){age=3}
+            ```
+        """.trimIndent()
+        val analysis = analyzer.analyze(text, "/tmp/n.md")
+
+        assertEquals(
+            ReferenceTargetKind.Timeline,
+            analyzer.inferCompletionKind(analysis, text.indexOf("SecondEra") + 3),
+        )
+        assertNull(analyzer.inferCompletionKind(analysis, text.indexOf("from=1") + "from=".length))
+        assertNull(analyzer.inferCompletionKind(analysis, text.indexOf("annotation") + 3))
+        assertEquals(
+            ReferenceTargetKind.Timeline,
+            analyzer.inferCompletionKind(analysis, text.indexOf("DirectiveEra") + 3),
+        )
+        assertEquals(
+            ReferenceTargetKind.Timeline,
+            analyzer.inferCompletionKind(analysis, text.indexOf("OtherEra") + 3),
+        )
+        assertEquals(
+            ReferenceTargetKind.Timeline,
+            analyzer.inferCompletionKind(analysis, text.indexOf("LinkEra") + 3),
+        )
+        assertNull(analyzer.inferCompletionKind(analysis, text.indexOf("NotGraphMd") + 3))
+        assertNull(analyzer.inferCompletionKind(analysis, text.indexOf("CodeEra") + 3))
+        assertNull(analyzer.inferCompletionKind(analysis, text.indexOf("CodeDirective") + 3))
     }
 
     @Test

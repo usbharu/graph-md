@@ -10,22 +10,35 @@ package dev.usbharu.graphmd.core
  * leaf blocks that can contain inline syntax. Code spans are then matched only
  * within one such leaf block.
  */
-internal object CommonMarkCodeMasker {
-    fun mask(source: String): String {
-        if (source.isEmpty()) return source
+internal data class CommonMarkMasking(
+    val masked: String,
+    val rootLineStarts: Set<Int>,
+)
 
+internal object CommonMarkCodeMasker {
+    fun mask(source: String): String = analyze(source).masked
+
+    fun analyze(source: String): CommonMarkMasking {
+        if (source.isEmpty()) return CommonMarkMasking(source, emptySet())
+
+        val rootLineStarts = mutableSetOf<Int>()
         val masked = BooleanArray(source.length)
-        val inlineBlocks = scanBlocks(source, source.linesWithOffsets(), masked)
+        val inlineBlocks = scanBlocks(source, source.linesWithOffsets(), masked, rootLineStarts)
         inlineBlocks.forEach { maskCodeSpans(source, it, masked) }
 
         val result = source.toCharArray()
         masked.forEachIndexed { index, isMasked ->
             if (isMasked && result[index] != '\n' && result[index] != '\r') result[index] = ' '
         }
-        return result.concatToString()
+        return CommonMarkMasking(result.concatToString(), rootLineStarts)
     }
 
-    private fun scanBlocks(source: String, lines: List<Line>, masked: BooleanArray): List<TextRange> {
+    private fun scanBlocks(
+        source: String,
+        lines: List<Line>,
+        masked: BooleanArray,
+        rootLineStarts: MutableSet<Int>,
+    ): List<TextRange> {
         val inlineBlocks = mutableListOf<TextRange>()
         var containers = emptyList<Container>()
         var paragraph: Paragraph? = null
@@ -127,6 +140,7 @@ internal object CommonMarkCodeMasker {
             }
 
             containers = lineContainers
+            if (lineContainers.isEmpty()) rootLineStarts += line.start
             if (line.isBlankFrom(source, contentOffset)) {
                 finishParagraph()
                 lineIndex++
@@ -212,10 +226,19 @@ internal object CommonMarkCodeMasker {
         val offset = skipUpToThreeSpaces(source, start, end)
         if (offset >= end) return true
         if (source[offset] == '>') return true
+        if (isBodyBlockFence(source, offset, end)) return true
         if (parseOpeningFence(source, offset, end, emptyList()) != null) return true
         if (isAtxHeading(source, offset, end) || isThematicBreak(source, offset, end)) return true
         val list = parseListMarker(source, offset, end) ?: return false
         return !list.empty && (!list.ordered || list.startNumber == 1)
+    }
+
+    private fun isBodyBlockFence(source: String, start: Int, end: Int): Boolean {
+        if (source.getOrNull(start) != ':') return false
+        var cursor = start
+        while (cursor < end && source[cursor] == ':') cursor++
+        if (cursor - start < 3) return false
+        return cursor == end || source[cursor] == ' ' || source[cursor] == '\t'
     }
 
     private fun consumeContainerStack(source: String, line: Line, containers: List<Container>): Int? {

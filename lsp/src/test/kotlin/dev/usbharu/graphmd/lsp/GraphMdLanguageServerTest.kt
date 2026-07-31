@@ -1276,6 +1276,62 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `body block winning timeline supports completion navigation rename and exact diagnostics`() {
+        val timelineUri = "file:///workspace/timelines/WinningEra.md"
+        val nodeUri = "file:///workspace/alice.md"
+        val nodeText = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            ---
+            ::: history validTime=IgnoredEra annotation validTime=WinningEra
+            inside
+            :::
+            ::: audit validTime=MissingEra
+            missing
+            :::
+            ```markdown
+            ::: hidden validTime=CodeEra
+            :::
+            ```
+        """.trimIndent()
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/Person.md" to graphDocument("Person", "NodeType"),
+                timelineUri to "---\nid: WinningEra\nkind: Timeline\ntimecode:\n  type: number\n---",
+                nodeUri to nodeText,
+            ),
+        )
+        val winningOffset = nodeText.indexOf("WinningEra")
+
+        assertEquals(timelineUri, fixture.definitions(nodeUri, winningOffset + 1).single().uri)
+        assertEquals(2, fixture.references(nodeUri, winningOffset + 1).size)
+        assertTrue("WinningEra" in fixture.completions(nodeUri, winningOffset + 3).map { it.label })
+        assertTrue(fixture.completions(nodeUri, nodeText.indexOf("annotation") + 3).isEmpty())
+        assertTrue(fixture.completions(nodeUri, nodeText.indexOf("CodeEra") + 3).isEmpty())
+
+        val rename = assertNotNull(fixture.rename(nodeUri, winningOffset + 1, "RenamedEra"))
+        assertEquals(
+            Range(positionAt(nodeText, winningOffset), positionAt(nodeText, winningOffset + "WinningEra".length)),
+            rename.changes.getValue(nodeUri).single().range,
+        )
+        assertTrue(rename.changes.getValue(nodeUri).none { "IgnoredEra" in it.newText })
+
+        val missingOffset = nodeText.indexOf("MissingEra")
+        val unknown = fixture.diagnostics.getValue(nodeUri).single { it.message == "Unknown Timeline: MissingEra" }
+        assertEquals(
+            Range(positionAt(nodeText, missingOffset), positionAt(nodeText, missingOffset + "MissingEra".length)),
+            unknown.range,
+        )
+        assertTrue(
+            fixture.diagnostics.getValue(nodeUri).none {
+                "IgnoredEra" in it.message || "CodeEra" in it.message
+            },
+        )
+    }
+
+    @Test
     fun `legacy Property Schema timeline selectors support definition references rename and diagnostics`() {
         val timelineUri = "file:///workspace/timelines/CommonEra.md"
         val schemaUri = "file:///workspace/types/Event.md"

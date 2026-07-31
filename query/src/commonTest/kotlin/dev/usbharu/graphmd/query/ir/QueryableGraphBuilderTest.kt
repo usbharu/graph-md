@@ -8,6 +8,7 @@ import dev.usbharu.graphmd.query.model.PropertyPath
 import dev.usbharu.graphmd.query.model.TimelineId
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
@@ -140,6 +141,73 @@ class QueryableGraphBuilderTest {
         assertTrue(graph.nodes.single { it.id == NodeId("alice") }.validTime.intervals.all {
             it.timelineId == TimelineId("TimelineA")
         })
+    }
+
+    @Test
+    fun `splits markdown text at body blocks and assigns nearest validTime`() {
+        val sources = listOf(
+            SourceDocument(
+                """
+                ---
+                id: A
+                kind: Timeline
+                ---
+                """.trimIndent(),
+                "/graph/a.md",
+            ),
+            SourceDocument(
+                """
+                ---
+                id: B
+                kind: Timeline
+                ---
+                """.trimIndent(),
+                "/graph/b.md",
+            ),
+            SourceDocument(
+                """
+                ---
+                id: Person
+                kind: NodeType
+                ---
+                """.trimIndent(),
+                "/graph/person.md",
+            ),
+            SourceDocument(
+                """
+                ---
+                id: alice
+                kind: Node
+                type: Person
+                ---
+                outside
+                ::: history validTime=A(from=0,to=10)
+                outer
+                ::::: inherited
+                inherited prose
+                :::::
+                ::::: branch validTime=B(from=20,to=30)
+                inner
+                :::::
+                :::
+                after
+                """.trimIndent(),
+                "/graph/alice.md",
+            ),
+        )
+        val graph = QueryableGraphBuilder(sources).build(GraphCompiler().compileSources(sources))
+
+        val body = graph.textAssertions.filter { it.kind == TextKind.PARAGRAPH }
+        assertTrue(body.none { ":::" in it.text })
+        val outer = body.single { it.text == "outer" }
+        val inherited = body.single { it.text == "inherited prose" }
+        val inner = body.single { it.text == "inner" }
+        val outside = body.single { it.text == "outside" }
+        assertTrue(outer.validTime.contains(TimelineId("A"), 5.0))
+        assertTrue(inherited.validTime.contains(TimelineId("A"), 5.0))
+        assertFalse(inherited.validTime.contains(TimelineId("B"), 25.0))
+        assertTrue(inner.validTime.contains(TimelineId("B"), 25.0))
+        assertTrue(outside.validTime.isUniversal)
     }
 
     private fun fixture(): List<SourceDocument> = listOf(

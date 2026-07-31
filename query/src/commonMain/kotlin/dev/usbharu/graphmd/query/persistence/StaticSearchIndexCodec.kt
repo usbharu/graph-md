@@ -306,6 +306,7 @@ private fun encodeTimeline(timeline: QueryTimeline): Json = jsonObject(
     "id" to jsonString(timeline.id.value),
     "canonicalId" to jsonString(timeline.canonicalId.value),
     "offsetToCanonical" to jsonNumber(timeline.offsetToCanonical),
+    "assertionScopeId" to jsonString(timeline.assertionScopeId.value),
 )
 
 private fun decodeTimeline(json: Json): QueryTimeline {
@@ -314,6 +315,7 @@ private fun decodeTimeline(json: Json): QueryTimeline {
         TimelineId(value.required("id").stringValue()),
         TimelineId(value.required("canonicalId").stringValue()),
         value.required("offsetToCanonical").doubleValue(),
+        TimelineId(value["assertionScopeId"]?.stringValue() ?: value.required("id").stringValue()),
     )
 }
 

@@ -46,14 +46,14 @@ sealed interface TemporalWindow {
 
     fun toIntervalSet(catalog: TimelineCatalog): IntervalSet {
         val interval = when (this) {
-            is At -> catalog.normalize(
+            is At -> catalog.assertedInterval(
                 timelineId,
                 IntervalBoundary(instant, inclusive = true),
                 IntervalBoundary(instant, inclusive = true),
             )
             is Range -> {
                 if (start != null && endExclusive != null && start >= endExclusive) return IntervalSet.empty()
-                catalog.normalize(
+                catalog.assertedInterval(
                     timelineId,
                     start?.let { IntervalBoundary(it, inclusive = true) },
                     endExclusive?.let { IntervalBoundary(it, inclusive = false) },
@@ -61,7 +61,7 @@ sealed interface TemporalWindow {
             }
             is ClosedRange -> {
                 if (start != null && endInclusive != null && start > endInclusive) return IntervalSet.empty()
-                catalog.normalize(
+                catalog.assertedInterval(
                     timelineId,
                     start?.let { IntervalBoundary(it, inclusive = true) },
                     endInclusive?.let { IntervalBoundary(it, inclusive = true) },
