@@ -20,7 +20,7 @@ class BodySyntaxExtractor {
         while (index < masked.length) {
             if (masked[index] == '@' && !isEscaped(masked, index)) {
                 when {
-                    masked.startsWith("@props", index) -> {
+                    isDirectiveKeywordAt(masked, index, "@props") -> {
                         var objectStart = index + "@props".length
                         var defaultValidTime: RawArray? = null
                         if (masked.getOrNull(objectStart) == '(') {
@@ -79,7 +79,7 @@ class BodySyntaxExtractor {
                             diagnostics += syntaxDiagnostic("Unclosed @props block", sourcePath, documentId, index, body.length)
                         }
                     }
-                    masked.startsWith("@link", index) -> {
+                    isDirectiveKeywordAt(masked, index, "@link") -> {
                         val relation = parseCanonicalRelation(masked, body, index, sourcePath, documentId, diagnostics)
                         if (relation != null) {
                             relations += relation.first
@@ -356,6 +356,13 @@ class BodySyntaxExtractor {
         }
         return slashCount % 2 == 1
     }
+
+    private fun isDirectiveKeywordAt(text: String, index: Int, keyword: String): Boolean =
+        text.startsWith(keyword, index) &&
+            !text.getOrNull(index + keyword.length).isIdentifierContinuation()
+
+    private fun Char?.isIdentifierContinuation(): Boolean =
+        this != null && (isLetterOrDigit() || this in setOf('_', '.', ':', '-'))
 
     private fun unescapeLabel(label: String): String {
         return label.replace("\\]", "]").replace("\\\\", "\\")
