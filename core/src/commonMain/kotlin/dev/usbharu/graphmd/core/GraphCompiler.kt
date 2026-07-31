@@ -301,6 +301,7 @@ class GraphCompiler(
 
     private fun ReferenceTargetKind.displayName(): String = when (this) {
         ReferenceTargetKind.Node -> "Node"
+        ReferenceTargetKind.Media -> "Media"
         ReferenceTargetKind.NodeType -> "NodeType"
         ReferenceTargetKind.RelType -> "RelType"
         ReferenceTargetKind.Timeline -> "Timeline"
