@@ -100,13 +100,16 @@ export function renderRelation(
   tokens: any[],
   idx: number,
   md: MarkdownIt,
-  options: { hrefTransform?: (target: string, relType: string, env?: unknown) => string },
+  options: { hrefTransform?: (target: string, relType: string, env?: unknown) => string | null },
   env?: unknown,
 ): string {
   const meta = (tokens[idx].meta ?? {}) as RelationTokenMeta;
   const href = options.hrefTransform ? options.hrefTransform(meta.target, meta.relType, env) : meta.target;
   const esc = md.utils.escapeHtml;
-  const attrs = [`href="${esc(href)}"`, `data-link-rel="${esc(meta.relType)}"`];
+  const attrs = [`data-link-rel="${esc(meta.relType)}"`];
+  if (href !== null) {
+    attrs.unshift(`href="${esc(href)}"`);
+  }
   if (meta.props) {
     attrs.push(`data-link-props="${escapeAttr(meta.props)}"`);
   }

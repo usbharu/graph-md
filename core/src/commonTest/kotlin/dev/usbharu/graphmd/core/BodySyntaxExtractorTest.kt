@@ -53,6 +53,55 @@ class BodySyntaxExtractorTest {
     }
 
     @Test
+    fun `supports quoted noncanonical rel type without whitespace`() {
+        val extracted = extractor.extract(
+            """@link[Bob](bob "friend/of")""",
+            "/tmp/alice.md",
+            "alice",
+        )
+
+        assertTrue(extracted.diagnostics.isEmpty(), extracted.diagnostics.joinToString("\n") { it.message })
+        assertEquals("friend/of", extracted.relations.single().relType)
+    }
+
+    @Test
+    fun `rejects whitespace in quoted and unquoted rel types`() {
+        listOf(
+            """@link[Bob](bob friend Of)""",
+            "@link[Bob](bob friend\tOf)",
+            "@link[Bob](bob friend\u00a0Of)",
+            """@link[Bob](bob "friend Of")""",
+            """@link[Bob](bob "friend\ Of")""",
+            "@link[Bob](bob \"friend\tOf\")",
+            "@link[Bob](bob \"friend\u00a0Of\")",
+        ).forEach { body ->
+            val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
+
+            assertTrue(extracted.relations.isEmpty(), body)
+            val diagnostic = extracted.diagnostics.single {
+                it.message == "Relation target and type must be separated by horizontal spaces"
+            }
+            assertEquals(SourceRange(0, body.lastIndexOf(')')), diagnostic.source?.range)
+        }
+    }
+
+    @Test
+    fun `keeps target and malformed relation recovery when rel type whitespace is rejected`() {
+        val body = """
+            @link[Allowed target label](bob "friend Of")
+            @link[Carol](carol friendOf)
+        """.trimIndent()
+
+        val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
+
+        assertEquals(listOf("carol"), extracted.relations.map { it.target })
+        assertEquals("Carol", extracted.relations.single().label)
+        assertTrue(extracted.diagnostics.any {
+            it.message == "Relation target and type must be separated by horizontal spaces"
+        })
+    }
+
+    @Test
     fun `reports malformed relation`() {
         val body = """@link{}[Bob](bob)"""
 
@@ -93,17 +142,106 @@ class BodySyntaxExtractorTest {
 
     @Test
     fun `ignores indented code blocks`() {
-        val body = """
-                @props{name = "Ignored"}
-                @link{}[Ignored](ignored friendOf)
-
-            @link{}[Bob](bob friendOf)
-        """.trimIndent()
+        val body = listOf(
+            "    @props{name = \"Ignored\"}",
+            "    @link{}[Ignored](ignored friendOf)",
+            "\t@link{}[TabIgnored](tabIgnored friendOf)",
+            "",
+            "@link{}[Bob](bob friendOf)",
+        ).joinToString("\n")
 
         val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
 
         assertEquals(1, extracted.relations.size)
         assertEquals("bob", extracted.relations.single().target)
+    }
+
+    @Test
+    fun `ignores CommonMark fenced code variants and preserves surrounding syntax`() {
+        val body = """
+            @link[Before](before friendOf)
+              ~~~ graph-md
+            @props{name = "tilde"}
+            @link[Tilde](tilde friendOf)
+              ~~~~~
+            > ```
+            > @link[Quote](quote friendOf)
+            > ```
+            - ````
+              @link[List](list friendOf)
+              ```
+              @props{name = "still fenced"}
+              `````
+            @link[After](after friendOf)
+        """.trimIndent()
+
+        val extracted = extractor.extract(body, "/tmp/fences.md", "fences")
+
+        assertEquals(listOf("before", "after"), extracted.relations.map { it.target })
+        assertTrue(extracted.propsBlocks.isEmpty())
+        assertEquals(
+            body.indexOf("@link[After]"),
+            extracted.relations.last().range.start,
+            "masking must retain source offsets",
+        )
+    }
+
+    @Test
+    fun `honors fence indentation variable runs and unclosed fences`() {
+        val body = """
+              @link[One](one friendOf)
+               @link[Two](two friendOf)
+                @link[Three](three friendOf)
+
+                 @link[Indented](indented friendOf)
+             ````
+             @link[LongFence](long-fence friendOf)
+             ```
+             @link[ShortClose](short-close friendOf)
+             `````
+             @link[Visible](visible friendOf)
+             ~~~
+             @link[Unclosed](unclosed friendOf)
+        """.trimIndent()
+
+        val extracted = extractor.extract(body, "/tmp/boundaries.md", "boundaries")
+
+        assertEquals(listOf("one", "two", "three", "visible"), extracted.relations.map { it.target })
+    }
+
+    @Test
+    fun `does not treat paragraph continuation indentation as a code block`() {
+        val body = """
+            paragraph
+                @link[Continuation](continuation friendOf)
+
+                @link[Code](code friendOf)
+            @link[Visible](visible friendOf)
+        """.trimIndent()
+
+        val extracted = extractor.extract(body, "/tmp/indented.md", "indented")
+
+        assertEquals(listOf("continuation", "visible"), extracted.relations.map { it.target })
+    }
+
+    @Test
+    fun `handles tabs and CommonMark backtick span delimiters`() {
+        val body = buildString {
+            append("\t@link[Tab](tab friendOf)\n")
+            append("``@link[Double](double friendOf) ` inner``` ``\n")
+            append("`@link[AdjacentOne](adjacent-one friendOf)``")
+            append("@link[AdjacentTwo](adjacent-two friendOf)`\n")
+            append("\\` @link[Escaped](escaped friendOf)\n")
+            append("` unmatched @link[Unmatched](unmatched friendOf)\n")
+            append("@link[Visible](visible friendOf)")
+        }
+
+        val extracted = extractor.extract(body, "/tmp/spans.md", "spans")
+
+        assertEquals(
+            listOf("escaped", "unmatched", "visible"),
+            extracted.relations.map { it.target },
+        )
     }
 
     @Test
@@ -199,6 +337,40 @@ class BodySyntaxExtractorTest {
 
         assertEquals(1, extracted.relations.size)
         assertTrue(extracted.diagnostics.isEmpty())
+    }
+
+    @Test
+    fun `ignores directive keywords followed by identifier characters`() {
+        val body = """
+            @linking @links @link_foo @link1 @link.foo @link:foo @link-foo @linké @link日本語
+            https://example.com/@link:section user@link.example
+            @propsExtra{name = "Ignored"} @props_foo{name = "Ignored"} @props1{name = "Ignored"}
+            @props.foo{name = "Ignored"} @props:foo{name = "Ignored"} @props-foo{name = "Ignored"}
+            @link[Bob](bob friendOf)
+            @props{name = "Alice"}
+        """.trimIndent()
+
+        val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
+
+        assertTrue(extracted.diagnostics.isEmpty(), extracted.diagnostics.joinToString("\n") { it.message })
+        assertEquals(1, extracted.propsBlocks.size)
+        assertEquals("Alice", (extracted.propsBlocks.single().props.getValue("name") as RawString).value)
+        assertEquals(1, extracted.relations.size)
+        assertEquals("bob", extracted.relations.single().target)
+    }
+
+    @Test
+    fun `recognizes standalone link keyword and boundaries before punctuation and whitespace`() {
+        val body = """
+            @link,
+            @link [Bob](bob friendOf)
+            @link
+        """.trimIndent()
+
+        val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
+
+        assertEquals(3, extracted.diagnostics.count { it.message == "@link must be followed immediately by a link" })
+        assertEquals(0, extracted.relations.size)
     }
 
     @Test

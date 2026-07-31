@@ -4,13 +4,16 @@ import dev.usbharu.graphmd.core.GraphDocumentAnalyzer
 import dev.usbharu.graphmd.core.GraphCompiler
 import dev.usbharu.graphmd.core.ReferenceTargetKind
 import dev.usbharu.graphmd.core.model.DocumentKind
+import dev.usbharu.graphmd.core.model.GraphDocument
 import dev.usbharu.graphmd.core.model.NodeDocument
 import dev.usbharu.graphmd.core.model.NodeTypeDocument
 import dev.usbharu.graphmd.core.model.PropType
+import dev.usbharu.graphmd.core.model.RelTypeDocument
 import dev.usbharu.graphmd.core.model.ResolvedPropSchema
 import dev.usbharu.graphmd.core.model.SourceDocument
 import dev.usbharu.graphmd.core.model.TimelineSelector
 import org.eclipse.lsp4j.CompletionParams
+import org.eclipse.lsp4j.CompletionItemKind
 import org.eclipse.lsp4j.CodeActionContext
 import org.eclipse.lsp4j.CodeAction
 import org.eclipse.lsp4j.CodeActionKind
@@ -23,14 +26,19 @@ import org.eclipse.lsp4j.DefinitionParams
 import org.eclipse.lsp4j.DiagnosticSeverity
 import org.eclipse.lsp4j.FileChangeType
 import org.eclipse.lsp4j.FileEvent
+import org.eclipse.lsp4j.HoverParams
 import org.eclipse.lsp4j.InitializeParams
 import org.eclipse.lsp4j.InitializedParams
 import org.eclipse.lsp4j.InsertTextFormat
 import org.eclipse.lsp4j.MessageActionItem
 import org.eclipse.lsp4j.MessageParams
 import org.eclipse.lsp4j.PublishDiagnosticsParams
+import org.eclipse.lsp4j.ReferenceContext
+import org.eclipse.lsp4j.ReferenceParams
 import org.eclipse.lsp4j.Range
+import org.eclipse.lsp4j.RenameParams
 import org.eclipse.lsp4j.Position
+import org.eclipse.lsp4j.RenameOptions
 import org.eclipse.lsp4j.ShowMessageRequestParams
 import org.eclipse.lsp4j.TextDocumentContentChangeEvent
 import org.eclipse.lsp4j.TextDocumentIdentifier
@@ -38,6 +46,8 @@ import org.eclipse.lsp4j.TextDocumentItem
 import org.eclipse.lsp4j.VersionedTextDocumentIdentifier
 import org.eclipse.lsp4j.WorkspaceFolder
 import org.eclipse.lsp4j.services.LanguageClient
+import org.eclipse.lsp4j.jsonrpc.ResponseErrorException
+import org.eclipse.lsp4j.jsonrpc.messages.ResponseErrorCode
 import org.eclipse.lsp4j.jsonrpc.services.ServiceEndpoints
 import java.net.URI
 import java.nio.file.Files
@@ -48,6 +58,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -579,6 +590,43 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `duplicate id diagnostics are stable exact and clear when the id becomes unique`() {
+        val firstUri = "file:///workspace/alice.md"
+        val secondUri = "file:///workspace/bob.md"
+        val duplicateText = "---\nid: duplicate\nkind: Node\ntype: Person\n---"
+        val fixture = serverFixture(
+            mapOf(
+                firstUri to duplicateText,
+                secondUri to duplicateText,
+            ),
+        )
+
+        for (uri in listOf(firstUri, secondUri)) {
+            val diagnostic = fixture.diagnostics.getValue(uri).single {
+                it.message == "Node id must be unique: duplicate"
+            }
+            assertEquals(Range(Position(1, 4), Position(1, 13)), diagnostic.range)
+            assertEquals(DiagnosticSeverity.Error, diagnostic.severity)
+            assertEquals("graphmd", diagnostic.source)
+            assertEquals("SchemaError", diagnostic.code.left)
+        }
+
+        fixture.server.textDocumentService.didChange(
+            DidChangeTextDocumentParams(
+                VersionedTextDocumentIdentifier(secondUri, 2),
+                listOf(TextDocumentContentChangeEvent("---\nid: unique\nkind: Node\ntype: Person\n---")),
+            ),
+        )
+
+        assertTrue(fixture.diagnostics.getValue(firstUri).none {
+            it.message == "Node id must be unique: duplicate"
+        })
+        assertTrue(fixture.diagnostics.getValue(secondUri).none {
+            it.message == "Node id must be unique: duplicate"
+        })
+    }
+
+    @Test
     fun `quick fixes repair temporal bounds and relation constraints`() {
         val nodeUri = "file:///workspace/alice.md"
         val fixture = serverFixture(
@@ -695,6 +743,247 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `Media definitions retain their kind across hover navigation references rename and completion`() {
+        val mediaUri = "file:///workspace/portrait.md"
+        val sourceUri = "file:///workspace/alice.md"
+        val nodeUri = "file:///workspace/bob.md"
+        val mediaText = """
+            ---
+            id: portrait
+            kind: Media
+            type: Image
+            url: https://example.com/portrait.png
+            ---
+        """.trimIndent()
+        val sourceText = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            ---
+            @link{}[Portrait](portrait shows)
+        """.trimIndent()
+        val nodeText = """
+            ---
+            id: bob
+            kind: Node
+            type: Person
+            ---
+        """.trimIndent()
+        val fixture = serverFixture(
+            mapOf(mediaUri to mediaText, sourceUri to sourceText, nodeUri to nodeText),
+        )
+        val mediaId = mediaText.indexOf("portrait")
+        val relationTarget = sourceText.lastIndexOf("portrait")
+
+        assertEquals(mediaUri, fixture.definitions(sourceUri, relationTarget + 1).single().uri)
+        assertEquals(mediaUri, fixture.definitions(mediaUri, mediaId + 1).single().uri)
+        assertTrue(fixture.hover(mediaUri, mediaId + 1).startsWith("**Media** `portrait`"))
+        assertTrue(fixture.hover(sourceUri, relationTarget + 1).startsWith("**Media** `portrait`"))
+        assertTrue(fixture.hover(nodeUri, nodeText.indexOf("bob") + 1).startsWith("**Node** `bob`"))
+
+        val references = fixture.references(mediaUri, mediaId + 1)
+        assertEquals(setOf(mediaUri, sourceUri), references.map { it.uri }.toSet())
+        val rename = fixture.rename(mediaUri, mediaId + 1, "newPortrait")
+        assertEquals(setOf(mediaUri, sourceUri), rename.changes.keys)
+        assertEquals(2, rename.changes.values.sumOf { it.size })
+
+        assertTrue("portrait" in fixture.completions(sourceUri, relationTarget + 2).map { it.label })
+    }
+
+    @Test
+    fun `Node and Media with the same id remain ambiguous in their shared namespace`() {
+        val nodeUri = "file:///workspace/shared-node.md"
+        val mediaUri = "file:///workspace/shared-media.md"
+        val sourceUri = "file:///workspace/source.md"
+        val sourceText = """
+            ---
+            id: source
+            kind: Node
+            type: Person
+            ---
+            @link{}[Shared](shared relatesTo)
+        """.trimIndent()
+        val fixture = serverFixture(
+            mapOf(
+                nodeUri to "---\nid: shared\nkind: Node\ntype: Person\n---",
+                mediaUri to "---\nid: shared\nkind: Media\ntype: Image\nurl: https://example.com/shared.png\n---",
+                sourceUri to sourceText,
+            ),
+        )
+        val targetOffset = sourceText.lastIndexOf("shared") + 1
+
+        assertEquals(setOf(nodeUri, mediaUri), fixture.definitions(sourceUri, targetOffset).map { it.uri }.toSet())
+        val hover = fixture.hover(sourceUri, targetOffset)
+        assertTrue(hover.startsWith("**Node or Media** `shared`"))
+        assertTrue("Ambiguous: 2 definitions" in hover)
+        assertTrue(fixture.diagnostics.getValue(nodeUri).any { it.message == "Node id must be unique: shared" })
+        assertTrue(fixture.diagnostics.getValue(mediaUri).any { it.message == "Node id must be unique: shared" })
+        assertEquals(
+            setOf(nodeUri, mediaUri, sourceUri),
+            fixture.rename(sourceUri, targetOffset, "renamed").changes.keys,
+        )
+    }
+
+    @Test
+    fun `definition resolves each document kind from its own id`() {
+        val documents = linkedMapOf(
+            "file:///workspace/node.md" to "---\nid: node\nkind: Node\ntype: Person\n---",
+            "file:///workspace/media.md" to "---\nid: \"media\"\nkind: Media\ntype: Person\nurl: https://example.com/image.png\n---",
+            "file:///workspace/Person.md" to "---\nid: Person\nkind: NodeType\n---",
+            "file:///workspace/friendOf.md" to "---\nid: friendOf\nkind: RelType\n---",
+            "file:///workspace/CommonEra.md" to "---\nid: CommonEra\nkind: Timeline\ntimecode:\n  type: number\n---",
+        )
+        val fixture = serverFixture(documents)
+
+        documents.forEach { (uri, text) ->
+            val idLineStart = text.indexOf("id:")
+            val colon = text.indexOf(':', idLineStart)
+            val valueStart = (colon + 1 until text.length).first { !text[it].isWhitespace() }
+            val valueEnd = text.indexOf('\n', valueStart)
+            val definitions = fixture.definitions(uri, valueStart)
+            assertEquals(1, definitions.size, uri)
+            val definition = definitions.single()
+
+            assertEquals(uri, definition.uri)
+            assertEquals(Position(1, valueStart - idLineStart), definition.range.start)
+            assertEquals(Position(1, valueEnd - idLineStart), definition.range.end)
+            assertEquals(definition, fixture.definitions(uri, valueEnd).single())
+        }
+
+        val nodeText = documents.getValue("file:///workspace/node.md")
+        assertEquals(
+            "file:///workspace/Person.md",
+            fixture.definitions("file:///workspace/node.md", nodeText.lastIndexOf("Person")).single().uri,
+        )
+    }
+
+    @Test
+    fun `definition id range follows existing scalar boundary semantics`() {
+        val uri = "file:///workspace/quoted.md"
+        val text = "---\nid: \"quoted\"\nkind: NodeType\n---"
+        val fixture = serverFixture(mapOf(uri to text))
+        val quoteStart = text.indexOf('"')
+        val afterClosingQuote = text.indexOf('"', quoteStart + 1) + 1
+
+        assertTrue(fixture.definitions(uri, text.indexOf("id")).isEmpty())
+        assertTrue(fixture.definitions(uri, text.indexOf(':') + 1).isEmpty())
+        assertEquals(uri, fixture.definitions(uri, quoteStart).single().uri)
+        assertEquals(uri, fixture.definitions(uri, afterClosingQuote - 1).single().uri)
+        assertEquals(uri, fixture.definitions(uri, afterClosingQuote).single().uri)
+        assertTrue(fixture.definitions(uri, text.indexOf("kind")).isEmpty())
+    }
+
+    @Test
+    fun `definition from duplicate id returns every candidate including current document`() {
+        val currentUri = "file:///workspace/z-current.md"
+        val firstUri = "file:///workspace/a-first.md"
+        val secondUri = "file:///workspace/b-second.md"
+        val text = "---\nid: duplicate\nkind: NodeType\n---"
+        val fixture = serverFixture(
+            linkedMapOf(
+                secondUri to text,
+                currentUri to text,
+                firstUri to text,
+            ),
+        )
+
+        assertEquals(
+            listOf(currentUri, firstUri, secondUri),
+            fixture.definitions(currentUri, text.indexOf("duplicate")).map { it.uri },
+        )
+        val locations = fixture.definitions(currentUri, text.indexOf("duplicate"))
+        assertEquals(locations.distinct(), locations)
+    }
+
+    @Test
+    fun `definition uses unsaved content and normalizes request uri`() {
+        val canonicalUri = "file:///workspace/current.md"
+        val requestUri = "file:///workspace/folder/../current.md"
+        val index = GraphMdWorkspaceIndex()
+        val original = "---\nid: original\nkind: NodeType\n---"
+        val unsaved = "---\nid: unsaved\nkind: NodeType\n---"
+        index.open(canonicalUri, original)
+        index.upsert(canonicalUri, unsaved)
+
+        val locations = index.definitions(requestUri, Position(1, 5))
+
+        assertEquals(canonicalUri, locations.single().uri)
+        assertEquals(Range(Position(1, 4), Position(1, 11)), locations.single().range)
+    }
+
+    @Test
+    fun `definitions properties and diagnostics use LSP positions in mixed CRLF documents`() {
+        val typeUri = "file:///workspace/Person.md"
+        val nodeUri = "file:///workspace/alice.md"
+        val typeText = "---\r\nkind: NodeType\nprops:\r  名前:\r\n    type: string\nid: Person\r---"
+        val nodeText =
+            "---\r\nkind: Node\rid: alice\ntype: Person\r\nprops:\r  名前: Alice\r\n---\n" +
+                "@link{}[😀](missing friendOf)"
+        val fixture = serverFixture(linkedMapOf(typeUri to typeText, nodeUri to nodeText))
+
+        val selfDefinition = fixture.definitions(typeUri, typeText.indexOf("Person")).single()
+        assertEquals(typeUri, selfDefinition.uri)
+        assertEquals(Range(Position(5, 4), Position(5, 10)), selfDefinition.range)
+
+        val referenceDefinition = fixture.definitions(nodeUri, nodeText.indexOf("Person")).single()
+        assertEquals(selfDefinition, referenceDefinition)
+
+        val propertyDefinition = fixture.definitions(nodeUri, nodeText.indexOf("名前") + 1).single()
+        assertEquals(typeUri, propertyDefinition.uri)
+        assertEquals(Range(Position(3, 2), Position(3, 4)), propertyDefinition.range)
+
+        val unresolved = fixture.diagnostics.getValue(nodeUri).first { it.message == "Unknown Node target: missing" }
+        val missingCharacter = nodeText.substringAfterLast('\n').indexOf("missing")
+        assertEquals(
+            Range(Position(7, missingCharacter), Position(7, missingCharacter + "missing".length)),
+            unresolved.range,
+        )
+    }
+
+    @Test
+    fun `definition handles lone CR empty lines and closing marker at EOF`() {
+        val uri = "file:///workspace/person.md"
+        val text = "---\rkind: NodeType\r\rid: person\r---"
+        val fixture = serverFixture(mapOf(uri to text))
+
+        val definition = fixture.definitions(uri, text.indexOf("person")).single()
+
+        assertEquals(uri, definition.uri)
+        assertEquals(Range(Position(3, 4), Position(3, 10)), definition.range)
+    }
+
+    @Test
+    fun `relation constraint quick fix maps analyzer range in CR document`() {
+        val nodeUri = "file:///workspace/alice.md"
+        val nodeText = "---\rkind: Node\rid: alice\rtype: Person\r---\r@link[😀](acme knows)"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/Person.md" to "---\nid: Person\nkind: NodeType\n---",
+                "file:///workspace/Company.md" to "---\nid: Company\nkind: NodeType\n---",
+                "file:///workspace/knows.md" to "---\nid: knows\nkind: RelType\nfrom: [Person]\nto: [Person]\n---",
+                "file:///workspace/worksAt.md" to "---\nid: worksAt\nkind: RelType\nfrom: [Person]\nto: [Company]\n---",
+                "file:///workspace/acme.md" to "---\nid: acme\nkind: Node\ntype: Company\n---",
+                nodeUri to nodeText,
+            ),
+        )
+
+        val edit = fixture.actions(nodeUri, "Relation target type Company is not allowed for knows")
+            .first { it.title == "Change relation type to 'worksAt'" }
+            .edit.changes.getValue(nodeUri).single()
+        val relationLine = nodeText.substringAfterLast('\r')
+        val start = relationLine.indexOf("knows")
+
+        assertEquals(Range(Position(5, start), Position(5, start + "knows".length)), edit.range)
+        assertEquals("worksAt", edit.newText)
+
+        val completions = fixture.server.textDocumentService.completion(
+            CompletionParams(TextDocumentIdentifier(nodeUri), Position(5, start + 2)),
+        ).get().left.orEmpty()
+        assertTrue(completions.any { it.label == "worksAt" })
+    }
+
+    @Test
     fun `property-less relation and timeline ids are discovered`() {
         val analysis = analyzer.analyze(
             """
@@ -714,6 +1003,338 @@ class GraphMdLanguageServerTest {
         assertTrue(analysis.references.any { it.kind == ReferenceTargetKind.Node && it.targetId == "bob" })
         assertTrue(analysis.references.any { it.kind == ReferenceTargetKind.RelType && it.targetId == "friendOf" })
         assertEquals(2, analysis.references.count { it.kind == ReferenceTargetKind.Timeline && it.targetId == "CommonEra" })
+    }
+
+    @Test
+    fun `inline timeline token supports definition references rename and exact unknown diagnostic ranges`() {
+        val timelineUri = "file:///workspace/timelines/CommonEra.md"
+        val missingUri = "file:///workspace/missing.md"
+        val quotedUri = "file:///workspace/quoted.md"
+        val missingText = """
+            ---
+            id: missing
+            kind: Node
+            type: Person
+            ---
+            @props{born={timeline=MissingEra,timecode=1},note="validTime=today timeline=Fake"}
+        """.trimIndent()
+        val quotedText = """
+            ---
+            id: quoted
+            kind: Node
+            type: Person
+            ---
+            😀 @props{born={timeline="CommonEra",timecode=1}}
+        """.trimIndent()
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/Person.md" to """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    props:
+                      born:
+                        type: instant
+                        timeline: "*"
+                      note:
+                        type: string
+                    ---
+                """.trimIndent(),
+                timelineUri to "---\nid: CommonEra\nkind: Timeline\ntimecode:\n  type: number\n---",
+                missingUri to missingText,
+                quotedUri to quotedText,
+            ),
+        )
+
+        val quotedOffset = quotedText.indexOf("CommonEra") + 1
+        assertEquals(timelineUri, fixture.definitions(quotedUri, quotedOffset).single().uri)
+
+        val references = fixture.references(quotedUri, quotedOffset)
+        assertEquals(2, references.size)
+        assertTrue(references.any { it.uri == timelineUri && it.range.start == Position(1, 4) })
+        assertTrue(references.any { it.uri == quotedUri && it.range.start == Position(5, 26) && it.range.end == Position(5, 35) })
+
+        val rename = fixture.rename(quotedUri, quotedOffset, "ModernEra")!!
+        assertEquals("ModernEra", rename.changes.getValue(quotedUri).single().newText)
+        assertEquals(Range(Position(5, 26), Position(5, 35)), rename.changes.getValue(quotedUri).single().range)
+
+        val unknown = fixture.diagnostics.getValue(missingUri).single { it.message == "Unknown Timeline: MissingEra" }
+        assertEquals(Range(Position(5, 22), Position(5, 32)), unknown.range)
+        assertTrue(fixture.diagnostics.getValue(missingUri).none { "today" in it.message || "Fake" in it.message })
+    }
+
+    @Test
+    fun `legacy Property Schema timeline selectors support definition references rename and diagnostics`() {
+        val timelineUri = "file:///workspace/timelines/CommonEra.md"
+        val schemaUri = "file:///workspace/types/Event.md"
+        val schemaText = """
+            ---
+            id: Event
+            kind: NodeType
+            props:
+              compact:
+                type: instant
+                timeline:
+                  - CommonEra:
+                    mapped: false
+              explicit:
+                type: instant
+                timeline:
+                  - mapped: true
+                    extra: ignored
+                    id: "CommonEra"
+              missingCompact:
+                type: instant
+                timeline:
+                  - MissingCompact:
+                    mapped: false
+              missingExplicit:
+                type: instant
+                timeline:
+                  - mapped: false
+                    id: 'MissingExplicit'
+            ---
+        """.trimIndent()
+        val fixture = serverFixture(
+            mapOf(
+                timelineUri to "---\r\nid: CommonEra\r\nkind: Timeline\r\n---",
+                schemaUri to schemaText,
+            ),
+        )
+        val compactOffset = schemaText.indexOf("CommonEra:")
+        val explicitOffset = schemaText.indexOf("\"CommonEra\"") + 1
+
+        assertEquals(timelineUri, fixture.definitions(schemaUri, compactOffset + 1).single().uri)
+        assertEquals(timelineUri, fixture.definitions(schemaUri, explicitOffset + 1).single().uri)
+        assertEquals(3, fixture.references(schemaUri, compactOffset + 1).size)
+
+        val rename = assertNotNull(fixture.rename(schemaUri, explicitOffset + 1, "SharedEra"))
+        assertEquals(3, rename.changes.values.sumOf { it.size })
+        val timelineEdit = rename.changes.getValue(timelineUri).single()
+        assertEquals(Range(Position(1, 4), Position(1, 13)), timelineEdit.range)
+        val schemaEdits = rename.changes.getValue(schemaUri)
+        assertEquals(2, schemaEdits.size)
+        assertTrue(schemaEdits.all { it.newText == "SharedEra" })
+        assertEquals(
+            setOf(positionAt(schemaText, compactOffset), positionAt(schemaText, explicitOffset)),
+            schemaEdits.map { it.range.start }.toSet(),
+        )
+
+        val missingCompactOffset = schemaText.indexOf("MissingCompact:")
+        val missingExplicitOffset = schemaText.indexOf("'MissingExplicit'") + 1
+        val missingCompact = fixture.diagnostics.getValue(schemaUri).single { it.message == "Unknown Timeline: MissingCompact" }
+        val missingExplicit = fixture.diagnostics.getValue(schemaUri).single { it.message == "Unknown Timeline: MissingExplicit" }
+        assertEquals(positionAt(schemaText, missingCompactOffset), missingCompact.range.start)
+        assertEquals(positionAt(schemaText, missingCompactOffset + "MissingCompact".length), missingCompact.range.end)
+        assertEquals(positionAt(schemaText, missingExplicitOffset), missingExplicit.range.start)
+        assertEquals(positionAt(schemaText, missingExplicitOffset + "MissingExplicit".length), missingExplicit.range.end)
+    }
+
+    @Test
+    fun `double quoted selector escapes resolve rename and locate diagnostics by raw range`() {
+        val timelineUri = "file:///workspace/timelines/CommonqEra.md"
+        val schemaUri = "file:///workspace/types/EscapedEvent.md"
+        val timelineText = """
+            ---
+            id: "Common\qEra"
+            kind: Timeline
+            ---
+        """.trimIndent()
+        val schemaText = """
+            ---
+            id: EscapedEvent
+            kind: NodeType
+            props:
+              known:
+                type: instant
+                timeline: "Common\qEra"
+              missing:
+                type: instant
+                timeline:
+                  - id: "Missing\qEra"
+                    mapped: false
+            ---
+        """.trimIndent()
+        val fixture = serverFixture(mapOf(timelineUri to timelineText, schemaUri to schemaText))
+        val knownOffset = schemaText.indexOf("""Common\qEra""")
+
+        assertEquals(timelineUri, fixture.definitions(schemaUri, knownOffset + 1).single().uri)
+        assertEquals(2, fixture.references(schemaUri, knownOffset + 1).size)
+        val rename = assertNotNull(fixture.rename(schemaUri, knownOffset + 1, "RenamedEra"))
+        assertEquals(2, rename.changes.values.sumOf { it.size })
+        assertEquals(
+            Range(positionAt(schemaText, knownOffset), positionAt(schemaText, knownOffset + """Common\qEra""".length)),
+            rename.changes.getValue(schemaUri).single().range,
+        )
+
+        val missingRaw = """Missing\qEra"""
+        val missingOffset = schemaText.indexOf(missingRaw)
+        val diagnostic = fixture.diagnostics.getValue(schemaUri).single { it.message == "Unknown Timeline: MissingqEra" }
+        assertEquals(
+            Range(positionAt(schemaText, missingOffset), positionAt(schemaText, missingOffset + missingRaw.length)),
+            diagnostic.range,
+        )
+    }
+
+    @Test
+    fun `nested front matter id and type do not participate in navigation rename or diagnostics`() {
+        val typeUri = "file:///workspace/types/Person.md"
+        val nodeUri = "file:///workspace/alice.md"
+        val typeText = "---\nid: Person\nkind: NodeType\n---"
+        val nodeText = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            props:
+              metadata:
+                id: alice
+                type: MissingNestedType
+              values:
+                - id: nested-list
+                  type: Person
+            ---
+        """.trimIndent()
+        val fixture = serverFixture(mapOf(typeUri to typeText, nodeUri to nodeText))
+
+        assertTrue(fixture.definitions(nodeUri, nodeText.indexOf("MissingNestedType") + 1).isEmpty())
+        assertTrue(fixture.definitions(nodeUri, nodeText.indexOf("id: alice", nodeText.indexOf("props:")) + 4).isEmpty())
+        assertEquals(
+            typeUri,
+            fixture.definitions(nodeUri, nodeText.indexOf("type: Person") + "type: ".length + 1).single().uri,
+        )
+        assertTrue(
+            fixture.diagnostics.getValue(nodeUri).none { it.message == "Unknown NodeType: MissingNestedType" },
+        )
+
+        val definitionPosition = Position(1, 5)
+        val references = fixture.server.textDocumentService.references(
+            ReferenceParams(TextDocumentIdentifier(typeUri), definitionPosition, ReferenceContext(true)),
+        ).get()
+        assertEquals(2, references.size)
+
+        val rename = fixture.server.textDocumentService.rename(
+            RenameParams(TextDocumentIdentifier(typeUri), definitionPosition, "Human"),
+        ).get()
+        assertNotNull(rename)
+        assertEquals(2, rename.changes.orEmpty().values.sumOf { it.size })
+        assertEquals(1, rename.changes.orEmpty().getValue(nodeUri).size)
+    }
+
+    @Test
+    fun `rename advertises preparation and accepts only canonical GraphMD ids`() {
+        val renameProvider = GraphMdLanguageServer().initialize(InitializeParams()).get().capabilities.renameProvider
+        assertTrue(renameProvider.isRight)
+        assertEquals(true, (renameProvider.right as RenameOptions).prepareProvider)
+
+        val index = GraphMdWorkspaceIndex()
+        val uri = "file:///workspace/node.md"
+        index.upsert(uri, graphDocument("old", "NodeType"))
+
+        listOf("A", "_", "node_01.part:local-name").forEach { newName ->
+            val edit = index.rename(uri, Position(1, 5), newName)
+            assertEquals(newName, edit?.changes?.get(uri)?.single()?.newText)
+        }
+        listOf("", " ", "1node", ".node", ":node", "-node", "node/name", "node%name", "node)", "ノード", "node\nname").forEach { newName ->
+            val error = assertFailsWith<ResponseErrorException> {
+                index.rename(uri, Position(1, 5), newName)
+            }
+            assertEquals(ResponseErrorCode.RequestFailed.value, error.responseError.code)
+            assertTrue(error.message.orEmpty().contains("[A-Za-z_][A-Za-z0-9_.:-]*"))
+        }
+    }
+
+    @Test
+    fun `rename updates definitions and references for every symbol namespace`() {
+        val index = GraphMdWorkspaceIndex()
+        val personUri = "file:///workspace/Person.md"
+        val relationUri = "file:///workspace/friendOf.md"
+        val timelineUri = "file:///workspace/Era.md"
+        val aliceUri = "file:///workspace/alice.md"
+        val bobUri = "file:///workspace/bob.md"
+        index.upsert(personUri, graphDocument("Person", "NodeType"))
+        index.upsert(relationUri, graphDocument("friendOf", "RelType"))
+        index.upsert(timelineUri, "---\nid: Era\nkind: Timeline\ntimecode:\n  type: number\n---")
+        index.upsert(bobUri, "---\nid: bob\nkind: Node\ntype: Person\n---")
+        index.upsert(
+            aliceUri,
+            """
+                ---
+                id: alice
+                kind: Node
+                type: Person
+                validTime:
+                  - timeline: Era
+                ---
+                @link[Bob](bob friendOf)
+            """.trimIndent(),
+        )
+
+        listOf(
+            Triple(personUri, "Person2", aliceUri),
+            Triple(relationUri, "relatedTo", aliceUri),
+            Triple(timelineUri, "ModernEra", aliceUri),
+            Triple(bobUri, "robert", aliceUri),
+        ).forEach { (definitionUri, newName, referenceUri) ->
+            val edit = index.rename(definitionUri, Position(1, 5), newName)
+            assertEquals(newName, edit?.changes?.get(definitionUri)?.single()?.newText)
+            assertTrue(edit?.changes?.get(referenceUri).orEmpty().any { it.newText == newName })
+        }
+    }
+
+    @Test
+    fun `rename rejects same namespace collisions including Media and ambiguous sources`() {
+        val index = GraphMdWorkspaceIndex()
+        val sourceUri = "file:///workspace/source.md"
+        index.upsert(sourceUri, "---\nid: source\nkind: Node\ntype: Asset\n---")
+        index.upsert("file:///workspace/media.md", "---\nid: media\nkind: Media\ntype: Asset\nurl: image.png\n---")
+        index.upsert("file:///workspace/Asset.md", graphDocument("Asset", "NodeType"))
+
+        val mediaCollision = assertFailsWith<ResponseErrorException> {
+            index.rename(sourceUri, Position(1, 5), "media")
+        }
+        assertTrue(mediaCollision.message.orEmpty().contains("already defined"))
+
+        val differentKind = index.rename(sourceUri, Position(1, 5), "Asset")
+        assertEquals("Asset", differentKind?.changes?.get(sourceUri)?.single()?.newText)
+        assertEquals("source", index.rename(sourceUri, Position(1, 5), "source")?.changes?.get(sourceUri)?.single()?.newText)
+        assertEquals("Media", index.rename(sourceUri, Position(1, 5), "Media")?.changes?.get(sourceUri)?.single()?.newText)
+
+        listOf("NodeType", "RelType", "Timeline").forEach { kind ->
+            val kindIndex = GraphMdWorkspaceIndex()
+            val firstUri = "file:///workspace/$kind-first.md"
+            kindIndex.upsert(firstUri, graphDocument("first", kind))
+            kindIndex.upsert("file:///workspace/$kind-second.md", graphDocument("second", kind))
+            assertFailsWith<ResponseErrorException> {
+                kindIndex.rename(firstUri, Position(1, 5), "second")
+            }
+        }
+
+        val duplicateIndex = GraphMdWorkspaceIndex()
+        duplicateIndex.upsert("file:///workspace/duplicate-a.md", graphDocument("duplicate", "NodeType"))
+        duplicateIndex.upsert("file:///workspace/duplicate-b.md", graphDocument("duplicate", "NodeType"))
+        val ambiguous = assertFailsWith<ResponseErrorException> {
+            duplicateIndex.rename("file:///workspace/duplicate-a.md", Position(1, 5), "unique")
+        }
+        assertTrue(ambiguous.message.orEmpty().contains("ambiguous"))
+        assertFailsWith<ResponseErrorException> {
+            duplicateIndex.prepareRename("file:///workspace/duplicate-a.md", Position(1, 5))
+        }
+    }
+
+    @Test
+    fun `prepare rename uses unsaved symbols and noncanonical ids can be repaired`() {
+        val index = GraphMdWorkspaceIndex()
+        val uri = "file:///workspace/unsaved.md"
+        index.upsert(uri, graphDocument("disk-name", "NodeType"))
+        index.upsert(uri, graphDocument("bad/id", "NodeType"))
+
+        val prepared = assertNotNull(index.prepareRename(uri, Position(1, 6)))
+        assertEquals("bad/id", prepared.placeholder)
+        assertEquals(Range(Position(1, 4), Position(1, 10)), prepared.range)
+
+        val edit = assertNotNull(index.rename(uri, Position(1, 6), "canonical.id"))
+        assertEquals("canonical.id", edit.changes?.get(uri)?.single()?.newText)
     }
 
     @Test
@@ -911,6 +1532,97 @@ class GraphMdLanguageServerTest {
         assertEquals(ReferenceTargetKind.NodeType, analyzer.inferCompletionKind(analysis, typeOffset))
         assertEquals(ReferenceTargetKind.RelType, analyzer.inferCompletionKind(analysis, relationOffset))
         assertNotNull(analyzer.findReferenceAt(analysis, analysis.text.indexOf("fri") + 1))
+    }
+
+    @Test
+    fun `node type completion includes definitions outside types directories`() {
+        val nodeText = "---\nid: alice\nkind: Node\ntype: Canonical\n---"
+        val nodeTypeText = "---\nid: Child\nkind: NodeType\nextends: Canonical\n---"
+        val relTypeText = "---\nid: connects\nkind: RelType\nfrom: Canonical\nto: Canonical\n---"
+        val nodeUri = "file:///workspace/alice.md"
+        val nodeTypeUri = "file:///workspace/models/Child.md"
+        val relTypeUri = "file:///workspace/relations/connects.md"
+        val server = serverFixture(
+            mapOf(
+                "file:///workspace/types/Canonical.md" to graphDocument("Canonical", "NodeType"),
+                "file:///workspace/models/nested/Alpha.md" to graphDocument("Alpha", "NodeType"),
+                "file:///C:/graph/schemas/WindowsNode.md" to graphDocument("WindowsNode", "NodeType"),
+                "file:///workspace/duplicates/Alpha.md" to graphDocument("Alpha", "NodeType"),
+                "file:///workspace/types/unrelated-rel.md" to graphDocument("unrelatedRel", "RelType"),
+                "file:///workspace/unrelated-node.md" to graphDocument("unrelatedNode", "Node"),
+                nodeUri to nodeText,
+                nodeTypeUri to nodeTypeText,
+                relTypeUri to relTypeText,
+            ),
+        ).server
+        val expected = listOf("Alpha", "Canonical", "Child", "WindowsNode")
+
+        fun labelsAtValueStart(uri: String, text: String, field: String): List<String> {
+            val line = text.lines().indexOfFirst { it.startsWith("$field:") }
+            val character = text.lines()[line].indexOf(':') + 2
+            return server.textDocumentService.completion(
+                CompletionParams(TextDocumentIdentifier(uri), Position(line, character)),
+            ).get().left.map { it.label }
+        }
+
+        assertEquals(expected, labelsAtValueStart(nodeUri, nodeText, "type"))
+        assertEquals(expected, labelsAtValueStart(nodeTypeUri, nodeTypeText, "extends"))
+        assertEquals(expected, labelsAtValueStart(relTypeUri, relTypeText, "from"))
+
+        val items = server.textDocumentService.completion(
+            CompletionParams(TextDocumentIdentifier(nodeUri), Position(3, "type: ".length)),
+        ).get().left
+        assertEquals(expected, items.map { it.label })
+        assertTrue(items.all { it.kind == CompletionItemKind.Reference })
+        assertTrue(items.all { it.detail == "NodeType" })
+        assertEquals(expected, items.map { it.insertText })
+        assertEquals(expected.map { "1-$it" }, items.map { it.sortText })
+    }
+
+    @Test
+    fun `relation type completion includes definitions outside types directories`() {
+        val relTypeText = "---\nid: childRel\nkind: RelType\nextends: CanonicalRel\n---"
+        val nodeText = "---\nid: alice\nkind: Node\ntype: Person\n---\n@link[Bob](bob CanonicalRel)"
+        val relTypeUri = "file:///workspace/relations/childRel.md"
+        val nodeUri = "file:///workspace/alice.md"
+        val server = serverFixture(
+            mapOf(
+                "file:///workspace/types/CanonicalRel.md" to graphDocument("CanonicalRel", "RelType"),
+                "file:///workspace/relations/nested/AlphaRel.md" to graphDocument("AlphaRel", "RelType"),
+                "file:///C:/graph/schemas/WindowsRel.md" to graphDocument("WindowsRel", "RelType"),
+                "file:///workspace/duplicates/AlphaRel.md" to graphDocument("AlphaRel", "RelType"),
+                "file:///workspace/types/Person.md" to graphDocument("Person", "NodeType"),
+                "file:///workspace/unrelated-node.md" to graphDocument("unrelatedNode", "Node"),
+                relTypeUri to relTypeText,
+                nodeUri to nodeText,
+            ),
+        ).server
+        val expected = listOf("AlphaRel", "CanonicalRel", "childRel", "WindowsRel").sorted()
+
+        val extendsItems = server.textDocumentService.completion(
+            CompletionParams(TextDocumentIdentifier(relTypeUri), Position(3, "extends: ".length)),
+        ).get().left
+        assertEquals(expected, extendsItems.map { it.label })
+        assertEquals(expected.toSet().size, extendsItems.size)
+        assertTrue(extendsItems.all { it.kind == CompletionItemKind.Reference })
+        assertTrue(extendsItems.all { it.detail == "RelType" })
+
+        val relationServer = serverFixture(
+            mapOf(
+                "file:///workspace/types/CanonicalRel.md" to graphDocument("CanonicalRel", "RelType"),
+                "file:///workspace/relations/nested/AlphaRel.md" to graphDocument("AlphaRel", "RelType"),
+                "file:///C:/graph/schemas/WindowsRel.md" to graphDocument("WindowsRel", "RelType"),
+                "file:///workspace/types/Person.md" to graphDocument("Person", "NodeType"),
+                relTypeUri to relTypeText,
+                nodeUri to nodeText,
+            ),
+        ).server
+        val relationItems = relationServer.textDocumentService.completion(
+            CompletionParams(TextDocumentIdentifier(nodeUri), Position(5, "@link[Bob](bob ".length)),
+        ).get().left
+        assertEquals(expected, relationItems.map { it.label })
+        assertTrue(relationItems.all { it.kind == CompletionItemKind.Class })
+        assertTrue(relationItems.all { it.detail == "RelType" })
     }
 
     @Test
@@ -1252,10 +1964,419 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `reference diagnostics distinguish candidate counts and kinds`() {
+        fun node(id: String, type: String, body: String = "") = """
+            ---
+            id: $id
+            kind: Node
+            type: $type
+            ---
+            $body
+        """.trimIndent()
+
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/ambiguous-a.md" to graphDocument("Ambiguous", "NodeType"),
+                "file:///workspace/types/ambiguous-b.md" to graphDocument("Ambiguous", "NodeType"),
+                "file:///workspace/types/wrong.md" to graphDocument("Wrong", "RelType"),
+                "file:///workspace/types/mixed-node-type.md" to graphDocument("Mixed", "NodeType"),
+                "file:///workspace/types/mixed-rel-type.md" to graphDocument("Mixed", "RelType"),
+                "file:///workspace/types/resolved-mixed-node-type.md" to graphDocument("ResolvedMixed", "NodeType"),
+                "file:///workspace/types/resolved-mixed-rel-type.md" to graphDocument("ResolvedMixed", "RelType"),
+                "file:///workspace/types/person.md" to graphDocument("Person", "NodeType"),
+                "file:///workspace/types/friend-of.md" to graphDocument("friendOf", "RelType"),
+                "file:///workspace/unresolved.md" to node("unresolved", "Missing"),
+                "file:///workspace/wrong.md" to node("wrong", "Wrong"),
+                "file:///workspace/ambiguous.md" to node("ambiguous", "Ambiguous"),
+                "file:///workspace/mixed.md" to node("mixed", "Person", "Hello @link{}[Mixed](Mixed friendOf)"),
+                "file:///workspace/resolved-mixed.md" to node("resolvedMixed", "ResolvedMixed"),
+                "file:///workspace/resolved.md" to node("resolved", "Person"),
+            ),
+        )
+
+        val unresolved = fixture.diagnostics.getValue("file:///workspace/unresolved.md")
+            .single { it.message == "Unknown NodeType: Missing" }
+        assertEquals(DiagnosticSeverity.Error, unresolved.severity)
+        assertEquals("ReferenceError", unresolved.code.left)
+        assertEquals(Range(Position(3, 6), Position(3, 13)), unresolved.range)
+
+        val wrong = fixture.diagnostics.getValue("file:///workspace/wrong.md")
+            .single { it.message == "Expected NodeType but found RelType: Wrong" }
+        assertEquals(Range(Position(3, 6), Position(3, 11)), wrong.range)
+
+        val ambiguous = fixture.diagnostics.getValue("file:///workspace/ambiguous.md")
+            .single { it.message == "Ambiguous NodeType reference: Ambiguous" }
+        assertEquals(Range(Position(3, 6), Position(3, 15)), ambiguous.range)
+
+        val mixed = fixture.diagnostics.getValue("file:///workspace/mixed.md")
+            .single { it.message == "Expected Node but found NodeType, RelType: Mixed" }
+        assertEquals(Range(Position(5, 21), Position(5, 26)), mixed.range)
+
+        assertTrue(
+            fixture.diagnostics.getValue("file:///workspace/resolved-mixed.md")
+                .none { it.code?.left == "ReferenceError" && "ResolvedMixed" in it.message },
+        )
+        assertTrue(
+            fixture.diagnostics.getValue("file:///workspace/resolved.md")
+                .none { it.code?.left == "ReferenceError" && "Person" in it.message },
+        )
+    }
+
+    @Test
+    fun `quoted nested Timeline diagnostics use scalar interior ranges`() {
+        val nodeUri = "file:///workspace/quoted-timelines.md"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/person.md" to graphDocument("Person", "NodeType"),
+                "file:///workspace/types/quoted-wrong.md" to graphDocument("QuotedWrong", "NodeType"),
+                "file:///workspace/timelines/quoted-ambiguous-a.md" to graphDocument("QuotedAmbiguous", "Timeline"),
+                "file:///workspace/timelines/quoted-ambiguous-b.md" to graphDocument("QuotedAmbiguous", "Timeline"),
+                nodeUri to """
+                    ---
+                    id: quoted
+                    kind: Node
+                    type: Person
+                    validTime:
+                      - timeline: "QuotedWrong" # wrong kind
+                      - timeline: 'QuotedAmbiguous' # duplicate
+                    props:
+                      label: "QuotedWrong"
+                    ---
+                """.trimIndent(),
+            ),
+        )
+
+        val wrong = fixture.diagnostics.getValue(nodeUri)
+            .single { it.message == "Expected Timeline but found NodeType: QuotedWrong" }
+        assertEquals(Range(Position(5, 15), Position(5, 26)), wrong.range)
+        assertEquals(DiagnosticSeverity.Error, wrong.severity)
+        assertEquals("ReferenceError", wrong.code.left)
+
+        val ambiguous = fixture.diagnostics.getValue(nodeUri)
+            .single { it.message == "Ambiguous Timeline reference: QuotedAmbiguous" }
+        assertEquals(Range(Position(6, 15), Position(6, 30)), ambiguous.range)
+        assertTrue(fixture.actions(nodeUri, ambiguous).isEmpty())
+        assertTrue(
+            fixture.diagnostics.getValue(nodeUri)
+                .none { it.range.start.line == 8 && it.code?.left == "ReferenceError" },
+        )
+    }
+
+    @Test
+    fun `yaml Timeline comments and structural paths stay consistent with compiler`() {
+        val resolvedUri = "file:///workspace/commented.md"
+        val timelinePropsUri = "file:///workspace/timeline-props.md"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/person.md" to graphDocument("Person", "NodeType"),
+                "file:///workspace/timelines/t.md" to graphDocument("T", "Timeline"),
+                resolvedUri to """
+                    ---
+                    id: commented
+                    kind: Node
+                    type: Person
+                    validTime:
+                      - timeline: T # era
+                    ---
+                """.trimIndent(),
+                timelinePropsUri to """
+                    ---
+                    id: Labels
+                    kind: Timeline
+                    props:
+                      from: note
+                      to: other
+                      timeline: label
+                    ---
+                """.trimIndent(),
+            ),
+        )
+
+        assertTrue(
+            fixture.diagnostics.getValue(resolvedUri).none { it.code?.left == "ReferenceError" },
+            fixture.diagnostics.getValue(resolvedUri).joinToString(),
+        )
+        assertTrue(
+            fixture.diagnostics.getValue(timelinePropsUri).none { it.code?.left == "ReferenceError" },
+            fixture.diagnostics.getValue(timelinePropsUri).joinToString(),
+        )
+    }
+
+    @Test
+    fun `mapped selector forms report exact candidate diagnostics`() {
+        val schemaUri = "file:///workspace/types/mapped-selectors.md"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/wrong-mapped.md" to graphDocument("WrongMapped", "NodeType"),
+                "file:///workspace/timelines/ambiguous-mapped-a.md" to graphDocument("AmbiguousMapped", "Timeline"),
+                "file:///workspace/timelines/ambiguous-mapped-b.md" to graphDocument("AmbiguousMapped", "Timeline"),
+                schemaUri to """
+                    ---
+                    id: Event
+                    kind: NodeType
+                    props:
+                      canonical:
+                        type: instant
+                        timeline:
+                          - id: WrongMapped
+                            mapped: true
+                      legacy:
+                        type: instant
+                        timeline:
+                          - AmbiguousMapped:
+                              mapped: true
+                    ---
+                """.trimIndent(),
+            ),
+        )
+
+        val diagnostics = fixture.diagnostics.getValue(schemaUri)
+        val wrong = diagnostics.single {
+            it.message == "Expected Timeline but found NodeType: WrongMapped"
+        }
+        assertEquals(Range(Position(7, 12), Position(7, 23)), wrong.range)
+
+        val ambiguous = diagnostics.single {
+            it.message == "Ambiguous Timeline reference: AmbiguousMapped"
+        }
+        assertEquals(Range(Position(12, 8), Position(12, 23)), ambiguous.range)
+        assertTrue(fixture.actions(schemaUri, ambiguous).isEmpty())
+        assertTrue(diagnostics.none { it.code?.left == "SchemaError" }, diagnostics.joinToString())
+    }
+
+    @Test
+    fun `mapped selectors require boolean flags and preserve punctuated ids`() {
+        val schemaUri = "file:///workspace/types/mapped-selector-boundaries.md"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/third-age.md" to graphDocument("Third.Age", "NodeType"),
+                "file:///workspace/types/missing.md" to graphDocument("MissingMapped", "NodeType"),
+                "file:///workspace/types/legacy.md" to graphDocument("InvalidLegacy", "NodeType"),
+                "file:///workspace/timelines/leading-a.md" to graphDocument("_Leading", "Timeline"),
+                "file:///workspace/timelines/leading-b.md" to graphDocument("_Leading", "Timeline"),
+                schemaUri to """
+                    ---
+                    id: Boundary
+                    kind: NodeType
+                    props:
+                      punctuation:
+                        type: instant
+                        timeline:
+                          - Third.Age:
+                              mapped: false
+                      leading:
+                        type: instant
+                        timeline:
+                          - id: _Leading
+                            mapped: true
+                      missing:
+                        type: instant
+                        timeline:
+                          - id: MissingMapped
+                      nonBoolean:
+                        type: instant
+                        timeline:
+                          - InvalidLegacy:
+                              mapped: nope
+                    ---
+                """.trimIndent(),
+            ),
+        )
+
+        val diagnostics = fixture.diagnostics.getValue(schemaUri)
+        val punctuation = diagnostics.single {
+            it.message == "Expected Timeline but found NodeType: Third.Age"
+        }
+        assertEquals(Range(Position(7, 8), Position(7, 17)), punctuation.range)
+        val leading = diagnostics.single {
+            it.message == "Ambiguous Timeline reference: _Leading"
+        }
+        assertEquals(Range(Position(12, 12), Position(12, 20)), leading.range)
+        assertTrue(
+            diagnostics.none {
+                it.code?.left == "ReferenceError" &&
+                    (it.message.contains("MissingMapped") || it.message.contains("InvalidLegacy"))
+            },
+            diagnostics.joinToString(),
+        )
+        assertEquals(2, diagnostics.count { it.code?.left == "SchemaError" && "selector MUST" in it.message })
+    }
+
+    @Test
+    fun `singular mapped selectors require direct sibling flags`() {
+        val schemaUri = "file:///workspace/types/singular-mapped-selectors.md"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/singular-wrong.md" to graphDocument("SingularWrong", "NodeType"),
+                "file:///workspace/types/deep-wrong.md" to graphDocument("DeepWrong", "NodeType"),
+                "file:///workspace/types/deep-legacy.md" to graphDocument("DeepLegacy", "NodeType"),
+                "file:///workspace/timelines/singular-a.md" to graphDocument("Singular.Ambiguous", "Timeline"),
+                "file:///workspace/timelines/singular-b.md" to graphDocument("Singular.Ambiguous", "Timeline"),
+                schemaUri to """
+                    ---
+                    id: SingularSelectors
+                    kind: NodeType
+                    props:
+                      canonical:
+                        type: instant
+                        timeline:
+                          id: SingularWrong
+                          mapped: true
+                      legacy:
+                        type: instant
+                        timeline:
+                          Singular.Ambiguous:
+                            mapped: false
+                      deepCanonical:
+                        type: instant
+                        timeline:
+                          id: DeepWrong
+                          nested:
+                            mapped: true
+                      deepLegacy:
+                        type: instant
+                        timeline:
+                          DeepLegacy:
+                            nested:
+                              mapped: false
+                    ---
+                """.trimIndent(),
+            ),
+        )
+
+        val diagnostics = fixture.diagnostics.getValue(schemaUri)
+        assertEquals(
+            Range(Position(7, 10), Position(7, 23)),
+            diagnostics.single {
+                it.message == "Expected Timeline but found NodeType: SingularWrong"
+            }.range,
+        )
+        val ambiguous = diagnostics.single {
+            it.message == "Ambiguous Timeline reference: Singular.Ambiguous"
+        }
+        assertEquals(Range(Position(12, 6), Position(12, 24)), ambiguous.range)
+        assertTrue(fixture.actions(schemaUri, ambiguous).isEmpty())
+        assertTrue(
+            diagnostics.none {
+                it.code?.left == "ReferenceError" &&
+                    (it.message.contains("DeepWrong") || it.message.contains("DeepLegacy"))
+            },
+            diagnostics.joinToString(),
+        )
+        assertEquals(2, diagnostics.count { it.code?.left == "SchemaError" && "selector MUST" in it.message })
+    }
+
+    @Test
+    fun `legacy selector payload ids do not become canonical references`() {
+        val schemaUri = "file:///workspace/types/overlapping-selectors.md"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/timelines/nested-a.md" to graphDocument("Nested", "Timeline"),
+                "file:///workspace/timelines/nested-b.md" to graphDocument("Nested", "Timeline"),
+                "file:///workspace/timelines/listed.md" to graphDocument("Listed", "Timeline"),
+                "file:///workspace/types/spurious.md" to graphDocument("Spurious", "NodeType"),
+                "file:///workspace/types/also-spurious.md" to graphDocument("AlsoSpurious", "NodeType"),
+                schemaUri to """
+                    ---
+                    id: Overlapping
+                    kind: NodeType
+                    props:
+                      singular:
+                        type: instant
+                        timeline:
+                          Nested:
+                            id: Spurious
+                            mapped: true
+                      listed:
+                        type: instant
+                        timeline:
+                          - Listed:
+                              id: AlsoSpurious
+                              mapped: false
+                    ---
+                """.trimIndent(),
+            ),
+        )
+
+        val diagnostics = fixture.diagnostics.getValue(schemaUri)
+        val nested = diagnostics.single { it.message == "Ambiguous Timeline reference: Nested" }
+        assertEquals(Range(Position(7, 6), Position(7, 12)), nested.range)
+        assertTrue(fixture.actions(schemaUri, nested).isEmpty())
+        assertTrue(
+            diagnostics.none {
+                it.code?.left == "ReferenceError" &&
+                    (it.message.contains("Spurious") || it.message.contains("AlsoSpurious"))
+            },
+            diagnostics.joinToString(),
+        )
+    }
+
+    @Test
+    fun `numeric duration endpoints produce exact Timeline diagnostics`() {
+        val nodeUri = "file:///workspace/numeric-duration.md"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/wrong-numeric.md" to graphDocument("WrongNumeric", "NodeType"),
+                "file:///workspace/types/wrong-nested.md" to graphDocument("WrongNested", "NodeType"),
+                "file:///workspace/timelines/numeric-a.md" to graphDocument("AmbiguousNumeric", "Timeline"),
+                "file:///workspace/timelines/numeric-b.md" to graphDocument("AmbiguousNumeric", "Timeline"),
+                "file:///workspace/timelines/base.md" to graphDocument("Base", "Timeline"),
+                "file:///workspace/types/event.md" to """
+                    ---
+                    id: Event
+                    kind: NodeType
+                    props:
+                      integer:
+                        type: duration
+                      decimal:
+                        type: duration
+                      nested:
+                        type: duration
+                    ---
+                """.trimIndent(),
+                nodeUri to """
+                    ---
+                    id: event
+                    kind: Node
+                    type: Event
+                    props:
+                      integer:
+                        timeline: WrongNumeric
+                        from: 1
+                      decimal:
+                        timeline: AmbiguousNumeric
+                        to: 1.5
+                      nested:
+                        timeline: Base
+                        from:
+                          timeline: WrongNested
+                          timecode: 2
+                    ---
+                """.trimIndent(),
+            ),
+        )
+
+        val diagnostics = fixture.diagnostics.getValue(nodeUri)
+        assertEquals(
+            Range(Position(6, 14), Position(6, 26)),
+            diagnostics.single { it.message == "Expected Timeline but found NodeType: WrongNumeric" }.range,
+        )
+        assertEquals(
+            Range(Position(9, 14), Position(9, 30)),
+            diagnostics.single { it.message == "Ambiguous Timeline reference: AmbiguousNumeric" }.range,
+        )
+        assertEquals(
+            Range(Position(14, 16), Position(14, 27)),
+            diagnostics.single { it.message == "Expected Timeline but found NodeType: WrongNested" }.range,
+        )
+    }
+
+    @Test
     fun `invalid id warning highlights only the id value`() {
         val uri = "file:///workspace/invalid-id.md"
         val escapedUri = "file:///workspace/escaped-invalid-id.md"
         val hashUri = "file:///workspace/hash-invalid-id.md"
+        val whitespaceRelTypeUri = "file:///workspace/whitespace-rel-type-id.md"
         val fixture = serverFixture(
             mapOf(
                 uri to """
@@ -1274,6 +2395,12 @@ class GraphMdLanguageServerTest {
                     ---
                     id: "bad#id"
                     kind: NodeType
+                    ---
+                """.trimIndent(),
+                whitespaceRelTypeUri to """
+                    ---
+                    id: "bad id"
+                    kind: RelType
                     ---
                 """.trimIndent(),
             ),
@@ -1299,6 +2426,13 @@ class GraphMdLanguageServerTest {
         assertEquals(DiagnosticSeverity.Warning, hashDiagnostic.severity)
         assertEquals(Position(1, 5), hashDiagnostic.range.start)
         assertEquals(Position(1, 11), hashDiagnostic.range.end)
+
+        val whitespaceRelTypeDiagnostic = fixture.diagnostics.getValue(whitespaceRelTypeUri).single {
+            it.message == "RelType id MUST NOT contain whitespace"
+        }
+        assertEquals(DiagnosticSeverity.Error, whitespaceRelTypeDiagnostic.severity)
+        assertEquals(Position(1, 5), whitespaceRelTypeDiagnostic.range.start)
+        assertEquals(Position(1, 11), whitespaceRelTypeDiagnostic.range.end)
     }
 
     @Test
@@ -1321,6 +2455,123 @@ class GraphMdLanguageServerTest {
             assertTrue(client.notifications.isEmpty())
             server.initialized(InitializedParams())
             assertTrue(client.latest(uri).any { it.message == invalidIdWarning })
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `deleting a watched file clears its published diagnostics`() {
+        val root = Files.createTempDirectory("graphmd-lsp-delete-diagnostics")
+        try {
+            val file = root.resolve("timeline.md")
+            val uri = file.toUri().toString()
+            Files.writeString(file, graphDocument("INVALID ID@", "Timeline"))
+            val client = RecordingLanguageClient()
+            val server = initializedServer(root, client)
+
+            assertTrue(client.latest(uri).any { it.message == invalidIdWarning })
+            client.notifications.clear()
+
+            Files.delete(file)
+            server.workspaceService.didChangeWatchedFiles(
+                DidChangeWatchedFilesParams(listOf(FileEvent(uri, FileChangeType.Deleted))),
+            )
+
+            assertEquals(1, client.notifications.count { it.uri == uri })
+            assertTrue(client.notifications.single { it.uri == uri }.diagnostics.isEmpty())
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `deleting a clean watched file publishes one empty clear`() {
+        val root = Files.createTempDirectory("graphmd-lsp-delete-clean")
+        try {
+            val file = root.resolve("timeline.md")
+            val uri = file.toUri().toString()
+            Files.writeString(file, graphDocument("timeline", "Timeline"))
+            val client = RecordingLanguageClient()
+            val server = initializedServer(root, client)
+
+            assertTrue(client.latest(uri).isEmpty())
+            client.notifications.clear()
+
+            Files.delete(file)
+            server.workspaceService.didChangeWatchedFiles(
+                DidChangeWatchedFilesParams(listOf(FileEvent(uri, FileChangeType.Deleted))),
+            )
+            server.workspaceService.didChangeWatchedFiles(
+                DidChangeWatchedFilesParams(listOf(FileEvent(uri, FileChangeType.Deleted))),
+            )
+
+            assertEquals(1, client.notifications.count { it.uri == uri })
+            assertTrue(client.notifications.single { it.uri == uri }.diagnostics.isEmpty())
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `deleting an untracked non-markdown file does not publish diagnostics`() {
+        val root = Files.createTempDirectory("graphmd-lsp-delete-non-markdown")
+        try {
+            val file = root.resolve("notes.txt")
+            val uri = file.toUri().toString()
+            Files.writeString(file, "not markdown")
+            val client = RecordingLanguageClient()
+            val server = initializedServer(root, client)
+            client.notifications.clear()
+
+            Files.delete(file)
+            server.workspaceService.didChangeWatchedFiles(
+                DidChangeWatchedFilesParams(listOf(FileEvent(uri, FileChangeType.Deleted))),
+            )
+
+            assertTrue(client.notifications.none { it.uri == uri })
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `disk deletion keeps open overlay diagnostics and recreate publishes diagnostics again`() {
+        val root = Files.createTempDirectory("graphmd-lsp-delete-open-recreate")
+        try {
+            val file = root.resolve("timeline.md")
+            val uri = file.toUri().toString()
+            Files.writeString(file, graphDocument("timeline", "Timeline"))
+            val client = RecordingLanguageClient()
+            val server = initializedServer(root, client)
+            server.textDocumentService.didOpen(
+                DidOpenTextDocumentParams(
+                    TextDocumentItem(uri, "markdown", 1, graphDocument("INVALID ID@", "Timeline")),
+                ),
+            )
+            assertTrue(client.latest(uri).any { it.message == invalidIdWarning })
+            client.notifications.clear()
+
+            Files.delete(file)
+            server.workspaceService.didChangeWatchedFiles(
+                DidChangeWatchedFilesParams(listOf(FileEvent(uri, FileChangeType.Deleted))),
+            )
+            assertTrue(client.notifications.single { it.uri == uri }.diagnostics.any {
+                it.message == invalidIdWarning
+            })
+
+            server.textDocumentService.didClose(DidCloseTextDocumentParams(TextDocumentIdentifier(uri)))
+            assertTrue(client.latest(uri).isEmpty())
+            client.notifications.clear()
+
+            Files.writeString(file, graphDocument("INVALID ID@", "Timeline"))
+            server.workspaceService.didChangeWatchedFiles(
+                DidChangeWatchedFilesParams(listOf(FileEvent(uri, FileChangeType.Created))),
+            )
+
+            assertTrue(client.notifications.single { it.uri == uri }.diagnostics.any {
+                it.message == invalidIdWarning
+            })
         } finally {
             root.toFile().deleteRecursively()
         }
@@ -1902,6 +3153,307 @@ class GraphMdLanguageServerTest {
         assertEquals(listOf("Entity"), listItems)
     }
 
+    @Test
+    fun `property schema completions require a property key`() {
+        fun labelsAtCursor(
+            source: String,
+            parsedDocument: GraphDocument?,
+            nodePropsSchema: Map<String, ResolvedPropSchema> = emptyMap(),
+        ): List<String> {
+            val offset = source.indexOf("<cursor>")
+            assertTrue(offset >= 0)
+            val text = source.replace("<cursor>", "")
+            return FrontMatterCompletionResolver(
+                text = text,
+                offset = offset,
+                parsedDocument = parsedDocument,
+                nodeTypeIds = emptyList(),
+                relTypeIds = emptyList(),
+                timelineIds = listOf("CommonEra"),
+                nodePropsSchema = nodePropsSchema,
+            ).resolve()?.map { it.label }.orEmpty()
+        }
+
+        val nodeType = NodeTypeDocument(id = "Person", sourcePath = "/tmp/person.md")
+        val relType = RelTypeDocument(id = "Knows", sourcePath = "/tmp/knows.md")
+
+        assertEquals(
+            emptyList(),
+            labelsAtCursor("---\nid: Person\nkind: NodeType\nprops:\n  <cursor>\n---", nodeType),
+        )
+        assertEquals(
+            emptyList(),
+            labelsAtCursor("---\nid: Person\nkind: NodeType\nprops:\n  req<cursor>\n---", nodeType),
+        )
+        assertEquals(
+            listOf("type", "required"),
+            labelsAtCursor("---\nid: Person\nkind: NodeType\nprops:\n  name:\n    <cursor>\n---", nodeType),
+        )
+        assertEquals(
+            listOf("true", "false"),
+            labelsAtCursor("---\nid: Person\nkind: NodeType\nprops:\n  name:\n    required: <cursor>\n---", nodeType),
+        )
+        assertEquals(
+            listOf("type", "required"),
+            labelsAtCursor("---\nid: Person\nkind: NodeType\nprops:\n  required: <cursor>\n---", nodeType),
+        )
+        assertEquals(
+            listOf("type", "required"),
+            labelsAtCursor(
+                "---\nid: Person\nkind: NodeType\nprops:\n  tags:\n    type: array\n    items:\n      <cursor>\n---",
+                nodeType,
+            ),
+        )
+        assertEquals(
+            listOf("true", "false"),
+            labelsAtCursor(
+                "---\nid: Person\nkind: NodeType\nprops:\n  tags:\n    type: array\n    items:\n      required: <cursor>\n---",
+                nodeType,
+            ),
+        )
+        assertEquals(
+            listOf("required"),
+            labelsAtCursor(
+                "---\r\nid: Person\r\nkind: NodeType\r\nprops:\r\n  name:\r\n    type: string\r\n\r\n    # schema comment\r\n    <cursor>\r\n---",
+                nodeType,
+            ),
+        )
+        assertEquals(
+            emptyList(),
+            labelsAtCursor(
+                "---\nid: Person\nkind: NodeType\nprops:\n  name:\n    type: string\n  req<cursor>\n---",
+                nodeType,
+            ),
+        )
+        assertEquals(
+            emptyList(),
+            labelsAtCursor(
+                "---\nid: Person\nkind: NodeType\nmetadata:\n  props:\n    req<cursor>\n---",
+                nodeType,
+            ),
+        )
+        assertEquals(
+            listOf("type", "required"),
+            labelsAtCursor("---\nid: Knows\nkind: RelType\nprops:\n  since:\n    <cursor>\n---", relType),
+        )
+        assertEquals(
+            listOf("type", "required"),
+            labelsAtCursor("---\nid: Draft\nkind: NodeType\nprops:\n  name:\n    <cursor>\n---", null),
+        )
+        assertEquals(
+            listOf("type", "required"),
+            labelsAtCursor("---\nid: DraftRel\nkind: RelType\nprops:\n  weight:\n    <cursor>\n---", null),
+        )
+
+        val instanceCases = listOf(
+            Triple(
+                NodeDocument(id = "alice", type = "Person", sourcePath = "/tmp/alice.md"),
+                mapOf("foo" to ResolvedPropSchema(type = PropType.string)),
+                "foo",
+            ),
+            Triple(
+                NodeDocument(id = "alice", type = "Person", sourcePath = "/tmp/alice.md"),
+                mapOf("foo" to ResolvedPropSchema(type = PropType.string)),
+                "unknown",
+            ),
+            Triple(
+                NodeDocument(id = "alice", type = "Person", sourcePath = "/tmp/alice.md"),
+                emptyMap(),
+                "foo",
+            ),
+            Triple(
+                NodeDocument(
+                    id = "image",
+                    type = "Image",
+                    sourcePath = "/tmp/image.md",
+                    documentKind = DocumentKind.Media,
+                ),
+                mapOf("foo" to ResolvedPropSchema(type = PropType.string)),
+                "foo",
+            ),
+            Triple(
+                NodeDocument(
+                    id = "image",
+                    type = "Image",
+                    sourcePath = "/tmp/image.md",
+                    documentKind = DocumentKind.Media,
+                ),
+                mapOf("foo" to ResolvedPropSchema(type = PropType.string)),
+                "unknown",
+            ),
+            Triple(
+                NodeDocument(
+                    id = "image",
+                    type = "Image",
+                    sourcePath = "/tmp/image.md",
+                    documentKind = DocumentKind.Media,
+                ),
+                emptyMap(),
+                "foo",
+            ),
+        )
+        instanceCases.forEach { (document, schema, property) ->
+            val frontMatter = "---\nid: ${document.id}\nkind: ${document.kind}\ntype: ${document.type}\nprops:\n  $property:"
+            assertEquals(
+                emptyList(),
+                labelsAtCursor("$frontMatter\n    <cursor>\n---", document, schema),
+            )
+            assertEquals(
+                emptyList(),
+                labelsAtCursor("$frontMatter\n    req<cursor>\n---", document, schema),
+            )
+            assertEquals(
+                emptyList(),
+                labelsAtCursor("$frontMatter\n    type: <cursor>\n---", document, schema),
+            )
+            assertEquals(
+                emptyList(),
+                labelsAtCursor("$frontMatter\n    required: <cursor>\n---", document, schema),
+            )
+            assertEquals(
+                emptyList(),
+                labelsAtCursor("$frontMatter\n    timeline: <cursor>\n---", document, schema),
+            )
+        }
+
+    }
+
+    @Test
+    fun `front matter type completion distinguishes document type from property schema type`() {
+        fun complete(markedText: String): List<CompletionEntry> {
+            val marker = "<cursor>"
+            val offset = markedText.indexOf(marker)
+            assertTrue(offset >= 0)
+            return FrontMatterCompletionResolver(
+                text = markedText.replace(marker, ""),
+                offset = offset,
+                parsedDocument = null,
+                nodeTypeIds = listOf("Company", "Person"),
+                relTypeIds = listOf("worksAt"),
+                timelineIds = listOf("CommonEra"),
+            ).resolve().orEmpty()
+        }
+
+        listOf(
+            "---\nid: alice\nkind: Node\ntype: <cursor>\n---",
+            "---\nid: alice\nkind: Node   \ntype: <cursor>\n---",
+            "---\nid: alice\nkind: Node # node document\ntype: <cursor>\n---",
+            "---\nid: alice\nkind: \"Node\" # node document\ntype: <cursor>\n---",
+            "---\nid: alice\nkind: 'Node' # node document\ntype: <cursor>\n---",
+            "---\nid: alice\nkind: Node\ntype:    <cursor>\n---",
+            "---\nid: alice\nkind: Node\ntype: \"<cursor>\"\n---",
+            "---\nid: image\nkind: Media\ntype: <cursor>\nurl: image.png\n---",
+            "---\nid: image\nkind: Media   # media document\ntype: <cursor>\nurl: image.png\n---",
+            "---\nid: image\nkind: \"Media\" # media document\ntype: <cursor>\nurl: image.png\n---",
+            "---\nid: alice\nkind: Node\nprops:\n  score:\n    type: number\n\n# reset to a top-level sibling\ntype: <cursor>\n---",
+        ).forEach { text ->
+            assertEquals(listOf("Company", "Person"), complete(text).map { it.label }, text)
+        }
+
+        val partial = complete("---\nid: alice\nkind: Node\ntype: Per<cursor>\n---")
+        assertEquals(listOf("Person"), partial.map { it.label })
+        assertEquals(CompletionItemKind.Reference, partial.single().kind)
+        assertEquals("Person", partial.single().insertText)
+        assertEquals("NodeType", partial.single().detail)
+        assertEquals(
+            listOf("Person"),
+            complete("---\nid: alice\nkind: Node\ntype: 'Per<cursor>'\n---").map { it.label },
+        )
+        listOf(
+            "---\nid: alice\nkind: Node\ntype: Per   <cursor>\n---",
+            "---\nid: alice\nkind: Node\ntype: Per # partial type<cursor>\n---",
+            "---\nid: alice\nkind: Node\ntype: \"Per\" # partial type<cursor>\n---",
+        ).forEach { text ->
+            assertEquals(listOf("Person"), complete(text).map { it.label }, text)
+        }
+        assertTrue(complete("---\nid: alice\nkind: \"Node#draft\"\ntype: <cursor>\n---").isEmpty())
+        assertTrue(complete("---\nid: alice\nkind: \"No\\\"de\" # escaped quote\ntype: <cursor>\n---").isEmpty())
+        assertTrue(complete("---\nid: alice\nkind: 'No''de' # escaped quote\ntype: <cursor>\n---").isEmpty())
+
+        val nodeTypeProp = complete(
+            """
+            ---
+            id: Person
+            kind: NodeType
+            props:
+              name:
+                # scalar property schema
+                type: <cursor>
+            ---
+            """.trimIndent(),
+        )
+        assertEquals(listOf("number", "string", "text", "instant", "duration", "array"), nodeTypeProp.map { it.label })
+        assertTrue(nodeTypeProp.none { it.label in setOf("Company", "Person") })
+
+        val relTypeProp = complete(
+            """
+            ---
+            id: worksAt
+            kind: RelType
+            from: [Person]
+            to: [Company]
+            props:
+              since:
+                type: st<cursor>
+            ---
+            """.trimIndent(),
+        )
+        assertEquals(listOf("string"), relTypeProp.map { it.label })
+
+        assertTrue(complete("---\nid: Person\nkind: NodeType\ntype: <cursor>\n---").isEmpty())
+        assertTrue(complete("---\nid: worksAt\nkind: RelType\ntype: <cursor>\n---").isEmpty())
+        assertEquals(
+            listOf("Person"),
+            complete("---\nid: worksAt\nkind: RelType\nfrom: Per<cursor>\nto: [Company]\n---").map { it.label },
+        )
+        assertEquals(
+            listOf("Person"),
+            complete("---\nid: worksAt\nkind: RelType\nfrom:\n  - Per<cursor>\nto: [Company]\n---").map { it.label },
+        )
+    }
+
+    @Test
+    fun `front matter type completion handles crlf offsets`() {
+        val markedText = "---\r\nid: alice\r\nkind: Node # document kind\r\n\r\n# type follows\r\ntype: Per<cursor>\r\n---"
+        val marker = "<cursor>"
+        val offset = markedText.indexOf(marker)
+        val items = FrontMatterCompletionResolver(
+            text = markedText.replace(marker, ""),
+            offset = offset,
+            parsedDocument = null,
+            nodeTypeIds = listOf("Company", "Person"),
+            relTypeIds = emptyList(),
+            timelineIds = emptyList(),
+        ).resolve().orEmpty()
+
+        assertEquals(listOf("Person"), items.map { it.label })
+    }
+
+    @Test
+    fun `server completes unfinished node type with workspace node types only`() {
+        val uri = "file:///workspace/alice.md"
+        val text = "---\nid: alice\nkind: Node # node document\ntype: \n---"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/Person.md" to "---\nid: Person\nkind: NodeType\n---",
+                "file:///workspace/types/Company.md" to "---\nid: Company\nkind: NodeType\n---",
+                "file:///workspace/types/worksAt.md" to "---\nid: worksAt\nkind: RelType\n---",
+                uri to text,
+            ),
+        )
+
+        val items = fixture.server.textDocumentService.completion(
+            CompletionParams(TextDocumentIdentifier(uri), Position(3, "type: ".length)),
+        ).get().left.orEmpty()
+
+        assertEquals(listOf("Company", "Person"), items.map { it.label })
+        assertTrue(items.all { it.kind == CompletionItemKind.Reference })
+        assertEquals(listOf("Company", "Person"), items.map { it.insertText })
+        assertTrue(items.all { it.detail == "NodeType" })
+        assertEquals(listOf("1-Company", "1-Person"), items.map { it.sortText })
+        assertTrue(items.all { it.textEdit == null })
+    }
+
     private fun serverFixture(documents: Map<String, String>): ServerFixture {
         val published = mutableMapOf<String, List<org.eclipse.lsp4j.Diagnostic>>()
         val server = GraphMdLanguageServer()
@@ -1937,6 +3489,22 @@ class GraphMdLanguageServerTest {
         ---
     """.trimIndent()
 
+    private fun positionAt(text: String, offset: Int): Position {
+        val line = text.substring(0, offset).count { it == '\n' }
+        val lineStart = text.lastIndexOf('\n', offset - 1).let { if (it < 0) 0 else it + 1 }
+        return Position(line, offset - lineStart)
+    }
+    private fun initializedServer(root: Path, client: RecordingLanguageClient): GraphMdLanguageServer =
+        GraphMdLanguageServer().also { server ->
+            server.connect(client)
+            server.initialize(
+                InitializeParams().apply {
+                    workspaceFolders = listOf(WorkspaceFolder(root.toUri().toString(), "workspace"))
+                },
+            ).get()
+            server.initialized(InitializedParams())
+        }
+
     private class RecordingLanguageClient : LanguageClient {
         val notifications = mutableListOf<PublishDiagnosticsParams>()
 
@@ -1967,12 +3535,51 @@ class GraphMdLanguageServerTest {
         val documents: Map<String, String>,
     ) {
         fun definitions(uri: String, offset: Int): List<org.eclipse.lsp4j.Location> {
-            val text = documents.getValue(uri)
-            val line = text.substring(0, offset).count { it == '\n' }
-            val lineStart = text.lastIndexOf('\n', offset - 1).let { if (it < 0) 0 else it + 1 }
             return server.textDocumentService.definition(
-                DefinitionParams(TextDocumentIdentifier(uri), Position(line, offset - lineStart)),
+                DefinitionParams(TextDocumentIdentifier(uri), position(uri, offset)),
             ).get().left.orEmpty()
+        }
+
+        fun hover(uri: String, offset: Int): String =
+            server.textDocumentService.hover(
+                HoverParams(TextDocumentIdentifier(uri), position(uri, offset)),
+            ).get().contents.right.value
+
+        fun references(uri: String, offset: Int): List<org.eclipse.lsp4j.Location> =
+            server.textDocumentService.references(
+                ReferenceParams(TextDocumentIdentifier(uri), position(uri, offset), ReferenceContext(true)),
+            ).get()
+
+        fun rename(uri: String, offset: Int, newName: String) =
+            server.textDocumentService.rename(
+                RenameParams(TextDocumentIdentifier(uri), position(uri, offset), newName),
+            ).get()
+
+        fun completions(uri: String, offset: Int) =
+            server.textDocumentService.completion(
+                CompletionParams(TextDocumentIdentifier(uri), position(uri, offset)),
+            ).get().left.orEmpty()
+
+        private fun position(uri: String, offset: Int): Position {
+            val text = documents.getValue(uri)
+            var line = 0
+            var lineStart = 0
+            var index = 0
+            while (index < offset) {
+                when (text[index]) {
+                    '\r' -> {
+                        if (text.getOrNull(index + 1) == '\n' && index + 1 < offset) index++
+                        line++
+                        lineStart = index + 1
+                    }
+                    '\n' -> {
+                        line++
+                        lineStart = index + 1
+                    }
+                }
+                index++
+            }
+            return Position(line, offset - lineStart)
         }
 
         fun actions(uri: String, message: String): List<CodeAction> {
