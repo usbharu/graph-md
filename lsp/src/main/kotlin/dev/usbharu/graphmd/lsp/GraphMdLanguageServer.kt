@@ -33,6 +33,7 @@ import kotlin.io.path.readText
 private val GRAPH_MD_ID_REGEX = Regex("[A-Za-z_][A-Za-z0-9_.:-]*")
 private val COMPLETION_REPLACEMENT_TOKEN_REGEX =
     Regex("""-?\d+(?:\.\d*)?|[A-Za-z_][A-Za-z0-9_]*(?:[.:-][A-Za-z0-9_]+)*""")
+private const val CREATE_DEFINITION_COMMAND = "graphmd.createDefinition"
 
 class GraphMdLanguageServer : LanguageServer, LanguageClientAware, GraphMdSearchService {
     private val workspaceIndex = GraphMdWorkspaceIndex()
@@ -52,7 +53,7 @@ class GraphMdLanguageServer : LanguageServer, LanguageClientAware, GraphMdSearch
                     textDocumentSync = Either.forLeft(TextDocumentSyncKind.Full)
                     completionProvider = CompletionOptions().apply {
                         resolveProvider = false
-                        triggerCharacters = listOf(":", "-", " ", "(", "{", ",", "=")
+                        triggerCharacters = listOf(":", "-", " ", "(", "{", ",", "=", "@")
                     }
                     definitionProvider = Either.forLeft(true)
                     referencesProvider = Either.forLeft(true)
@@ -340,6 +341,7 @@ internal class GraphMdWorkspaceIndex(
     fun completions(uri: String, position: Position): List<CompletionItem> {
         val document = documentSnapshot(normalizeUri(uri)) ?: return emptyList()
         yamlFrontMatterCompletions(document, position)?.let { return it }
+        linkSnippetCompletions(document, position)?.let { return it }
         exactPropsCompletions(document, position)?.let { return it }
         exactRelationPropsCompletions(document, position)?.let { return it }
         val referenceKind = analyzer.inferCompletionKind(
@@ -785,12 +787,14 @@ internal class GraphMdWorkspaceIndex(
     private fun quickFix(
         title: String,
         diagnostic: org.eclipse.lsp4j.Diagnostic,
-        edit: WorkspaceEdit,
+        edit: WorkspaceEdit?,
         preferred: Boolean = false,
+        command: Command? = null,
     ): CodeAction = CodeAction(title).apply {
         kind = CodeActionKind.QuickFix
         diagnostics = listOf(diagnostic)
         this.edit = edit
+        this.command = command
         isPreferred = preferred
     }
 
@@ -1129,16 +1133,37 @@ internal class GraphMdWorkspaceIndex(
         val newPath = definitionDirectory.resolve("${target.id}.md")
         val newUri = newPath.toUri().toString()
         if (documentSnapshot(newUri) != null || Files.exists(newPath)) return null
-        val sourceType = (document.analysis.parsed.document as? NodeDocument)?.type
-            ?: completionIds(ReferenceTargetKind.NodeType).firstOrNull()
-            ?: "NodeType"
-        val content = when (target.kind) {
-            ReferenceTargetKind.NodeType -> "---\nid: ${target.id}\nkind: NodeType\nprops:\n---\n"
-            ReferenceTargetKind.RelType -> "---\nid: ${target.id}\nkind: RelType\n---\n"
-            ReferenceTargetKind.Timeline -> "---\nid: ${target.id}\nkind: Timeline\ntimecode:\n  type: number\n---\n"
-            ReferenceTargetKind.Node -> "---\nid: ${target.id}\nkind: Node\ntype: $sourceType\n---\n"
-            ReferenceTargetKind.Media -> "---\nid: ${target.id}\nkind: Media\ntype: $sourceType\nurl: \"\"\n---\n"
+
+        val nodeTypeIds = unambiguousDefinitionIds(ReferenceTargetKind.NodeType)
+        if (target.kind == ReferenceTargetKind.Node || target.kind == ReferenceTargetKind.Media) {
+            if (nodeTypeIds.isEmpty()) return null
+            val choices = nodeTypeIds.map { nodeTypeId ->
+                mapOf(
+                    "label" to nodeTypeId,
+                    "content" to definitionContent(target, nodeTypeId),
+                )
+            }
+            return quickFix(
+                title = "Create ${target.kind.displayName()} '${target.id}'",
+                diagnostic = diagnostic,
+                edit = null,
+                command = Command(
+                    "Create ${target.kind.displayName()} '${target.id}'",
+                    CREATE_DEFINITION_COMMAND,
+                    listOf(
+                        mapOf(
+                            "uri" to newUri,
+                            "kind" to target.kind.displayName(),
+                            "id" to target.id,
+                            "choices" to choices,
+                        ),
+                    ),
+                ),
+                preferred = completionIds(target.kind).isEmpty(),
+            )
         }
+
+        val content = definitionContent(target, null)
         val changes = listOf<Either<TextDocumentEdit, ResourceOperation>>(
             Either.forRight(CreateFile(newUri, CreateFileOptions(false, true))),
             Either.forLeft(
@@ -1154,6 +1179,45 @@ internal class GraphMdWorkspaceIndex(
             WorkspaceEdit(changes),
             preferred = completionIds(target.kind).isEmpty(),
         )
+    }
+
+    private fun definitionContent(target: DiagnosticReferenceTarget, nodeTypeId: String?): String = when (target.kind) {
+        ReferenceTargetKind.NodeType -> "---\nid: ${target.id}\nkind: NodeType\nprops:\n---\n"
+        ReferenceTargetKind.RelType -> "---\nid: ${target.id}\nkind: RelType\n---\n"
+        ReferenceTargetKind.Timeline -> "---\nid: ${target.id}\nkind: Timeline\ntimecode:\n  type: number\n---\n"
+        ReferenceTargetKind.Node -> nodeDefinitionContent(target, "Node", nodeTypeId)
+        ReferenceTargetKind.Media -> nodeDefinitionContent(target, "Media", nodeTypeId, includeUrl = true)
+    }
+
+    private fun nodeDefinitionContent(
+        target: DiagnosticReferenceTarget,
+        kind: String,
+        nodeTypeId: String?,
+        includeUrl: Boolean = false,
+    ): String {
+        val type = requireNotNull(nodeTypeId)
+        return buildString {
+            append("---\n")
+            append("id: ${target.id}\n")
+            append("kind: $kind\n")
+            append("type: $type\n")
+            if (includeUrl) append("url: \"\"\n")
+            append(requiredPropsContent(type))
+            append("---\n")
+        }
+    }
+
+    private fun requiredPropsContent(nodeTypeId: String): String {
+        val requiredProps = nodeTypeSchema(nodeTypeId)?.props
+            ?.filterValues { it.required }
+            .orEmpty()
+        if (requiredProps.isEmpty()) return ""
+        return buildString {
+            append("props:\n")
+            requiredProps.forEach { (key, schema) ->
+                append("  $key: ${defaultValue(schema)}\n")
+            }
+        }
     }
 
     private fun declarationActionForUnknownProperty(
@@ -1342,6 +1406,91 @@ internal class GraphMdWorkspaceIndex(
         return context.items.map { it.toCompletionItem(replacementRange) }
     }
 
+    private fun linkSnippetCompletions(document: IndexedDocument, position: Position): List<CompletionItem>? {
+        val parsed = document.analysis.parsed.document as? NodeDocument ?: return null
+        val trigger = linkSnippetTrigger(document, position) ?: return null
+        val compiled = compiledWorkspace()
+        val relationTypes = compiled.relTypes
+            .filter { relationType ->
+                val allowedFrom = relationType.from
+                allowedFrom == null || allowedFrom.any { allowed ->
+                    nodeTypeMatches(parsed.type, allowed, compiled.nodeTypes)
+                }
+            }
+            .distinctBy { it.id }
+            .sortedBy { it.id }
+
+        val candidates: List<NormalizedRelType?> = if (relationTypes.isEmpty()) listOf(null) else relationTypes
+        return candidates.mapIndexed { index, relationType ->
+            val snippet = linkSnippet(relationType)
+            CompletionItem(relationType?.let { "@link (${it.id})" } ?: "@link").apply {
+                kind = CompletionItemKind.Snippet
+                detail = relationType?.let { "RelType link: ${it.id}" } ?: "GraphMD link"
+                insertText = snippet
+                insertTextFormat = InsertTextFormat.Snippet
+                textEdit = Either.forLeft(
+                    TextEdit(document.analysisRangeOf(trigger), snippet),
+                )
+                sortText = "0-${relationType?.id ?: "link"}-$index"
+            }
+        }
+    }
+
+    private fun linkSnippetTrigger(document: IndexedDocument, position: Position): SourceRange? {
+        val text = document.analysis.text
+        val offset = document.analysisOffsetAt(position).coerceIn(0, text.length)
+        if (offset < document.analysis.frontMatterEndOffset) return null
+
+        var at = offset - 1
+        while (at >= document.analysis.frontMatterEndOffset && isIdentifierPart(text[at])) at--
+        if (text.getOrNull(at) != '@') return null
+        val prefixStart = at + 1
+        val prefix = text.substring(prefixStart, offset)
+        if (!"link".startsWith(prefix)) return null
+        if (at > 0 && (isEscaped(text, at) || isIdentifierPart(text[at - 1]))) return null
+        if (offset < text.length && !text[offset].isWhitespace()) return null
+        if (isMarkdownCodeContext(text, at, document.analysis.frontMatterEndOffset)) return null
+        return SourceRange(at, offset)
+    }
+
+    private fun linkSnippet(relationType: NormalizedRelType?): String = buildString {
+        append("@link")
+        val requiredProps = relationType?.props.orEmpty().filterValues { it.required }
+        if (requiredProps.isNotEmpty()) {
+            append('{')
+            requiredProps.entries.forEachIndexed { index, (name, schema) ->
+                if (index > 0) append(", ")
+                append(name)
+                append(" = ")
+                append(inlineDefaultValue(schema))
+            }
+            append('}')
+        }
+        append('[')
+        append('$').append("{1:title}")
+        append("](")
+        append('$').append("{2:id} ")
+        append('$').append("{3:")
+        append(relationType?.id ?: "reltype")
+        append("})")
+    }
+
+    private fun inlineDefaultValue(schema: ResolvedPropSchema): String = when (schema.type) {
+        PropType.string, PropType.text -> "\"\""
+        PropType.number, PropType.instant -> "0"
+        PropType.duration -> "{ from = 0 }"
+        PropType.array -> "[]"
+    }
+
+    private fun isMarkdownCodeContext(text: String, offset: Int, bodyStartOffset: Int): Boolean {
+        if (bodyStartOffset !in 0..text.length) return false
+        val bodyOffset = offset - bodyStartOffset
+        val body = text.substring(bodyStartOffset)
+        if (bodyOffset !in body.indices) return false
+        val masked = maskCommonMarkCodeRegions(body)
+        return masked[bodyOffset] != body[bodyOffset]
+    }
+
     private fun exactRelationPropsCompletions(document: IndexedDocument, position: Position): List<CompletionItem>? {
         val offset = document.offsetAt(position)
         val relationContext = RelationPropsCompletionContextResolver(document.text, offset).resolve() ?: return null
@@ -1411,6 +1560,19 @@ internal class GraphMdWorkspaceIndex(
             targetId = tokens.firstOrNull()?.trim('"')?.takeIf { !editingTarget || firstWhitespace >= 0 },
             relType = tokens.getOrNull(1)?.trim('"'),
         )
+    }
+
+    private fun isIdentifierPart(char: Char): Boolean =
+        char.isLetterOrDigit() || char == '_' || char == '.' || char == ':' || char == '-'
+
+    private fun isEscaped(text: String, offset: Int): Boolean {
+        var slashCount = 0
+        var index = offset - 1
+        while (index >= 0 && text[index] == '\\') {
+            slashCount++
+            index--
+        }
+        return slashCount % 2 == 1
     }
 
     fun search(params: GraphMdSearchParams): GraphMdSearchResponse {
@@ -1623,6 +1785,13 @@ internal class GraphMdWorkspaceIndex(
             ReferenceTargetKind.Timeline -> definitionsOf(kind).map { it.id }
         }.distinct().sorted()
     }
+
+    private fun unambiguousDefinitionIds(kind: ReferenceTargetKind): List<String> =
+        definitionsOf(kind)
+            .groupBy { it.id }
+            .filterValues { definitions -> definitions.size == 1 }
+            .keys
+            .sorted()
 
     private fun resolve(kind: ReferenceTargetKind, id: String): List<IndexedDefinition> {
         return definitionsCompatibleWith(kind).filter { it.id == id }
