@@ -290,8 +290,9 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
-    fun `link full text follows target title updates and deletion`() {
+    fun `link full text follows link title updates and deletion`() {
         val index = GraphMdWorkspaceIndex()
+        val sourceUri = "file:///workspace/alice.md"
         val targetUri = "file:///workspace/bob.md"
         index.upsert(
             "file:///workspace/Person.md",
@@ -302,7 +303,7 @@ class GraphMdLanguageServerTest {
             "---\nid: friendOf\nkind: RelType\nfrom: [Person]\nto: [Person]\n---",
         )
         index.upsert(
-            "file:///workspace/alice.md",
+            sourceUri,
             """
             ---
             id: alice
@@ -310,12 +311,12 @@ class GraphMdLanguageServerTest {
             type: Person
             ---
             Plain source prose.
-            @link[Visible label](bob friendOf)
+            @link[Old link title](bob friendOf)
             """.trimIndent(),
         )
         index.upsert(
             targetUri,
-            "---\nid: bob\nkind: Node\ntype: Person\n---\n# 古い称号",
+            "---\nid: bob\nkind: Node\ntype: Person\n---\n# Linked target heading",
         )
 
         fun linkSearch(term: String) = index.search(
@@ -327,23 +328,30 @@ class GraphMdLanguageServerTest {
             ),
         )
 
-        assertEquals(listOf("alice", "bob"), linkSearch("古い称号").rows.single().values)
-        assertEquals(listOf("alice", "bob"), linkSearch("Visible label").rows.single().values)
+        assertEquals(listOf("alice", "bob"), linkSearch("Old link title").rows.single().values)
+        assertTrue(linkSearch("Linked target heading").rows.isEmpty())
         assertTrue(linkSearch("Plain source prose").rows.isEmpty())
 
         index.upsert(
-            targetUri,
-            "---\nid: bob\nkind: Node\ntype: Person\n---\n# 新しい称号",
+            sourceUri,
+            """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            ---
+            Plain source prose.
+            @link[New link title](bob friendOf)
+            """.trimIndent(),
         )
 
-        assertTrue(linkSearch("古い称号").rows.isEmpty())
-        assertEquals(listOf("alice", "bob"), linkSearch("新しい称号").rows.single().values)
-        assertEquals(listOf("alice", "bob"), linkSearch("Visible label").rows.single().values)
+        assertTrue(linkSearch("Old link title").rows.isEmpty())
+        assertEquals(listOf("alice", "bob"), linkSearch("New link title").rows.single().values)
+        assertTrue(linkSearch("Linked target heading").rows.isEmpty())
 
-        index.remove(targetUri)
+        index.remove(sourceUri)
 
-        assertTrue(linkSearch("新しい称号").rows.isEmpty())
-        assertTrue(linkSearch("Visible label").rows.isEmpty())
+        assertTrue(linkSearch("New link title").rows.isEmpty())
     }
 
     @Test
