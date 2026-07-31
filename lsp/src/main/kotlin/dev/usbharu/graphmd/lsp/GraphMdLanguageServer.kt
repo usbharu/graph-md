@@ -31,6 +31,8 @@ import kotlin.io.path.isRegularFile
 import kotlin.io.path.readText
 
 private val GRAPH_MD_ID_REGEX = Regex("[A-Za-z_][A-Za-z0-9_.:-]*")
+private val COMPLETION_REPLACEMENT_TOKEN_REGEX =
+    Regex("""-?\d+(?:\.\d*)?|[A-Za-z_][A-Za-z0-9_]*(?:[.:-][A-Za-z0-9_]+)*""")
 
 class GraphMdLanguageServer : LanguageServer, LanguageClientAware, GraphMdSearchService {
     private val workspaceIndex = GraphMdWorkspaceIndex()
@@ -1324,8 +1326,9 @@ internal class GraphMdWorkspaceIndex(
             nodePropsSchema = ((document.analysis.parsed.document as? NodeDocument)?.type
                 ?: frontMatterScalar(document.text, "type"))?.let { nodeTypeSchema(it)?.props }.orEmpty(),
         )
+        val replacementRange = document.completionReplacementRange(position)
         return resolver.resolve()?.map { entry ->
-            entry.toCompletionItem()
+            entry.toCompletionItem(replacementRange)
         }
     }
 
@@ -1335,7 +1338,8 @@ internal class GraphMdWorkspaceIndex(
         val nodeType = parsed?.type ?: frontMatterScalar(document.text, "type") ?: return null
         val schema = nodeTypeSchema(nodeType)?.props ?: return null
         val context = PropsCompletionContextResolver(document.text, offset, schema, timelineIds()).resolve() ?: return null
-        return context.items.map { it.toCompletionItem() }
+        val replacementRange = document.completionReplacementRange(position)
+        return context.items.map { it.toCompletionItem(replacementRange) }
     }
 
     private fun exactRelationPropsCompletions(document: IndexedDocument, position: Position): List<CompletionItem>? {
@@ -1349,7 +1353,8 @@ internal class GraphMdWorkspaceIndex(
             timelineIds = timelineIds(),
             explicitBraceStart = relationContext.braceStart,
         ).resolve() ?: return null
-        return context.items.map { it.toCompletionItem() }
+        val replacementRange = document.completionReplacementRange(position)
+        return context.items.map { it.toCompletionItem(replacementRange) }
     }
 
     private fun contextualReferenceIds(
@@ -1846,11 +1851,14 @@ internal data class CompletionEntry(
     val insertTextFormat: InsertTextFormat = InsertTextFormat.PlainText,
 )
 
-private fun CompletionEntry.toCompletionItem(): CompletionItem = CompletionItem(label).also { item ->
+private fun CompletionEntry.toCompletionItem(replacementRange: Range? = null): CompletionItem = CompletionItem(label).also { item ->
     item.kind = kind
     item.insertText = insertText
     item.detail = detail
     item.insertTextFormat = insertTextFormat
+    if (replacementRange != null && insertText != label) {
+        item.textEdit = Either.forLeft(TextEdit(replacementRange, insertText))
+    }
     item.sortText = when (kind) {
         CompletionItemKind.Property, CompletionItemKind.Field -> "0-$label"
         CompletionItemKind.Reference -> "1-$label"
@@ -3050,6 +3058,22 @@ private data class IndexedDocument(
     fun analysisOffsetAt(position: Position): Int {
         val lineStart = analysisLineStarts.getOrElse(position.line) { analysis.text.length }
         return (lineStart + position.character).coerceAtMost(analysis.text.length)
+    }
+
+    fun completionReplacementRange(position: Position): Range {
+        val lineStart = lineStarts.getOrElse(position.line) { text.length }
+        var lineEnd = lineStart
+        while (lineEnd < text.length && text[lineEnd] != '\r' && text[lineEnd] != '\n') {
+            lineEnd++
+        }
+        val line = text.substring(lineStart, lineEnd)
+        val cursor = position.character.coerceIn(0, line.length)
+        val token = COMPLETION_REPLACEMENT_TOKEN_REGEX.findAll(line).firstOrNull {
+            it.range.first < cursor && cursor <= it.range.last + 1
+        }
+        val start = token?.range?.first ?: cursor
+        val end = token?.range?.last?.plus(1) ?: cursor
+        return Range(Position(position.line, start), Position(position.line, end))
     }
 
     fun rangeOf(sourceRange: SourceRange): Range {

@@ -2073,6 +2073,92 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `props snippet completion replaces only the current token`() {
+        val nodeTypeText = """
+            ---
+            id: Person
+            kind: NodeType
+            props:
+              name:
+                type: string
+            ---
+        """.trimIndent()
+        val propsLine = "@props{na, untouched = \"keep\"}"
+        val nodeText = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            ---
+            $propsLine
+        """.trimIndent()
+        val uri = "file:///workspace/alice.md"
+        val server = serverFixture(
+            mapOf(
+                "file:///workspace/types/Person.md" to nodeTypeText,
+                uri to nodeText,
+            ),
+        ).server
+        val line = nodeText.lines().lastIndex
+        val cursor = propsLine.indexOf("na") + "na".length
+
+        val item = server.textDocumentService.completion(
+            CompletionParams(TextDocumentIdentifier(uri), Position(line, cursor)),
+        ).get().left.single { it.label == "name" }
+        val edit = assertNotNull(item.textEdit?.left)
+
+        assertEquals(Range(Position(line, propsLine.indexOf("na")), Position(line, cursor)), edit.range)
+        assertEquals("name = \"\${1:value}\"", edit.newText)
+        assertEquals(
+            "@props{name = \"\${1:value}\", untouched = \"keep\"}",
+            propsLine.replaceRange(edit.range.start.character, edit.range.end.character, edit.newText),
+        )
+    }
+
+    @Test
+    fun `yaml props snippet completion preserves the rest of the line`() {
+        val nodeTypeText = """
+            ---
+            id: Person
+            kind: NodeType
+            props:
+              name:
+                type: string
+            ---
+        """.trimIndent()
+        val propsLine = "  na # keep"
+        val nodeText = """
+            ---
+            id: bob
+            kind: Node
+            type: Person
+            props:
+            $propsLine
+            ---
+        """.trimIndent()
+        val uri = "file:///workspace/bob.md"
+        val server = serverFixture(
+            mapOf(
+                "file:///workspace/types/Person.md" to nodeTypeText,
+                uri to nodeText,
+            ),
+        ).server
+        val line = nodeText.lines().indexOf(propsLine)
+        val cursor = propsLine.indexOf("na") + "na".length
+
+        val item = server.textDocumentService.completion(
+            CompletionParams(TextDocumentIdentifier(uri), Position(line, cursor)),
+        ).get().left.single { it.label == "name" }
+        val edit = assertNotNull(item.textEdit?.left)
+
+        assertEquals(Range(Position(line, propsLine.indexOf("na")), Position(line, cursor)), edit.range)
+        assertEquals(
+            "  name: \"\${1:value}\" # keep",
+            propsLine.replaceRange(edit.range.start.character, edit.range.end.character, edit.newText),
+        )
+    }
+
+    @Test
     fun `front matter props key completion inserts every supported value shape`() {
         val schema = mapOf(
             "name" to ResolvedPropSchema(type = PropType.string),
