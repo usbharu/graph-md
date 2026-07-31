@@ -32,6 +32,7 @@ import org.eclipse.lsp4j.MessageParams
 import org.eclipse.lsp4j.PublishDiagnosticsParams
 import org.eclipse.lsp4j.Range
 import org.eclipse.lsp4j.Position
+import org.eclipse.lsp4j.RenameOptions
 import org.eclipse.lsp4j.ShowMessageRequestParams
 import org.eclipse.lsp4j.TextDocumentContentChangeEvent
 import org.eclipse.lsp4j.TextDocumentIdentifier
@@ -39,6 +40,8 @@ import org.eclipse.lsp4j.TextDocumentItem
 import org.eclipse.lsp4j.VersionedTextDocumentIdentifier
 import org.eclipse.lsp4j.WorkspaceFolder
 import org.eclipse.lsp4j.services.LanguageClient
+import org.eclipse.lsp4j.jsonrpc.ResponseErrorException
+import org.eclipse.lsp4j.jsonrpc.messages.ResponseErrorCode
 import org.eclipse.lsp4j.jsonrpc.services.ServiceEndpoints
 import java.net.URI
 import java.nio.file.Files
@@ -49,6 +52,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -832,6 +836,122 @@ class GraphMdLanguageServerTest {
         assertTrue(analysis.references.any { it.kind == ReferenceTargetKind.Node && it.targetId == "bob" })
         assertTrue(analysis.references.any { it.kind == ReferenceTargetKind.RelType && it.targetId == "friendOf" })
         assertEquals(2, analysis.references.count { it.kind == ReferenceTargetKind.Timeline && it.targetId == "CommonEra" })
+    }
+
+    @Test
+    fun `rename advertises preparation and accepts only canonical GraphMD ids`() {
+        val renameProvider = GraphMdLanguageServer().initialize(InitializeParams()).get().capabilities.renameProvider
+        assertTrue(renameProvider.isRight)
+        assertEquals(true, (renameProvider.right as RenameOptions).prepareProvider)
+
+        val index = GraphMdWorkspaceIndex()
+        val uri = "file:///workspace/node.md"
+        index.upsert(uri, graphDocument("old", "NodeType"))
+
+        listOf("A", "_", "node_01.part:local-name").forEach { newName ->
+            val edit = index.rename(uri, Position(1, 5), newName)
+            assertEquals(newName, edit?.changes?.get(uri)?.single()?.newText)
+        }
+        listOf("", " ", "1node", ".node", ":node", "-node", "node/name", "node%name", "node)", "ノード", "node\nname").forEach { newName ->
+            val error = assertFailsWith<ResponseErrorException> {
+                index.rename(uri, Position(1, 5), newName)
+            }
+            assertEquals(ResponseErrorCode.RequestFailed.value, error.responseError.code)
+            assertTrue(error.message.orEmpty().contains("[A-Za-z_][A-Za-z0-9_.:-]*"))
+        }
+    }
+
+    @Test
+    fun `rename updates definitions and references for every symbol namespace`() {
+        val index = GraphMdWorkspaceIndex()
+        val personUri = "file:///workspace/Person.md"
+        val relationUri = "file:///workspace/friendOf.md"
+        val timelineUri = "file:///workspace/Era.md"
+        val aliceUri = "file:///workspace/alice.md"
+        val bobUri = "file:///workspace/bob.md"
+        index.upsert(personUri, graphDocument("Person", "NodeType"))
+        index.upsert(relationUri, graphDocument("friendOf", "RelType"))
+        index.upsert(timelineUri, "---\nid: Era\nkind: Timeline\ntimecode:\n  type: number\n---")
+        index.upsert(bobUri, "---\nid: bob\nkind: Node\ntype: Person\n---")
+        index.upsert(
+            aliceUri,
+            """
+                ---
+                id: alice
+                kind: Node
+                type: Person
+                validTime:
+                  - timeline: Era
+                ---
+                @link[Bob](bob friendOf)
+            """.trimIndent(),
+        )
+
+        listOf(
+            Triple(personUri, "Person2", aliceUri),
+            Triple(relationUri, "relatedTo", aliceUri),
+            Triple(timelineUri, "ModernEra", aliceUri),
+            Triple(bobUri, "robert", aliceUri),
+        ).forEach { (definitionUri, newName, referenceUri) ->
+            val edit = index.rename(definitionUri, Position(1, 5), newName)
+            assertEquals(newName, edit?.changes?.get(definitionUri)?.single()?.newText)
+            assertTrue(edit?.changes?.get(referenceUri).orEmpty().any { it.newText == newName })
+        }
+    }
+
+    @Test
+    fun `rename rejects same namespace collisions including Media and ambiguous sources`() {
+        val index = GraphMdWorkspaceIndex()
+        val sourceUri = "file:///workspace/source.md"
+        index.upsert(sourceUri, "---\nid: source\nkind: Node\ntype: Asset\n---")
+        index.upsert("file:///workspace/media.md", "---\nid: media\nkind: Media\ntype: Asset\nurl: image.png\n---")
+        index.upsert("file:///workspace/Asset.md", graphDocument("Asset", "NodeType"))
+
+        val mediaCollision = assertFailsWith<ResponseErrorException> {
+            index.rename(sourceUri, Position(1, 5), "media")
+        }
+        assertTrue(mediaCollision.message.orEmpty().contains("already defined"))
+
+        val differentKind = index.rename(sourceUri, Position(1, 5), "Asset")
+        assertEquals("Asset", differentKind?.changes?.get(sourceUri)?.single()?.newText)
+        assertEquals("source", index.rename(sourceUri, Position(1, 5), "source")?.changes?.get(sourceUri)?.single()?.newText)
+        assertEquals("Media", index.rename(sourceUri, Position(1, 5), "Media")?.changes?.get(sourceUri)?.single()?.newText)
+
+        listOf("NodeType", "RelType", "Timeline").forEach { kind ->
+            val kindIndex = GraphMdWorkspaceIndex()
+            val firstUri = "file:///workspace/$kind-first.md"
+            kindIndex.upsert(firstUri, graphDocument("first", kind))
+            kindIndex.upsert("file:///workspace/$kind-second.md", graphDocument("second", kind))
+            assertFailsWith<ResponseErrorException> {
+                kindIndex.rename(firstUri, Position(1, 5), "second")
+            }
+        }
+
+        val duplicateIndex = GraphMdWorkspaceIndex()
+        duplicateIndex.upsert("file:///workspace/duplicate-a.md", graphDocument("duplicate", "NodeType"))
+        duplicateIndex.upsert("file:///workspace/duplicate-b.md", graphDocument("duplicate", "NodeType"))
+        val ambiguous = assertFailsWith<ResponseErrorException> {
+            duplicateIndex.rename("file:///workspace/duplicate-a.md", Position(1, 5), "unique")
+        }
+        assertTrue(ambiguous.message.orEmpty().contains("ambiguous"))
+        assertFailsWith<ResponseErrorException> {
+            duplicateIndex.prepareRename("file:///workspace/duplicate-a.md", Position(1, 5))
+        }
+    }
+
+    @Test
+    fun `prepare rename uses unsaved symbols and noncanonical ids can be repaired`() {
+        val index = GraphMdWorkspaceIndex()
+        val uri = "file:///workspace/unsaved.md"
+        index.upsert(uri, graphDocument("disk-name", "NodeType"))
+        index.upsert(uri, graphDocument("bad/id", "NodeType"))
+
+        val prepared = assertNotNull(index.prepareRename(uri, Position(1, 6)))
+        assertEquals("bad/id", prepared.placeholder)
+        assertEquals(Range(Position(1, 4), Position(1, 10)), prepared.range)
+
+        val edit = assertNotNull(index.rename(uri, Position(1, 6), "canonical.id"))
+        assertEquals("canonical.id", edit.changes?.get(uri)?.single()?.newText)
     }
 
     @Test
