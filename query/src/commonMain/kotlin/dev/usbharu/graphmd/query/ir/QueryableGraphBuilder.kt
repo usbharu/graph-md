@@ -19,6 +19,7 @@ class QueryableGraphBuilder(
         texts.clear()
 
         val nodeTypes = compilation.nodeTypes.associateBy { it.id }
+        val relationsBySourcePath = compilation.relations.groupBy { it.source.path }
         val nodes = compilation.nodes.map { node ->
             val queryNode = QueryNode(
                 id = NodeId(node.id),
@@ -30,7 +31,7 @@ class QueryableGraphBuilder(
                 source = node.source,
             )
             buildNodeProperties(node)
-            buildBodyText(node, queryNode.validTime)
+            buildBodyText(node, queryNode.validTime, relationsBySourcePath[node.source.path].orEmpty())
             queryNode
         }
 
@@ -264,9 +265,19 @@ class QueryableGraphBuilder(
         }
     }
 
-    private fun buildBodyText(node: NormalizedNode, nodeValidTime: IntervalSet) {
+    private fun buildBodyText(
+        node: NormalizedNode,
+        nodeValidTime: IntervalSet,
+        relations: List<NormalizedRelation>,
+    ) {
         val sourceText = sourceTextByPath[node.source.path] ?: return
-        MarkdownTextExtractor.extract(sourceText).forEachIndexed { index, fragment ->
+        val linkTitles = relations.mapNotNull { relation ->
+            val range = relation.source.range ?: return@mapNotNull null
+            relation.sourceLabel.takeIf(String::isNotBlank)?.let { label ->
+                MarkdownLinkReplacement(range, label)
+            }
+        }
+        MarkdownTextExtractor.extract(sourceText, linkTitles).forEachIndexed { index, fragment ->
             texts += TextAssertion(
                 id = nextId(),
                 stableKey = StableAssertionKey(

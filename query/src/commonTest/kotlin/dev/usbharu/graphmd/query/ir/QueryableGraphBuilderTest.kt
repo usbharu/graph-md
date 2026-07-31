@@ -7,6 +7,7 @@ import dev.usbharu.graphmd.query.model.NodeId
 import dev.usbharu.graphmd.query.model.PropertyPath
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
@@ -36,6 +37,15 @@ class QueryableGraphBuilderTest {
             it.kind == TextKind.PARAGRAPH && "勇者" in it.text
         }
         assertIs<AssertionOwner.Node>(paragraph.owner)
+        assertTrue("Bob" in paragraph.text)
+        assertFalse("@link" in paragraph.text)
+        assertFalse("bob" in paragraph.text)
+        assertFalse("friendOf" in paragraph.text)
+        assertTrue(
+            paragraph.sourceRange?.let { range ->
+                sources.single { it.sourcePath == "/graph/alice.md" }.text.substring(range.start, range.end)
+            }?.contains("@link") == true,
+        )
         assertTrue(graph.textAssertions.any { it.kind == TextKind.PROPERTY_VALUE && it.text == "Alice" })
         assertTrue(graph.textAssertions.any { it.kind == TextKind.RELATION_LABEL && it.text == "Bob" })
 

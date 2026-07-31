@@ -20,10 +20,10 @@ Pass the original `SourceDocument` list when building if normal Markdown body
 text should be searchable. Without it, normalized property strings and relation
 labels are still indexed.
 
-An unscoped `FULLTEXT(link, query)` search includes the visible title of the
-Link: the text inside `@link[title](id relType)`. Use
-`FULLTEXT(link.label, query)` to scope the search to that title. The linked
-target node's Markdown H1, ID, and URL are not Link text.
+Node full-text search includes the visible text of GraphMD links: the text
+inside `@link[title](id relType)` is searchable through both
+`FULLTEXT(node, query)` and `FULLTEXT(node.body, query)`. The link's target ID,
+RelType, and GraphMD syntax are not part of the Node body text.
 
 ## Building and searching
 

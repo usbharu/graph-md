@@ -290,7 +290,7 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
-    fun `link full text follows link title updates and deletion`() {
+    fun `node full text follows link title updates and deletion`() {
         val index = GraphMdWorkspaceIndex()
         val sourceUri = "file:///workspace/alice.md"
         val targetUri = "file:///workspace/bob.md"
@@ -319,18 +319,18 @@ class GraphMdLanguageServerTest {
             "---\nid: bob\nkind: Node\ntype: Person\n---\n# Linked target heading",
         )
 
-        fun linkSearch(term: String) = index.search(
+        fun nodeSearch(term: String) = index.search(
             GraphMdSearchParams(
-                """MATCH (source)-[link:friendOf]->(target)
-                   WHERE FULLTEXT(link, ${'$'}term)
-                   RETURN ID(source) AS source, ID(target) AS target""",
+                """MATCH (node)
+                   WHERE ID(node) = "alice" AND FULLTEXT(node, ${'$'}term)
+                   RETURN ID(node) AS id""",
                 mapOf("term" to "\"$term\""),
             ),
         )
 
-        assertEquals(listOf("alice", "bob"), linkSearch("Old link title").rows.single().values)
-        assertTrue(linkSearch("Linked target heading").rows.isEmpty())
-        assertTrue(linkSearch("Plain source prose").rows.isEmpty())
+        assertEquals(listOf("alice"), nodeSearch("Old link title").rows.single().values)
+        assertTrue(nodeSearch("bob").rows.isEmpty())
+        assertTrue(nodeSearch("friendOf").rows.isEmpty())
 
         index.upsert(
             sourceUri,
@@ -345,13 +345,13 @@ class GraphMdLanguageServerTest {
             """.trimIndent(),
         )
 
-        assertTrue(linkSearch("Old link title").rows.isEmpty())
-        assertEquals(listOf("alice", "bob"), linkSearch("New link title").rows.single().values)
-        assertTrue(linkSearch("Linked target heading").rows.isEmpty())
+        assertTrue(nodeSearch("Old link title").rows.isEmpty())
+        assertEquals(listOf("alice"), nodeSearch("New link title").rows.single().values)
+        assertTrue(nodeSearch("bob").rows.isEmpty())
 
         index.remove(sourceUri)
 
-        assertTrue(linkSearch("New link title").rows.isEmpty())
+        assertTrue(nodeSearch("New link title").rows.isEmpty())
     }
 
     @Test

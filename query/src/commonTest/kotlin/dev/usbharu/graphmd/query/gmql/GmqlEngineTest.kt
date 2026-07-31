@@ -4,6 +4,7 @@ import dev.usbharu.graphmd.core.GraphCompiler
 import dev.usbharu.graphmd.core.model.SourceDocument
 import dev.usbharu.graphmd.query.GraphSearchEngine
 import dev.usbharu.graphmd.query.ir.AssertionOwner
+import dev.usbharu.graphmd.query.ir.TextKind
 import dev.usbharu.graphmd.query.model.*
 import kotlin.coroutines.*
 import kotlin.test.*
@@ -334,63 +335,60 @@ class GmqlEngineTest {
     }
 
     @Test
-    fun `link full text includes the link title but not the linked target title`() {
+    fun `node full text includes the link title without link syntax`() {
         val localSources = sources.map { source ->
             when (source.sourcePath) {
                 "/alice.md" -> source.copy(text = source.text.replace("[Bob]", "[Visible link title]"))
-                "/bob.md" -> source.copy(text = source.text.replace("# Bob", "# Linked target heading"))
                 else -> source
             }
         }
         val localEngine = GraphSearchEngine.build(GraphCompiler().compileSources(localSources), localSources)
-        val relation = localEngine.graph.relationAssertions.single()
+        val nodeText = localEngine.graph.textAssertions.single {
+            it.owner == AssertionOwner.Node(NodeId("alice")) && it.kind == TextKind.PARAGRAPH
+        }
+        assertTrue("Visible link title" in nodeText.text)
+        assertFalse("@link" in nodeText.text)
+        assertFalse("bob" in nodeText.text)
+        assertFalse("friendOf" in nodeText.text)
 
-        assertEquals(
-            listOf("Visible link title"),
-            localEngine.graph.textAssertions
-                .filter { it.owner == AssertionOwner.Relation(relation.id) }
-                .map { it.text },
-            "Only the link title should be owned by the Link.",
-        )
-
-        val byTargetTitle = runSuspend {
+        val byNodeTitle = runSuspend {
             localEngine.queryGmql(
-                """MATCH (a)-[link:friendOf]->(b)
-                   WHERE FULLTEXT(link, "Linked target heading")
-                   RETURN ID(a) AS source, ID(b) AS target""",
+                """MATCH (node)
+                   WHERE ID(node) = "alice" AND FULLTEXT(node, "Visible link title")
+                   RETURN ID(node) AS id""",
             )
         }
-        val byLinkTitle = runSuspend {
+        val byBodyTitle = runSuspend {
             localEngine.queryGmql(
-                """MATCH (a)-[link:friendOf]->(b)
-                   WHERE FULLTEXT(link, "Visible link title")
-                   RETURN ID(a) AS source, ID(b) AS target""",
+                """MATCH (node)
+                   WHERE ID(node) = "alice" AND FULLTEXT(node.body, "Visible link title")
+                   RETURN ID(node) AS id""",
             )
         }
-        val scopedLabel = runSuspend {
+        val byTargetId = runSuspend {
             localEngine.queryGmql(
-                """MATCH (a)-[link:friendOf]->(b)
-                   WHERE FULLTEXT(link.label, "Visible link title")
-                   RETURN ID(a) AS source""",
+                """MATCH (node)
+                   WHERE ID(node) = "alice" AND FULLTEXT(node, "bob")
+                   RETURN ID(node) AS id""",
             )
         }
-        val unrelatedSourceText = runSuspend {
+        val byRelationType = runSuspend {
             localEngine.queryGmql(
-                """MATCH (a)-[link:friendOf]->(b)
-                   WHERE FULLTEXT(link, "勇者")
-                   RETURN ID(a) AS source""",
+                """MATCH (node)
+                   WHERE ID(node) = "alice" AND FULLTEXT(node, "friendOf")
+                   RETURN ID(node) AS id""",
             )
         }
 
-        assertTrue(byTargetTitle.rows.isEmpty(), byTargetTitle.toString())
-        assertEquals(listOf("alice", "bob"), byLinkTitle.rows.single().stringValues())
-        assertEquals(listOf("alice"), scopedLabel.rows.single().stringValues())
-        assertTrue(unrelatedSourceText.rows.isEmpty(), unrelatedSourceText.toString())
+        assertEquals(listOf("alice"), byNodeTitle.rows.single().stringValues())
+        assertEquals(listOf("alice"), byBodyTitle.rows.single().stringValues())
+        assertTrue(byTargetId.rows.isEmpty(), byTargetId.toString())
+        assertTrue(byRelationType.rows.isEmpty(), byRelationType.toString())
 
         val compiled = localEngine.compileGmql(
-            """MATCH (a)-[link:friendOf]->(b)
-               WHERE FULLTEXT(link, "Visible link title")
-               RETURN ID(a) AS source, ID(b) AS target""",
+            """MATCH (node)
+               WHERE ID(node) = "alice" AND FULLTEXT(node.body, "Visible link title")
+               RETURN ID(node) AS id""",
         ).query!!
         assertEquals(
             runSuspend { localEngine.scanGmql(compiled) },
@@ -398,7 +396,7 @@ class GmqlEngineTest {
         )
         val loaded = GraphSearchEngine.loadStatic(localEngine.exportStatic())
         assertEquals(
-            listOf("alice", "bob"),
+            listOf("alice"),
             runSuspend { loaded.executeGmql(compiled) }.rows.single().stringValues(),
         )
     }
