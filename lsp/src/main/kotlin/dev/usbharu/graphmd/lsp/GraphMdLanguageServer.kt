@@ -51,7 +51,7 @@ class GraphMdLanguageServer : LanguageServer, LanguageClientAware, GraphMdSearch
                     textDocumentSync = Either.forLeft(TextDocumentSyncKind.Full)
                     completionProvider = CompletionOptions().apply {
                         resolveProvider = false
-                        triggerCharacters = listOf(":", "-", " ", "(", "{", ",", "=")
+                        triggerCharacters = listOf(":", "-", " ", "(", "{", ",", "=", "@")
                     }
                     definitionProvider = Either.forLeft(true)
                     referencesProvider = Either.forLeft(true)
@@ -339,6 +339,7 @@ internal class GraphMdWorkspaceIndex(
     fun completions(uri: String, position: Position): List<CompletionItem> {
         val document = documentSnapshot(normalizeUri(uri)) ?: return emptyList()
         yamlFrontMatterCompletions(document, position)?.let { return it }
+        linkSnippetCompletions(document, position)?.let { return it }
         exactPropsCompletions(document, position)?.let { return it }
         exactRelationPropsCompletions(document, position)?.let { return it }
         val referenceKind = analyzer.inferCompletionKind(
@@ -1401,6 +1402,91 @@ internal class GraphMdWorkspaceIndex(
         return context.items.map { it.toCompletionItem() }
     }
 
+    private fun linkSnippetCompletions(document: IndexedDocument, position: Position): List<CompletionItem>? {
+        val parsed = document.analysis.parsed.document as? NodeDocument ?: return null
+        val trigger = linkSnippetTrigger(document, position) ?: return null
+        val compiled = compiledWorkspace()
+        val relationTypes = compiled.relTypes
+            .filter { relationType ->
+                val allowedFrom = relationType.from
+                allowedFrom == null || allowedFrom.any { allowed ->
+                    nodeTypeMatches(parsed.type, allowed, compiled.nodeTypes)
+                }
+            }
+            .distinctBy { it.id }
+            .sortedBy { it.id }
+
+        val candidates: List<NormalizedRelType?> = if (relationTypes.isEmpty()) listOf(null) else relationTypes
+        return candidates.mapIndexed { index, relationType ->
+            val snippet = linkSnippet(relationType)
+            CompletionItem(relationType?.let { "@link (${it.id})" } ?: "@link").apply {
+                kind = CompletionItemKind.Snippet
+                detail = relationType?.let { "RelType link: ${it.id}" } ?: "GraphMD link"
+                insertText = snippet
+                insertTextFormat = InsertTextFormat.Snippet
+                textEdit = Either.forLeft(
+                    TextEdit(document.analysisRangeOf(trigger), snippet),
+                )
+                sortText = "0-${relationType?.id ?: "link"}-$index"
+            }
+        }
+    }
+
+    private fun linkSnippetTrigger(document: IndexedDocument, position: Position): SourceRange? {
+        val text = document.analysis.text
+        val offset = document.analysisOffsetAt(position).coerceIn(0, text.length)
+        if (offset < document.analysis.frontMatterEndOffset) return null
+
+        var at = offset - 1
+        while (at >= document.analysis.frontMatterEndOffset && isIdentifierPart(text[at])) at--
+        if (text.getOrNull(at) != '@') return null
+        val prefixStart = at + 1
+        val prefix = text.substring(prefixStart, offset)
+        if (!"link".startsWith(prefix)) return null
+        if (at > 0 && (isEscaped(text, at) || isIdentifierPart(text[at - 1]))) return null
+        if (offset < text.length && !text[offset].isWhitespace()) return null
+        if (isMarkdownCodeContext(text, at, document.analysis.frontMatterEndOffset)) return null
+        return SourceRange(at, offset)
+    }
+
+    private fun linkSnippet(relationType: NormalizedRelType?): String = buildString {
+        append("@link")
+        val requiredProps = relationType?.props.orEmpty().filterValues { it.required }
+        if (requiredProps.isNotEmpty()) {
+            append('{')
+            requiredProps.entries.forEachIndexed { index, (name, schema) ->
+                if (index > 0) append(", ")
+                append(name)
+                append(" = ")
+                append(inlineDefaultValue(schema))
+            }
+            append('}')
+        }
+        append('[')
+        append('$').append("{1:title}")
+        append("](")
+        append('$').append("{2:id} ")
+        append('$').append("{3:")
+        append(relationType?.id ?: "reltype")
+        append("})")
+    }
+
+    private fun inlineDefaultValue(schema: ResolvedPropSchema): String = when (schema.type) {
+        PropType.string, PropType.text -> "\"\""
+        PropType.number, PropType.instant -> "0"
+        PropType.duration -> "{ from = 0 }"
+        PropType.array -> "[]"
+    }
+
+    private fun isMarkdownCodeContext(text: String, offset: Int, bodyStartOffset: Int): Boolean {
+        if (bodyStartOffset !in 0..text.length) return false
+        val bodyOffset = offset - bodyStartOffset
+        val body = text.substring(bodyStartOffset)
+        if (bodyOffset !in body.indices) return false
+        val masked = maskCommonMarkCodeRegions(body)
+        return masked[bodyOffset] != body[bodyOffset]
+    }
+
     private fun exactRelationPropsCompletions(document: IndexedDocument, position: Position): List<CompletionItem>? {
         val offset = document.offsetAt(position)
         val relationContext = RelationPropsCompletionContextResolver(document.text, offset).resolve() ?: return null
@@ -1469,6 +1555,19 @@ internal class GraphMdWorkspaceIndex(
             targetId = tokens.firstOrNull()?.trim('"')?.takeIf { !editingTarget || firstWhitespace >= 0 },
             relType = tokens.getOrNull(1)?.trim('"'),
         )
+    }
+
+    private fun isIdentifierPart(char: Char): Boolean =
+        char.isLetterOrDigit() || char == '_' || char == '.' || char == ':' || char == '-'
+
+    private fun isEscaped(text: String, offset: Int): Boolean {
+        var slashCount = 0
+        var index = offset - 1
+        while (index >= 0 && text[index] == '\\') {
+            slashCount++
+            index--
+        }
+        return slashCount % 2 == 1
     }
 
     fun search(params: GraphMdSearchParams): GraphMdSearchResponse {
