@@ -23,4 +23,12 @@ object GraphMdInline {
         }
         return rawObjectToJsonString(dev.usbharu.graphmd.core.model.RawObject(extracted.propsBlocks.single().props))
     }
+
+    public fun isValidBlockHeader(content: String): Boolean =
+        try {
+            BodyBlockHeaderParser.parse(content)
+            true
+        } catch (_: InlinePropsParseException) {
+            false
+        }
 }

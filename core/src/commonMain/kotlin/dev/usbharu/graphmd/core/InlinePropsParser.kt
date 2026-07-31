@@ -29,16 +29,17 @@ class InlinePropsParser(private val input: String) {
         return value
     }
 
-    internal fun parseValidTimeArgument() {
+    internal fun parseValidTimeArgumentValue(): RawArray {
         skipHorizontalAndNewlines()
         val name = parseIdentifier()
         if (name != "validTime") fail("Expected validTime argument")
         skipHorizontalAndNewlines()
         expect('=')
         skipHorizontalAndNewlines()
-        parseValidTimeExpression()
+        val value = parseValidTimeExpression()
         skipHorizontalAndNewlines()
         if (!isEof()) fail("Unexpected trailing content")
+        return value
     }
 
     private fun parseInlineObject(): RawObject {

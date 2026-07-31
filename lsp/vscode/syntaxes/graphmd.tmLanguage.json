@@ -5,6 +5,9 @@
   "injectionSelector": "L:text.html.markdown",
   "patterns": [
     {
+      "include": "#graphmd-body-block"
+    },
+    {
       "include": "#graphmd-props"
     },
     {
@@ -12,6 +15,55 @@
     }
   ],
   "repository": {
+    "graphmd-body-block": {
+      "patterns": [
+        {
+          "name": "meta.graphmd.body-block.begin.markdown",
+          "begin": "^( {0,3})(:{3,})(?=[ \\t]+\\S)",
+          "beginCaptures": {
+            "2": {
+              "name": "punctuation.definition.graphmd.body-block.begin"
+            }
+          },
+          "end": "$",
+          "patterns": [
+            {
+              "match": "\\b(validTime)(\\s*)(=)",
+              "captures": {
+                "1": {
+                  "name": "keyword.control.graphmd"
+                },
+                "3": {
+                  "name": "keyword.operator.assignment"
+                }
+              }
+            },
+            {
+              "match": "(?<![A-Za-z0-9_.:-])[A-Za-z_][A-Za-z0-9_.:-]*(?![A-Za-z0-9_.:-])",
+              "name": "entity.name.section.graphmd.body-block"
+            },
+            {
+              "include": "#graphmd-object"
+            },
+            {
+              "include": "#graphmd-array"
+            },
+            {
+              "include": "#graphmd-scalars"
+            }
+          ]
+        },
+        {
+          "name": "meta.graphmd.body-block.end.markdown",
+          "match": "^( {0,3})(:{3,})[ \\t]*$",
+          "captures": {
+            "2": {
+              "name": "punctuation.definition.graphmd.body-block.end"
+            }
+          }
+        }
+      ]
+    },
     "graphmd-props": {
       "name": "meta.graphmd.props.inline.markdown",
       "begin": "(@props)(?:\\(validTime=[^)]*\\))?(\\{)",

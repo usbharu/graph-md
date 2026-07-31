@@ -1,5 +1,6 @@
 package dev.usbharu.graphmd.query.ir
 
+import dev.usbharu.graphmd.core.BodySyntaxExtractor
 import dev.usbharu.graphmd.core.model.*
 import dev.usbharu.graphmd.query.model.*
 
@@ -266,7 +267,16 @@ class QueryableGraphBuilder(
 
     private fun buildBodyText(node: NormalizedNode, nodeValidTime: IntervalSet) {
         val sourceText = sourceTextByPath[node.source.path] ?: return
-        MarkdownTextExtractor.extract(sourceText).forEachIndexed { index, fragment ->
+        val bodyStart = MarkdownTextExtractor.bodyStart(sourceText)
+        val body = sourceText.substring(bodyStart)
+        val blocks = BodySyntaxExtractor()
+            .extract(body, node.source.path, node.id)
+            .blocks
+        MarkdownTextExtractor.extract(sourceText, blocks).forEachIndexed { index, fragment ->
+            val fragmentValidTime = fragment.validTime
+                .takeIf { it.isNotEmpty() }
+                ?.let(timelineCatalog::fromValidTimes)
+                ?: nodeValidTime
             texts += TextAssertion(
                 id = nextId(),
                 stableKey = StableAssertionKey(
@@ -276,7 +286,7 @@ class QueryableGraphBuilder(
                 owner = AssertionOwner.Node(NodeId(node.id)),
                 kind = fragment.kind,
                 text = fragment.text,
-                validTime = nodeValidTime,
+                validTime = fragmentValidTime,
                 source = node.source.copy(range = fragment.range),
                 sourceRange = fragment.range,
             )

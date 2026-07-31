@@ -447,4 +447,191 @@ class BodySyntaxExtractorTest {
         assertEquals("CommonEra", (ageTime.values.getValue("timeline") as RawString).value)
         assertEquals("CommonEra", extracted.relations.single().validTime.single().timeline)
     }
+
+    @Test
+    fun `extracts named nested blocks and applies nearest last validTime`() {
+        val extracted = extractor.extract(
+            """
+            ::: history history validTime=Outer(from=0 ,to=10)
+            @props{age=10}
+            ::::: spoiler annotation validTime=Discarded validTime = Inner(from=2,to=3)
+            @link[Bob](bob friendOf)
+            :::::
+            :::
+            """.trimIndent(),
+            "/tmp/alice.md",
+            "alice",
+        )
+
+        assertTrue(extracted.diagnostics.isEmpty(), extracted.diagnostics.joinToString("\n") { it.message })
+        assertEquals(2, extracted.blocks.size)
+        val outer = extracted.blocks.first { it.fenceLength == 3 }
+        val inner = extracted.blocks.first { it.fenceLength == 5 }
+        assertEquals(listOf("history", "history"), outer.names)
+        assertEquals(listOf("spoiler", "annotation"), inner.names)
+        assertEquals("Outer", outer.validTime.single().timeline)
+        assertEquals("Inner", inner.validTime.single().timeline)
+        assertEquals(0.0, outer.validTime.single().from?.timecode)
+        assertEquals(3.0, inner.validTime.single().to?.timecode)
+
+        val age = (extracted.propsBlocks.single().props.getValue("age") as RawArray).values.single() as RawObject
+        val ageTime = (age.values.getValue("validTime") as RawArray).values.single() as RawObject
+        assertEquals("Outer", (ageTime.values.getValue("timeline") as RawString).value)
+        assertEquals("Inner", extracted.relations.single().validTime.single().timeline)
+    }
+
+    @Test
+    fun `names-only nested block inherits parent validTime while explicit directives win`() {
+        val extracted = extractor.extract(
+            """
+            ::: history validTime=Outer
+            ::::: note
+            @props{inherited=1,explicit(validTime=Property)=2}
+            @link(validTime=Relation)[Bob](bob friendOf)
+            :::::
+            :::
+            """.trimIndent(),
+            "/tmp/alice.md",
+            "alice",
+        )
+
+        assertTrue(extracted.diagnostics.isEmpty(), extracted.diagnostics.joinToString("\n") { it.message })
+        val props = extracted.propsBlocks.single().props
+        fun timeline(name: String): String {
+            val entry = (props.getValue(name) as RawArray).values.single() as RawObject
+            val validTime = (entry.values.getValue("validTime") as RawArray).values.single() as RawObject
+            return (validTime.values.getValue("timeline") as RawString).value
+        }
+        assertEquals("Outer", timeline("inherited"))
+        assertEquals("Property", timeline("explicit"))
+        assertEquals("Relation", extracted.relations.single().validTime.single().timeline)
+    }
+
+    @Test
+    fun `parses skipped nesting levels and whitespace inside validTime arrays and strings`() {
+        val extracted = extractor.extract(
+            """
+            ::: outer
+            ::::: middle
+            :::::::: inner validTime=[EraA, EraB(from=1, to={timecode=2, value="two words"})] tail
+            text
+            ::::::::
+            :::::
+            :::
+            """.trimIndent(),
+            "/tmp/alice.md",
+            "alice",
+        )
+
+        assertTrue(extracted.diagnostics.isEmpty(), extracted.diagnostics.joinToString("\n") { it.message })
+        assertEquals(listOf(3, 5, 8), extracted.blocks.map { it.fenceLength })
+        val inner = extracted.blocks.last()
+        assertEquals(listOf("inner", "tail"), inner.names)
+        assertEquals(listOf("EraA", "EraB"), inner.validTime.map { it.timeline })
+        assertEquals("two words", inner.validTime.last().to?.value)
+    }
+
+    @Test
+    fun `reports invalid fence structure and ignores code block fences`() {
+        val extracted = extractor.extract(
+            """
+            ```
+            ::: code validTime=Hidden
+            :::
+            ```
+            ::: outer
+            ::: invalidNested
+            ::::
+            """.trimIndent(),
+            "/tmp/alice.md",
+            "alice",
+        )
+
+        assertTrue(extracted.blocks.isEmpty())
+        assertTrue(extracted.diagnostics.any { it.message.startsWith("Nested block fence must be longer") })
+        assertTrue(extracted.diagnostics.any { it.message.startsWith("Block closing fence must match") })
+        assertTrue(extracted.diagnostics.any { it.message.startsWith("Unclosed block fence") })
+        assertTrue(extracted.diagnostics.none { "Hidden" in it.message })
+    }
+
+    @Test
+    fun `does not apply a completed child block inside an unclosed parent`() {
+        val extracted = extractor.extract(
+            """
+            ::: outer validTime=Outer
+            ::::: child validTime=Child
+            @props{age=10}
+            :::::
+            """.trimIndent(),
+            "/tmp/alice.md",
+            "alice",
+        )
+
+        assertTrue(extracted.blocks.isEmpty())
+        assertTrue(extracted.diagnostics.any { it.message.startsWith("Unclosed block fence") })
+        val age = extracted.propsBlocks.single().props.getValue("age")
+        assertTrue(age !is RawArray)
+    }
+
+    @Test
+    fun `reports an isolated closing fence`() {
+        val extracted = extractor.extract(":::::", "/tmp/alice.md", "alice")
+
+        assertTrue(extracted.blocks.isEmpty())
+        assertTrue(extracted.diagnostics.any { it.message == "Unexpected block closing fence" })
+    }
+
+    @Test
+    fun `does not recognize fences in list or quote containers`() {
+        val extracted = extractor.extract(
+            """
+            ::: outer validTime=Outer
+            - list item
+              ::::: nested validTime=ListTime
+              :::::
+            > ::::: quoted validTime=QuoteTime
+            > :::::
+            after containers
+            :::
+            """.trimIndent(),
+            "/tmp/alice.md",
+            "alice",
+        )
+
+        assertTrue(extracted.diagnostics.isEmpty(), extracted.diagnostics.joinToString("\n") { it.message })
+        assertEquals(1, extracted.blocks.size)
+        assertEquals("Outer", extracted.blocks.single().validTime.single().timeline)
+    }
+
+    @Test
+    fun `block names use the ASCII identifier grammar`() {
+        val extracted = extractor.extract(
+            """
+            ::: 履歴 validTime=CommonEra
+            text
+            :::
+            """.trimIndent(),
+            "/tmp/alice.md",
+            "alice",
+        )
+
+        assertTrue(extracted.blocks.isEmpty())
+        assertTrue(extracted.diagnostics.any { it.message.startsWith("Invalid block header:") })
+    }
+
+    @Test
+    fun `rejects malformed earlier validTime even when a later value is valid`() {
+        val extracted = extractor.extract(
+            """
+            ::: history validTime=Broken(from=) validTime=Valid
+            text
+            :::
+            """.trimIndent(),
+            "/tmp/alice.md",
+            "alice",
+        )
+
+        assertTrue(extracted.blocks.isEmpty())
+        assertTrue(extracted.diagnostics.any { it.message.startsWith("Invalid block header:") })
+    }
 }

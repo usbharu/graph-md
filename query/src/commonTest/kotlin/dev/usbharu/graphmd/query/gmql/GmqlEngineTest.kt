@@ -245,6 +245,40 @@ class GmqlEngineTest {
     }
 
     @Test
+    fun `valid on applies to markdown text inside named body blocks`() {
+        val localSources = sources + source(
+            "/dana.md",
+            """
+            ---
+            id: dana
+            kind: Node
+            type: Person
+            ---
+            ::: chapter annotation validTime=MainStory(from=100,to=180)
+            限定章の本文
+            :::
+            """,
+        )
+        val localEngine = GraphSearchEngine.build(GraphCompiler().compileSources(localSources), localSources)
+
+        val active = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person) WHERE FULLTEXT(n.body, "限定章")
+                   VALID ON MainStory AT 150 RETURN ID(n) AS id""",
+            )
+        }
+        val inactive = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person) WHERE FULLTEXT(n.body, "限定章")
+                   VALID ON MainStory AT 250 RETURN ID(n) AS id""",
+            )
+        }
+
+        assertEquals(listOf("dana"), active.stringColumn())
+        assertTrue(inactive.rows.isEmpty(), inactive.toString())
+    }
+
+    @Test
     fun `static bundle retains schemas needed to compile queries`() {
         val loaded = GraphSearchEngine.loadStatic(engine.exportStatic())
         val result = loaded.compileGmql(

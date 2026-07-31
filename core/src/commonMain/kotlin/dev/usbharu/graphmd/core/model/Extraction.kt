@@ -5,6 +5,14 @@ data class ExtractedPropsBlock(
     val range: SourceRange,
 )
 
+data class ExtractedBodyBlock(
+    val names: List<String>,
+    val fenceLength: Int,
+    val validTime: List<ValidTime>,
+    val range: SourceRange,
+    val contentRange: SourceRange,
+)
+
 data class ExtractedRelation(
     val target: String,
     val relType: String,

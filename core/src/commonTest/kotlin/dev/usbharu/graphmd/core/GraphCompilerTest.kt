@@ -2026,6 +2026,144 @@ class GraphCompilerTest {
         assertTrue(constraintMessages.none { "absent" in it })
     }
 
+    @Test
+    fun `body blocks provide lexical validTime defaults to properties and relations`() {
+        val result = compiler().compile(
+            listOf(
+                TimelineDocument("Outer", sourcePath = "/tmp/outer.md"),
+                TimelineDocument("Property", sourcePath = "/tmp/property-time.md"),
+                TimelineDocument("Relation", sourcePath = "/tmp/relation-time.md"),
+                NodeTypeDocument(
+                    id = "Person",
+                    props = mapOf(
+                        "inherited" to PropSchema(PropType.number),
+                        "explicit" to PropSchema(PropType.number),
+                    ),
+                    sourcePath = "/tmp/person.md",
+                ),
+                RelTypeDocument(
+                    id = "friendOf",
+                    from = listOf("Person"),
+                    to = listOf("Person"),
+                    sourcePath = "/tmp/friend.md",
+                ),
+                NodeDocument("bob", "Person", sourcePath = "/tmp/bob.md"),
+                NodeDocument(
+                    id = "alice",
+                    type = "Person",
+                    body = """
+                        ::: history validTime=Outer
+                        ::::: annotation
+                        @props{inherited=1,explicit(validTime=Property)=2}
+                        @link(validTime=Relation)[Bob](bob friendOf)
+                        :::::
+                        :::
+                    """.trimIndent(),
+                    sourcePath = "/tmp/alice.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.diagnostics.none { it.severity == Severity.Error }, result.diagnostics.joinToString("\n") { it.message })
+        val alice = result.nodes.single { it.id == "alice" }
+        assertEquals("Outer", alice.propEntries.getValue("inherited").single().validTime.single().timeline)
+        assertEquals("Property", alice.propEntries.getValue("explicit").single().validTime.single().timeline)
+        assertEquals("Relation", result.relations.single().validTime.single().timeline)
+    }
+
+    @Test
+    fun `body time fallback follows node outer inner directive and property order`() {
+        val propertyNames = listOf(
+            "nodeValue",
+            "outerValue",
+            "namesOnlyValue",
+            "innerValue",
+            "directiveValue",
+            "propertyValue",
+        )
+        val result = compiler().compile(
+            buildList {
+                listOf("NodeTime", "Outer", "Inner", "Directive", "Property").forEach { timeline ->
+                    add(TimelineDocument(timeline, sourcePath = "/tmp/$timeline.md"))
+                }
+                add(
+                    NodeTypeDocument(
+                        id = "Person",
+                        props = propertyNames.associateWith { PropSchema(PropType.number) },
+                        sourcePath = "/tmp/person.md",
+                    ),
+                )
+                add(
+                    RelTypeDocument(
+                        id = "friendOf",
+                        from = listOf("Person"),
+                        to = listOf("Person"),
+                        props = mapOf(
+                            "relationInherited" to PropSchema(PropType.number),
+                            "relationProperty" to PropSchema(PropType.number),
+                        ),
+                        sourcePath = "/tmp/friend.md",
+                    ),
+                )
+                add(NodeDocument("bob", "Person", sourcePath = "/tmp/bob.md"))
+                add(
+                    NodeDocument(
+                        id = "alice",
+                        type = "Person",
+                        validTime = listOf(ValidTime("NodeTime")),
+                        body = """
+                            @props{nodeValue=0}
+                            ::: outer validTime=Outer
+                            @props{outerValue=1}
+                            ::::: namesOnly
+                            @props{namesOnlyValue=2}
+                            :::::
+                            ::::: inner validTime=Inner
+                            @props{innerValue=3}
+                            @props(validTime=Directive){directiveValue=4,propertyValue(validTime=Property)=5}
+                            @link{relationInherited=6,relationProperty(validTime=Property)=7}[Bob](bob friendOf)
+                            :::::
+                            :::
+                        """.trimIndent(),
+                        sourcePath = "/tmp/alice.md",
+                    ),
+                )
+            },
+        )
+
+        assertTrue(result.diagnostics.none { it.severity == Severity.Error }, result.diagnostics.joinToString("\n") { it.message })
+        val alice = result.nodes.single { it.id == "alice" }
+        fun nodeTimeline(name: String) = alice.propEntries.getValue(name).single().validTime.single().timeline
+        assertEquals("NodeTime", nodeTimeline("nodeValue"))
+        assertEquals("Outer", nodeTimeline("outerValue"))
+        assertEquals("Outer", nodeTimeline("namesOnlyValue"))
+        assertEquals("Inner", nodeTimeline("innerValue"))
+        assertEquals("Directive", nodeTimeline("directiveValue"))
+        assertEquals("Property", nodeTimeline("propertyValue"))
+
+        val relation = result.relations.single()
+        assertEquals("Inner", relation.validTime.single().timeline)
+        assertEquals("Inner", relation.propEntries.getValue("relationInherited").single().validTime.single().timeline)
+        assertEquals("Property", relation.propEntries.getValue("relationProperty").single().validTime.single().timeline)
+    }
+
+    @Test
+    fun `validates a body block validTime even when the block contains only prose`() {
+        val result = compiler().compile(
+            listOf(
+                NodeTypeDocument("Person", sourcePath = "/tmp/person.md"),
+                NodeDocument(
+                    id = "alice",
+                    type = "Person",
+                    body = "::: history validTime=Missing\nprose\n:::",
+                    sourcePath = "/tmp/alice.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.diagnostics.any { it.message == "Unknown Timeline: Missing" })
+    }
+
     private fun timeline() = TimelineDocument(
         id = "CommonEra",
         timecode = TimecodeSchema(TimecodeType.number),

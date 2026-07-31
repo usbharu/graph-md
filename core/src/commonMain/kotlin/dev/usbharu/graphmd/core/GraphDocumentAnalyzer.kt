@@ -937,7 +937,8 @@ class GraphDocumentAnalyzer {
 
     private fun extractInlineTimelineReferences(body: String, baseOffset: Int): List<SymbolReference> {
         val references = mutableListOf<SymbolReference>()
-        val masked = CommonMarkCodeMasker.mask(body)
+        val masking = CommonMarkCodeMasker.analyze(body)
+        val masked = masking.masked
         var index = 0
         while (index < masked.length) {
             val directive = when {
@@ -964,7 +965,7 @@ class GraphDocumentAnalyzer {
                     ),
                     baseOffset = baseOffset + cursor + 1,
                     references = references,
-                    parse = InlinePropsParser::parseValidTimeArgument,
+                    parse = { parseValidTimeArgumentValue() },
                 )
                 if (closedArgumentsEnd == null) {
                     index = argumentsEnd.coerceAtLeast(index + 1)
@@ -989,6 +990,55 @@ class GraphDocumentAnalyzer {
                 cursor = objectEnd
             }
             index = cursor.coerceAtLeast(index + 1)
+        }
+        references += extractBodyBlockTimelineReferences(body, masking, baseOffset)
+        return references
+    }
+
+    private fun extractBodyBlockTimelineReferences(
+        body: String,
+        masking: CommonMarkMasking,
+        baseOffset: Int,
+    ): List<SymbolReference> {
+        val masked = masking.masked
+        val completeOpenings = BodyBlockParser.parse(
+            body,
+            masked,
+            "<analysis>",
+            "<analysis>",
+            masking.rootLineStarts,
+        )
+            .blocks
+            .mapTo(hashSetOf()) { it.range.start }
+        if (completeOpenings.isEmpty()) return emptyList()
+
+        val references = mutableListOf<SymbolReference>()
+        var lineStart = 0
+        while (lineStart < masked.length) {
+            val newline = masked.indexOf('\n', lineStart).let { if (it < 0) masked.length else it }
+            val lineEnd = if (newline > lineStart && masked[newline - 1] == '\r') newline - 1 else newline
+            if (lineStart in completeOpenings) {
+                val marker = parseBodyBlockLineMarker(masked, body, lineStart, lineEnd)
+                val header = marker?.header
+                val headerStart = marker?.headerStart
+                if (header != null && headerStart != null) {
+                    val parsed = try {
+                        BodyBlockHeaderParser.parse(header)
+                    } catch (_: InlinePropsParseException) {
+                        null
+                    }
+                    parsed?.timelineReferences?.forEach { reference ->
+                        references += SymbolReference(
+                            reference.targetId,
+                            ReferenceTargetKind.Timeline,
+                            reference.field,
+                            reference.range.shiftedBy(baseOffset + headerStart),
+                        )
+                    }
+                }
+            }
+            if (newline == masked.length) break
+            lineStart = newline + 1
         }
         return references
     }

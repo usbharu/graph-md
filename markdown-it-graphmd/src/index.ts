@@ -1,4 +1,5 @@
 import type MarkdownIt from "markdown-it";
+import { bodyBlockRule, renderBodyBlockBoundary } from "./block-rule";
 import { propsBlockRule, propsInlineRule, renderPropsBlock, renderPropsInline } from "./props-rule";
 import { relationInlineRule, renderRelation } from "./relation-rule";
 
@@ -24,11 +25,19 @@ export interface GraphMdOptions {
 export function graphMdPlugin(md: MarkdownIt, options: GraphMdOptions = {}): void {
   md.inline.ruler.push("graphmd_relation", relationInlineRule);
   md.inline.ruler.push("graphmd_props_inline", propsInlineRule);
+  md.block.ruler.before(
+    "fence",
+    "graphmd_body_block",
+    bodyBlockRule,
+    { alt: ["paragraph", "reference", "blockquote", "list"] },
+  );
   md.block.ruler.before("paragraph", "graphmd_props_block", propsBlockRule);
 
   md.renderer.rules["graphmd_relation"] = (tokens, idx, _renderOptions, env) => renderRelation(tokens, idx, md, options, env);
   md.renderer.rules["graphmd_props_block"] = renderPropsBlock;
   md.renderer.rules["graphmd_props_inline"] = renderPropsInline;
+  md.renderer.rules["graphmd_body_block_open"] = renderBodyBlockBoundary;
+  md.renderer.rules["graphmd_body_block_close"] = renderBodyBlockBoundary;
 }
 
 export default graphMdPlugin;

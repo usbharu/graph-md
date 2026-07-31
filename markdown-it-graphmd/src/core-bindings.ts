@@ -13,6 +13,7 @@ interface GraphMdInlineApi {
   parseRelationTargetAndType(inside: string): RelationParts | null;
   parseInlineObjectJson(content: string): string;
   parsePropsDirectiveJson(content: string): string;
+  isValidBlockHeader(content: string): boolean;
 }
 
 interface CoreModule {
@@ -52,4 +53,8 @@ export function parseInlineObjectJson(content: string): string {
 
 export function parsePropsDirectiveJson(content: string): string {
   return inline.parsePropsDirectiveJson(content);
+}
+
+export function isValidBlockHeader(content: string): boolean {
+  return inline.isValidBlockHeader(content);
 }

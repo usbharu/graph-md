@@ -20,6 +20,12 @@ Pass the original `SourceDocument` list when building if normal Markdown body
 text should be searchable. Without it, normalized property strings and relation
 labels are still indexed.
 
+Named body-block fence lines are omitted from searchable text and split the
+surrounding fragments. A fragment inherits the innermost block's `validTime`;
+a names-only block inherits its parent block or node time. This is resolved
+while rebuilding the index from `SourceDocument`, without changing the static
+bundle schema.
+
 ## Building and searching
 
 ```kotlin
@@ -120,6 +126,8 @@ The internal temporal operators have explicit direction:
 
 Every relation traversal intersects the current binding, relation, target node,
 target property, and text assertion times. Empty intersections are discarded.
+Body text assertions use the innermost named block's resolved time, so the same
+full-text term can match or fail under `VALID ON` depending on its source block.
 
 ## Static distribution
 

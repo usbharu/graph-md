@@ -260,6 +260,31 @@ class GraphDocumentAnalyzerTest {
     }
 
     @Test
+    fun `indexes only the winning validTime from complete body block headers`() {
+        val text = """
+            ---
+            id: node
+            kind: Node
+            type: Type
+            ---
+            ::: history validTime=Discarded validTime = Active(from=0 ,to=1)
+            prose
+            :::
+            ```
+            ::: code validTime=Hidden
+            :::
+            ```
+            ::::: incomplete validTime=Incomplete
+        """.trimIndent()
+
+        val analysis = analyzer.analyze(text, "/tmp/block.md")
+        val timelines = analysis.references.filter { it.kind == ReferenceTargetKind.Timeline }
+
+        assertEquals(listOf("Active"), timelines.map { it.targetId })
+        assertEquals("Active", text.substring(timelines.single().range.start, timelines.single().range.end))
+    }
+
+    @Test
     fun `returns empty analysis when front matter is never closed`() {
         val text = "---\nid: alice\nkind: Node"
         val analysis = analyzer.analyze(text, "/tmp/open.md")

@@ -7,6 +7,7 @@ data class BodySyntaxExtraction(
     val relations: List<ExtractedRelation>,
     val diagnostics: List<Diagnostic>,
     val propsSyntaxValid: Boolean = true,
+    val blocks: List<ExtractedBodyBlock> = emptyList(),
 )
 
 class BodySyntaxExtractor {
@@ -15,14 +16,37 @@ class BodySyntaxExtractor {
         val propsBlocks = mutableListOf<ExtractedPropsBlock>()
         val relations = mutableListOf<ExtractedRelation>()
         var propsSyntaxValid = true
-        val masked = CommonMarkCodeMasker.mask(body)
+        val masking = CommonMarkCodeMasker.analyze(body)
+        val masked = masking.masked
+        val blockParsing = BodyBlockParser.parse(
+            body,
+            masked,
+            sourcePath,
+            documentId,
+            masking.rootLineStarts,
+        )
+        diagnostics += blockParsing.diagnostics
+        val blocks = blockParsing.blocks
+
+        fun inheritedBlockValidTime(index: Int): List<ValidTime> =
+            blocks.asSequence()
+                .filter { block ->
+                    block.validTime.isNotEmpty() &&
+                        index >= block.contentRange.start &&
+                        index < block.contentRange.end
+                }
+                .maxByOrNull { it.contentRange.start }
+                ?.validTime
+                .orEmpty()
+
         var index = 0
         while (index < masked.length) {
             if (masked[index] == '@' && !isEscaped(masked, index)) {
                 when {
                     isDirectiveKeywordAt(masked, index, "@props") -> {
                         var objectStart = index + "@props".length
-                        var defaultValidTime: RawArray? = null
+                        var defaultValidTime: RawArray? =
+                            inheritedBlockValidTime(index).takeIf { it.isNotEmpty() }?.let(::validTimesToRawArray)
                         if (masked.getOrNull(objectStart) == '(') {
                             val args = readBalanced(masked, objectStart, '(', ')')
                             if (args == null) {
@@ -40,9 +64,7 @@ class BodySyntaxExtractor {
                                 continue
                             }
                             defaultValidTime = try {
-                                val expression = validTimeArgument.groupValues[1]
-                                val dummy = InlinePropsParser("{x(validTime=$expression)=0}").parseObject().values.getValue("x") as RawArray
-                                ((dummy.values.single() as RawObject).values.getValue("validTime") as RawArray)
+                                validTimesToRawArray(parseInlineValidTimeArgument(argumentText).validTime)
                             } catch (e: Exception) {
                                 propsSyntaxValid = false
                                 diagnostics += syntaxDiagnostic(e.message ?: "Invalid @props validTime", sourcePath, documentId, index, args.end)
@@ -80,7 +102,15 @@ class BodySyntaxExtractor {
                         }
                     }
                     isDirectiveKeywordAt(masked, index, "@link") -> {
-                        val relation = parseCanonicalRelation(masked, body, index, sourcePath, documentId, diagnostics)
+                        val relation = parseCanonicalRelation(
+                            masked,
+                            body,
+                            index,
+                            sourcePath,
+                            documentId,
+                            diagnostics,
+                            inheritedBlockValidTime(index),
+                        )
                         if (relation != null) {
                             relations += relation.first
                             index = relation.second
@@ -91,7 +121,13 @@ class BodySyntaxExtractor {
             }
             index += 1
         }
-        return BodySyntaxExtraction(propsBlocks, relations, diagnostics, propsSyntaxValid)
+        return BodySyntaxExtraction(
+            propsBlocks = propsBlocks,
+            relations = relations,
+            diagnostics = diagnostics,
+            propsSyntaxValid = propsSyntaxValid,
+            blocks = blocks,
+        )
     }
 
     private fun applyDefaultValidTime(props: Map<String, RawValue>, validTime: RawArray): Map<String, RawValue> =
@@ -116,9 +152,10 @@ class BodySyntaxExtractor {
         sourcePath: String,
         documentId: String,
         diagnostics: MutableList<Diagnostic>,
+        inheritedValidTime: List<ValidTime>,
     ): Pair<ExtractedRelation, Int>? {
         var cursor = start + "@link".length
-        var validTime = emptyList<ValidTime>()
+        var validTime = inheritedValidTime
         if (masked.getOrNull(cursor) == '(') {
             val args = readBalanced(masked, cursor, '(', ')') ?: run {
                 diagnostics += syntaxDiagnostic("Unclosed @link arguments", sourcePath, documentId, start, original.length)
@@ -166,51 +203,12 @@ class BodySyntaxExtractor {
             diagnostics += syntaxDiagnostic("@link only accepts validTime=...", sourcePath, documentId, start, end)
             return null
         }
-        val expression = argument.groupValues[1]
         return try {
-            val entries = InlinePropsParser("{x(validTime=$expression)=0}").parseObject().values.getValue("x") as RawArray
-            val validTime = ((entries.values.single() as RawObject).values.getValue("validTime") as RawArray)
-            validTime.values.map { raw ->
-                val obj = raw as RawObject
-                ValidTime(
-                    timeline = (obj.values.getValue("timeline") as RawString).value,
-                    from = inlineTimePoint(obj.values["from"]),
-                    to = inlineTimePoint(obj.values["to"]),
-                )
-            }
+            parseInlineValidTimeArgument(text).validTime
         } catch (e: Exception) {
             diagnostics += syntaxDiagnostic(e.message ?: "Invalid validTime expression", sourcePath, documentId, start, end)
             null
         }
-    }
-
-    private fun inlineTimePoint(raw: RawValue?): TimePoint? {
-        if (raw == null) return null
-        val obj = raw as RawObject
-        val timecode = when (val value = obj.values.getValue("timecode")) {
-            is RawInteger -> value.value.toDouble()
-            is RawNumber -> value.value
-            else -> throw InlinePropsParseException("timePoint.timecode must be number")
-        }
-        return TimePoint(timecode, (obj.values["value"] as? RawString)?.value)
-    }
-
-    private fun splitTopLevel(text: String): List<String> {
-        val result = mutableListOf<String>()
-        var depth = 0
-        var start = 0
-        text.forEachIndexed { index, ch ->
-            when (ch) {
-                '(', '[' -> depth++
-                ')', ']' -> depth--
-                ',' -> if (depth == 0) {
-                    result += text.substring(start, index)
-                    start = index + 1
-                }
-            }
-        }
-        result += text.substring(start)
-        return result
     }
 
     private fun parseRelation(
