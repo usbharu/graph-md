@@ -234,7 +234,7 @@ class GraphMdCliTest {
     }
 
     @Test
-    fun `human readable properties render valid time ranges without JSON`() {
+    fun `human readable properties render values and valid time ranges`() {
         val fs = FakeFileSystem(
             files = mapOf(
                 "/workspace/Person.md" to """
@@ -246,6 +246,10 @@ class GraphMdCliTest {
                         type: string
                       bounded:
                         type: string
+                      count:
+                        type: number
+                      label:
+                        type: text
                       multiple:
                         type: string
                       openFrom:
@@ -273,6 +277,13 @@ class GraphMdCliTest {
                     id: alice
                     kind: Node
                     type: Person
+                    props:
+                      count: 2
+                      enabled: true
+                      label:
+                        default: Display name
+                        ja: 表示名
+                      nothing:
                     ---
                     @props{
                       anytime(validTime=CommonEra) = "anytime",
@@ -292,16 +303,21 @@ class GraphMdCliTest {
         val json = cli.run(listOf("props", "alice", "/workspace", "--json"))
 
         assertEquals(0, props.exitCode, props.stderr)
-        assertTrue(props.stdout.contains("anytime\t\"anytime\"\tCommonEra\n"))
-        assertTrue(props.stdout.contains("bounded\t\"bounded\"\tCommonEra: 10.0 – 20.0\n"))
-        assertTrue(props.stdout.contains("multiple\t\"multiple\"\tCommonEra, Branch: 1.0 – 2.0\n"))
-        assertTrue(props.stdout.contains("openFrom\t\"open-from\"\tCommonEra: 10.0 –\n"))
-        assertTrue(props.stdout.contains("openTo\t\"open-to\"\tBranch: – 20.0\n"))
-        assertTrue(props.stdout.contains("plain\t\"plain\"\t-\n"))
+        assertTrue(props.stdout.contains("anytime\tanytime\tCommonEra\n"))
+        assertTrue(props.stdout.contains("bounded\tbounded\tCommonEra: 10.0 – 20.0\n"))
+        assertTrue(props.stdout.contains("count\t2.0\t-\n"))
+        assertTrue(props.stdout.contains("enabled\ttrue\t-\n"))
+        assertTrue(props.stdout.contains("label\tDisplay name\t-\n"))
+        assertTrue(props.stdout.contains("multiple\tmultiple\tCommonEra, Branch: 1.0 – 2.0\n"))
+        assertTrue(props.stdout.contains("nothing\tnull\t-\n"))
+        assertTrue(props.stdout.contains("openFrom\topen-from\tCommonEra: 10.0 –\n"))
+        assertTrue(props.stdout.contains("openTo\topen-to\tBranch: – 20.0\n"))
+        assertTrue(props.stdout.contains("plain\tplain\t-\n"))
         assertFalse(props.stdout.contains("[{\"timeline\""))
 
         assertEquals(0, shown.exitCode, shown.stderr)
-        assertTrue(shown.stdout.contains("bounded\t\"bounded\"\tCommonEra: 10.0 – 20.0\n"))
+        assertTrue(shown.stdout.contains("bounded\tbounded\tCommonEra: 10.0 – 20.0\n"))
+        assertTrue(shown.stdout.contains("label\tDisplay name\t-\n"))
         assertFalse(shown.stdout.contains("[{\"timeline\""))
 
         assertEquals(0, json.exitCode, json.stderr)

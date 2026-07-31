@@ -943,11 +943,24 @@ private fun renderProperties(
             if (ownerId != null && ownerVisibility != null) {
                 append(ownerId).append('\t').append(ownerVisibility.wireName).append('\t')
             }
-            append(name).append('\t').append(entry.value.toJson().encode()).append('\t')
+            append(name).append('\t').append(renderPropertyValue(entry.value)).append('\t')
             append(renderValidTimes(entry.validTime)).append('\n')
         }
     }
 }
+
+private fun renderPropertyValue(value: NormalizedValue): String = when (value) {
+    is StringValue -> renderTabularText(value.value)
+    is IntegerValue -> value.value.toString()
+    is dev.usbharu.graphmd.core.model.NumberValue -> value.value.toString()
+    is BooleanValue -> value.value.toString()
+    NullValue -> "null"
+    is TextValue -> value.values["default"]?.let(::renderTabularText) ?: value.toJson().encode()
+    else -> value.toJson().encode()
+}
+
+private fun renderTabularText(value: String): String =
+    value.replace("\t", "\\t").replace("\n", "\\n")
 
 private fun renderValidTimes(validTimes: List<ValidTime>): String =
     if (validTimes.isEmpty()) {
