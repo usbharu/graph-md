@@ -56,7 +56,7 @@ class GraphDocumentAnalyzer {
     private val frontMatterScanner = FrontMatterStructureScanner()
 
     fun analyze(text: String, sourcePath: String): GraphDocumentAnalysis {
-        val normalized = text.replace("\r\n", "\n")
+        val normalized = text.replace("\r\n", "\n").replace('\r', '\n')
         val parsed = parser.parseDocument(normalized, sourcePath)
         val document = parsed.document
         val lines = normalized.split('\n')
@@ -74,6 +74,16 @@ class GraphDocumentAnalyzer {
         val propertyReferences = mutableListOf<PropertyReference>()
         val frontMatter = frontMatterScanner.scan(lines, lineStarts, 1, endLine)
         collectStructuredFrontMatterSymbols(frontMatter, document, definitions, references)
+        collectTimelineReferences(frontMatter, document, references)
+        val legacyTimelineReferenceStart = references.size
+        collectLegacyTimelineReferences(lines, lineStarts, endLine, document, references)
+        if (document is NodeTypeDocument || document is RelTypeDocument) {
+            val legacyTimelineReferences = references.subList(legacyTimelineReferenceStart, references.size).toList()
+            references.subList(legacyTimelineReferenceStart, references.size).clear()
+            references += legacyTimelineReferences.filter {
+                isAllowedSchemaTimelineReference(frontMatter, it)
+            }
+        }
         val yamlPropertyKeys = extractYamlPropertyKeys(frontMatter)
         when (document) {
             is NodeDocument -> yamlPropertyKeys.forEach { key ->
@@ -385,51 +395,245 @@ class GraphDocumentAnalyzer {
         collectRootField("from", listFieldKind("from", document))
         collectRootField("to", listFieldKind("to", document))
 
-        structure.scalars.forEach { scalar ->
-            val isNestedTimelineField = when (document) {
-                is NodeDocument -> isNodeTimelinePath(scalar.path)
-                is NodeTypeDocument, is RelTypeDocument -> isPropertySchemaTimelinePath(scalar.path)
-                else -> false
+    }
+
+    private fun collectTimelineReferences(
+        structure: FrontMatterStructure,
+        document: GraphDocument?,
+        references: MutableList<SymbolReference>,
+    ) {
+        if (document !is TimelineDocument) return
+        structure.scalars
+            .filter {
+                it.path.size == 2 &&
+                    it.path.firstOrNull() == "mappings" &&
+                    it.path.lastOrNull() in setOf("from", "to")
             }
-            val isCanonicalSelectorId =
-                (document is NodeTypeDocument || document is RelTypeDocument) &&
-                isPropertySchemaTimelineSelectorIdPath(scalar.path)
-            val isTimelineMappingEndpoint =
-                document is TimelineDocument &&
-                scalar.path.size == 2 &&
-                scalar.path.firstOrNull() == "mappings" &&
-                scalar.path.lastOrNull() in setOf("from", "to")
-            if (isNestedTimelineField || isCanonicalSelectorId || isTimelineMappingEndpoint) {
-                val field = if (isCanonicalSelectorId) "timeline" else scalar.path.last()
-                references += SymbolReference(
-                    scalar.value,
-                    ReferenceTargetKind.Timeline,
-                    field,
-                    scalar.range,
-                )
-            }
+            .forEach { scalar ->
+                if (references.none { it.kind == ReferenceTargetKind.Timeline && it.range.start == scalar.range.start }) {
+                    references += SymbolReference(
+                        scalar.value,
+                        ReferenceTargetKind.Timeline,
+                        scalar.path.last(),
+                        scalar.range,
+                    )
+                }
         }
     }
 
-    private fun isNodeTimelinePath(path: List<String>): Boolean {
-        if (path.lastOrNull() != "timeline") return false
-        if (path.firstOrNull() == "validTime") return true
-        if (path.firstOrNull() != "props" || path.size < 3) return false
-        // `props.timeline` is a property named "timeline", while a timeline
-        // below a property value is an instant/duration or validTime member.
-        return true
+    private fun isAllowedSchemaTimelineReference(
+        structure: FrontMatterStructure,
+        reference: SymbolReference,
+    ): Boolean {
+        if (
+            structure.scalars.any { scalar ->
+                scalar.value == reference.targetId &&
+                    (
+                        isPropertySchemaTimelinePath(scalar.path) ||
+                            isPropertySchemaTimelineSelectorIdPath(scalar.path)
+                        )
+            }
+        ) {
+            return true
+        }
+        return structure.entries.any { entry ->
+            entry.key == reference.targetId &&
+                entry.keyRange.start == reference.range.start &&
+                isPropertySchemaTimelinePath(entry.path.dropLast(1))
+        }
     }
 
-    private fun isPropertySchemaTimelinePath(path: List<String>): Boolean {
-        if (path.size < 3 || path[0] != "props" || path.last() != "timeline") return false
-        return path.subList(2, path.lastIndex).all { it == "items" }
-    }
+    private fun isPropertySchemaTimelinePath(path: List<String>): Boolean =
+        path.size >= 3 &&
+            path.firstOrNull() == "props" &&
+            path.lastOrNull() == "timeline" &&
+            path.subList(2, path.lastIndex).all { it == "items" }
 
     private fun isPropertySchemaTimelineSelectorIdPath(path: List<String>): Boolean {
-        if (path.size < 4 || path[0] != "props" || path.last() != "id") return false
+        if (path.size < 4 || path.firstOrNull() != "props" || path.lastOrNull() != "id") return false
         val schemaPath = path.subList(2, path.lastIndex)
-        return schemaPath.lastOrNull() == "timeline" &&
-            schemaPath.dropLast(1).all { it == "items" }
+        return schemaPath.lastOrNull() == "timeline" && schemaPath.dropLast(1).all { it == "items" }
+    }
+
+    private fun collectLegacyTimelineReferences(
+        lines: List<String>,
+        lineStarts: List<Int>,
+        endLine: Int,
+        document: GraphDocument?,
+        references: MutableList<SymbolReference>,
+    ) {
+        if (document is TimelineDocument) return
+        data class Container(val indent: Int, val key: String)
+        data class ListItem(val indent: Int, val id: Int)
+        data class SelectorContext(val listItemId: Int?, val path: List<String>)
+        data class Scalar(
+            val path: List<String>,
+            val key: String,
+            val id: String,
+            val range: SourceRange,
+            val listItemId: Int? = null,
+        )
+
+        fun scalar(
+            raw: String,
+            absoluteStart: Int,
+            path: List<String>,
+            key: String,
+            listItemId: Int? = null,
+        ): Scalar? {
+            val uncommented = stripYamlTrailingComment(raw)
+            val leading = uncommented.indexOfFirst { !it.isWhitespace() }.takeIf { it >= 0 } ?: return null
+            val token = uncommented.substring(leading).trimEnd()
+            val (id, contentOffset, contentLength) = when {
+                token.length >= 2 && token.first() == '"' && token.last() == '"' -> Triple(
+                    decodeDoubleQuotedYamlScalar(token.substring(1, token.lastIndex)),
+                    1,
+                    token.length - 2,
+                )
+                token.length >= 2 && token.first() == '\'' && token.last() == '\'' -> Triple(
+                    token.substring(1, token.lastIndex).replace("''", "'"),
+                    1,
+                    token.length - 2,
+                )
+                token.matches(Regex("""[A-Za-z_][A-Za-z0-9_.:-]*""")) -> Triple(token, 0, token.length)
+                else -> return null
+            }
+            val start = absoluteStart + leading + contentOffset
+            return Scalar(path, key, id, SourceRange(start, start + contentLength), listItemId)
+        }
+
+        val containers = mutableListOf<Container>()
+        val listItems = mutableListOf<ListItem>()
+        val scalars = mutableListOf<Scalar>()
+        val keysByPath = mutableMapOf<List<String>, MutableSet<String>>()
+        val keysBySelectorContext = mutableMapOf<SelectorContext, MutableSet<String>>()
+        val containerKeysByPath = mutableMapOf<List<String>, MutableSet<String>>()
+        val numericKeysByPath = mutableMapOf<List<String>, MutableSet<String>>()
+        val mappedBooleanContexts = mutableSetOf<SelectorContext>()
+        var nextListItemId = 0
+        for (lineIndex in 1 until endLine) {
+            val line = lines[lineIndex]
+            val indent = line.indexOfFirst { !it.isWhitespace() }.takeIf { it >= 0 } ?: continue
+            val uncommented = stripYamlTrailingComment(line)
+            if (indent >= uncommented.length && uncommented.isBlank()) continue
+            val rawContent = uncommented.substring(indent)
+            if (rawContent.isBlank() || rawContent.startsWith("#")) continue
+            while (containers.lastOrNull()?.indent?.let { it >= indent } == true) containers.removeLast()
+            while (listItems.lastOrNull()?.indent?.let { it >= indent } == true) listItems.removeLast()
+            val path = containers.map { it.key }
+            val listContent = rawContent.removePrefix("- ").takeIf { rawContent.startsWith("- ") }
+            if (listContent != null) listItems += ListItem(indent, nextListItemId++)
+            val listItemId = listItems.lastOrNull()?.id
+            val content = listContent ?: rawContent
+            val contentOffset = indent + if (listContent != null) 2 else 0
+            val mapping = Regex("""^([A-Za-z_][A-Za-z0-9_.-]*)\s*:(.*)$""").matchEntire(content)
+            if (mapping == null) {
+                if (listContent != null && path.lastOrNull() == "timeline") {
+                    scalar(
+                        content,
+                        lineStarts[lineIndex] + contentOffset,
+                        path,
+                        "timeline",
+                        listItemId,
+                    )?.let(scalars::add)
+                }
+                continue
+            }
+            val key = mapping.groupValues[1]
+            val rawValue = mapping.groupValues[2]
+            keysByPath.getOrPut(path) { mutableSetOf() } += key
+            val selectorContext = SelectorContext(listItemId, path)
+            keysBySelectorContext.getOrPut(selectorContext) { mutableSetOf() } += key
+            val parsedRawValue = stripYamlTrailingComment(rawValue).trim()
+            if (key == "mapped" && parsedRawValue in setOf("true", "false")) {
+                mappedBooleanContexts += selectorContext
+            }
+            if (
+                key in setOf("timecode", "from", "to") &&
+                (
+                    parsedRawValue.matches(Regex("""[-+]?[0-9]+""")) ||
+                        parsedRawValue.matches(Regex("""[-+]?[0-9]+\.[0-9]+"""))
+                    )
+            ) {
+                numericKeysByPath.getOrPut(path) { mutableSetOf() } += key
+            }
+            val colonOffset = content.indexOf(':') + 1
+            if (rawValue.isBlank()) {
+                containerKeysByPath.getOrPut(path) { mutableSetOf() } += key
+                if (
+                    path.lastOrNull() == "timeline" &&
+                    key !in setOf("id", "mapped")
+                ) {
+                    val keyStart = lineStarts[lineIndex] + contentOffset
+                    scalars += Scalar(
+                        path,
+                        "legacySelector",
+                        key,
+                        SourceRange(keyStart, keyStart + key.length),
+                        listItemId,
+                    )
+                }
+                containers += Container(indent, key)
+            } else if (
+                key == "timeline" &&
+                stripYamlTrailingComment(rawValue).trim().let { it.startsWith("[") && it.endsWith("]") }
+            ) {
+                val uncommentedValue = stripYamlTrailingComment(rawValue)
+                val openingBracket = uncommentedValue.indexOf('[')
+                val inner = uncommentedValue.substring(openingBracket + 1, uncommentedValue.lastIndexOf(']'))
+                splitYamlInlineList(inner).forEach { item ->
+                    scalar(
+                        item.raw,
+                        lineStarts[lineIndex] + contentOffset + colonOffset + openingBracket + 1 + item.start,
+                        path,
+                        key,
+                        listItemId,
+                    )?.let(scalars::add)
+                }
+            } else {
+                scalar(
+                    rawValue,
+                    lineStarts[lineIndex] + contentOffset + colonOffset,
+                    path,
+                    key,
+                    listItemId,
+                )?.let(scalars::add)
+            }
+        }
+
+        scalars.filter { candidate ->
+            val path = candidate.path
+            when {
+                candidate.key == "timeline" && "validTime" in path -> true
+                document is NodeTypeDocument || document is RelTypeDocument -> {
+                    path.firstOrNull() == "props" && (
+                        candidate.key == "timeline" ||
+                            candidate.key == "id" && path.lastOrNull() == "timeline" &&
+                            SelectorContext(candidate.listItemId, path) in mappedBooleanContexts ||
+                            candidate.key == "legacySelector" && path.lastOrNull() == "timeline" &&
+                            keysBySelectorContext[SelectorContext(candidate.listItemId, path)] == setOf(candidate.id) &&
+                            SelectorContext(candidate.listItemId, path + candidate.id) in mappedBooleanContexts
+                        )
+                }
+                document is TimelineDocument ->
+                    path.firstOrNull() == "mappings" && candidate.key in setOf("from", "to")
+                document is NodeDocument && path.firstOrNull() == "props" -> {
+                    candidate.key == "timeline" && (
+                            "timecode" in numericKeysByPath[candidate.path].orEmpty() ||
+                            numericKeysByPath[candidate.path].orEmpty().any { it in setOf("from", "to") } ||
+                            containerKeysByPath[candidate.path].orEmpty().any { endpoint ->
+                                endpoint in setOf("from", "to") &&
+                                    "timecode" in numericKeysByPath[candidate.path + endpoint].orEmpty()
+                            }
+                        )
+                }
+                else -> false
+            }
+        }.forEach { candidate ->
+            if (references.none { it.kind == ReferenceTargetKind.Timeline && it.range.start == candidate.range.start }) {
+                references += SymbolReference(candidate.id, ReferenceTargetKind.Timeline, candidate.key, candidate.range)
+            }
+        }
     }
 
     private fun extractInlineTimelineReferences(body: String, baseOffset: Int): List<SymbolReference> {

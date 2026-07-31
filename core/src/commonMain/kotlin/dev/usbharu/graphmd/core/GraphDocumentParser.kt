@@ -16,7 +16,7 @@ class GraphDocumentParser {
         sourcePath: String,
         diagnostics: MutableList<Diagnostic>,
     ): FrontMatterSplit? {
-        val normalized = text.replace("\r\n", "\n")
+        val normalized = text.replace("\r\n", "\n").replace('\r', '\n')
         val lines = normalized.split('\n')
         if (lines.firstOrNull() != "---") {
             diagnostics += syntaxError("Document MUST start with YAML front matter", sourcePath)
@@ -563,7 +563,7 @@ private class MiniYamlParser(
     }
 
     private fun parseInlineValue(raw: String): YamlValue {
-        val value = raw.trim()
+        val value = stripYamlTrailingComment(raw).trim()
         if (value.isEmpty()) return YamlNull
         if (value.startsWith("[") && value.endsWith("]")) {
             val inner = value.substring(1, value.lastIndex)

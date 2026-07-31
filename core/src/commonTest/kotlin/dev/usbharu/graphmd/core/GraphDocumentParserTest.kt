@@ -11,6 +11,54 @@ class GraphDocumentParserTest {
     private val compiler = GraphCompiler()
 
     @Test
+    fun `yaml comments are stripped only outside quoted scalars`() {
+        val bare = compiler.parseDocument(
+            """
+            ---
+            id: bare
+            kind: Node
+            type: Person
+            validTime:
+              - timeline: T # era
+            ---
+            """.trimIndent(),
+            "/tmp/bare.md",
+        ).document as NodeDocument
+        val quoted = compiler.parseDocument(
+            """
+            ---
+            id: quoted
+            kind: Node
+            type: Person
+            validTime:
+              - timeline: "T # era" # outside
+            ---
+            """.trimIndent(),
+            "/tmp/quoted.md",
+        ).document as NodeDocument
+
+        assertEquals("T", bare.validTime.single().timeline)
+        assertEquals("T # era", quoted.validTime.single().timeline)
+    }
+
+    @Test
+    fun `inline lists ignore empty comma-separated items`() {
+        val parsed = compiler.parseDocument(
+            """
+            ---
+            id: Child
+            kind: NodeType
+            extends: [, Base,, "Other",]
+            ---
+            """.trimIndent(),
+            "/tmp/child.md",
+        )
+
+        assertTrue(parsed.diagnostics.isEmpty(), parsed.diagnostics.joinToString())
+        assertEquals(listOf("Base", "Other"), (parsed.document as NodeTypeDocument).extends)
+    }
+
+    @Test
     fun `parses node document from markdown front matter`() {
         val parsed = compiler.parseDocument(
             text = """
@@ -174,6 +222,40 @@ class GraphDocumentParserTest {
                     timeline:
                       - id: CommonEra
                         mapped: true
+                  singularCanonical:
+                    type: instant
+                    timeline:
+                      id: Singular
+                      mapped: true
+                  singularLegacy:
+                    type: instant
+                    timeline:
+                      Legacy.Single:
+                        mapped: false
+                  overlappingLegacy:
+                    type: instant
+                    timeline:
+                      Nested:
+                        id: Spurious
+                        mapped: true
+                  overlappingLegacyList:
+                    type: instant
+                    timeline:
+                      - Listed:
+                          id: AlsoSpurious
+                          mapped: false
+                  canonicalExtra:
+                    type: instant
+                    timeline:
+                      id: Canonical
+                      mapped: true
+                      extra: ignored
+                  canonicalListExtra:
+                    type: instant
+                    timeline:
+                      - id: CanonicalList
+                        mapped: false
+                        extra: ignored
                   mixed:
                     type: instant
                     timeline:
@@ -181,6 +263,10 @@ class GraphDocumentParserTest {
                         mapped: false
                       - CommonEra:
                           mapped: true
+                      - Third.Age:
+                          mapped: true
+                      - _Leading:
+                          mapped: false
                 ---
             """.trimIndent(),
             "/tmp/event.md",
@@ -189,10 +275,76 @@ class GraphDocumentParserTest {
         assertNotNull(nodeType)
         assertEquals(TimelineSelector.Id("CommonEra"), nodeType.props.getValue("byId").timeline)
         assertEquals(listOf(TimelineSelector.Mapped("CommonEra")), nodeType.props.getValue("mapped").timelines)
+        assertEquals(TimelineSelector.Mapped("Singular"), nodeType.props.getValue("singularCanonical").timeline)
+        assertEquals(TimelineSelector.Id("Legacy.Single"), nodeType.props.getValue("singularLegacy").timeline)
+        assertEquals(TimelineSelector.Mapped("Nested"), nodeType.props.getValue("overlappingLegacy").timeline)
         assertEquals(
-            listOf(TimelineSelector.Id("ThirdAge"), TimelineSelector.Mapped("CommonEra")),
+            listOf(TimelineSelector.Id("Listed")),
+            nodeType.props.getValue("overlappingLegacyList").timelines,
+        )
+        assertEquals(TimelineSelector.Mapped("Canonical"), nodeType.props.getValue("canonicalExtra").timeline)
+        assertEquals(
+            listOf(TimelineSelector.Id("CanonicalList")),
+            nodeType.props.getValue("canonicalListExtra").timelines,
+        )
+        assertEquals(
+            listOf(
+                TimelineSelector.Id("ThirdAge"),
+                TimelineSelector.Mapped("CommonEra"),
+                TimelineSelector.Mapped("Third.Age"),
+                TimelineSelector.Id("_Leading"),
+            ),
             nodeType.props.getValue("mixed").timelines,
         )
+    }
+
+    @Test
+    fun `rejects mapped selectors with missing or non-boolean mapped fields`() {
+        val parsed = compiler.parseDocument(
+            """
+            ---
+            id: Invalid
+            kind: NodeType
+            props:
+              missing:
+                type: instant
+                timeline:
+                  - id: Missing
+              nonBoolean:
+                type: instant
+                timeline:
+                  - Legacy:
+                      mapped: nope
+              deepCanonical:
+                type: instant
+                timeline:
+                  - id: DeepCanonical
+                    nested:
+                      mapped: true
+              deepLegacy:
+                type: instant
+                timeline:
+                  - DeepLegacy:
+                      nested:
+                        mapped: false
+              neighbor:
+                type: instant
+                timeline:
+                  - id: Neighbor
+                  - id: Other
+                    mapped: true
+            ---
+            """.trimIndent(),
+            "/tmp/invalid.md",
+        )
+
+        assertTrue(parsed.diagnostics.count { "selector MUST" in it.message } == 5, parsed.diagnostics.joinToString())
+        val document = parsed.document as NodeTypeDocument
+        assertEquals(emptyList(), document.props.getValue("missing").timelines)
+        assertEquals(emptyList(), document.props.getValue("nonBoolean").timelines)
+        assertEquals(emptyList(), document.props.getValue("deepCanonical").timelines)
+        assertEquals(emptyList(), document.props.getValue("deepLegacy").timelines)
+        assertEquals(listOf(TimelineSelector.Mapped("Other")), document.props.getValue("neighbor").timelines)
     }
 
     @Test
