@@ -2077,6 +2077,58 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `@link completion follows CommonMark code regions`() {
+        val nodeUri = "file:///workspace/alice.md"
+        val nodeText = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            ---
+            > ```
+            > @link
+            > ```
+            - ```
+              @link
+              ```
+            ```
+            ```not-a-closing-fence
+            @link
+            ```
+            escaped \` before @link
+            unmatched ` before @link
+            visible @link
+        """.trimIndent()
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/Person.md" to "---\nid: Person\nkind: NodeType\n---",
+                "file:///workspace/types/friendOf.md" to "---\nid: friendOf\nkind: RelType\n---",
+                nodeUri to nodeText,
+            ),
+        )
+
+        var searchStart = 0
+        fun assertNoCompletion() {
+            val linkStart = nodeText.indexOf("@link", searchStart)
+            assertTrue(linkStart >= 0)
+            assertTrue(fixture.completions(nodeUri, linkStart + "@link".length).isEmpty())
+            searchStart = linkStart + "@link".length
+        }
+        fun assertCompletion() {
+            val linkStart = nodeText.indexOf("@link", searchStart)
+            assertTrue(linkStart >= 0)
+            assertEquals(
+                listOf("@link (friendOf)"),
+                fixture.completions(nodeUri, linkStart + "@link".length).map { it.label },
+            )
+            searchStart = linkStart + "@link".length
+        }
+
+        repeat(3) { assertNoCompletion() }
+        repeat(3) { assertCompletion() }
+    }
+
+    @Test
     fun `relation props completion resolves rel type schema`() {
         val relationText = "@link{since = { timeline = CommonEra }}[Bob](bob \"friendOf\")"
         val relationContext = RelationPropsCompletionContextResolver(

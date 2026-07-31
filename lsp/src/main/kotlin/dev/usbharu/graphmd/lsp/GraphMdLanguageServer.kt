@@ -1382,7 +1382,7 @@ internal class GraphMdWorkspaceIndex(
         if (!"link".startsWith(prefix)) return null
         if (at > 0 && (isEscaped(text, at) || isIdentifierPart(text[at - 1]))) return null
         if (offset < text.length && !text[offset].isWhitespace()) return null
-        if (isMarkdownCodeContext(text, at)) return null
+        if (isMarkdownCodeContext(text, at, document.analysis.frontMatterEndOffset)) return null
         return SourceRange(at, offset)
     }
 
@@ -1415,59 +1415,13 @@ internal class GraphMdWorkspaceIndex(
         PropType.array -> "[]"
     }
 
-    private fun isMarkdownCodeContext(text: String, offset: Int): Boolean {
-        if (isInsideFencedCode(text, offset)) return true
-        val lineStart = text.lastIndexOf('\n', (offset - 1).coerceAtLeast(0)).let { if (it < 0) 0 else it + 1 }
-        val linePrefix = text.substring(lineStart, offset)
-        var index = 0
-        var delimiterLength: Int? = null
-        while (index < linePrefix.length) {
-            if (linePrefix[index] != '`') {
-                index++
-                continue
-            }
-            var end = index + 1
-            while (end < linePrefix.length && linePrefix[end] == '`') end++
-            val length = end - index
-            delimiterLength = if (delimiterLength == null) length else {
-                if (delimiterLength == length) null else delimiterLength
-            }
-            index = end
-        }
-        return delimiterLength != null
-    }
-
-    private fun isInsideFencedCode(text: String, offset: Int): Boolean {
-        var lineStart = 0
-        var fencedChar: Char? = null
-        var fencedLength = 0
-        while (lineStart <= offset) {
-            val lineEnd = text.indexOf('\n', lineStart).let { if (it < 0) text.length else it }
-            val visibleEnd = minOf(lineEnd, offset)
-            val line = text.substring(lineStart, visibleEnd)
-            val marker = fencedMarker(line)
-            if (fencedChar == null) {
-                if (marker != null) {
-                    fencedChar = marker.first
-                    fencedLength = marker.second
-                }
-            } else if (marker?.first == fencedChar && marker.second >= fencedLength) {
-                fencedChar = null
-                fencedLength = 0
-            }
-            if (lineEnd >= offset) break
-            lineStart = lineEnd + 1
-        }
-        return fencedChar != null
-    }
-
-    private fun fencedMarker(line: String): Pair<Char, Int>? {
-        val indent = line.takeWhile { it == ' ' }.length
-        if (indent > 3) return null
-        val content = line.substring(indent)
-        val marker = content.takeWhile { it == '`' || it == '~' }
-        if (marker.length < 3 || marker.any { it != marker.first() }) return null
-        return marker.first() to marker.length
+    private fun isMarkdownCodeContext(text: String, offset: Int, bodyStartOffset: Int): Boolean {
+        if (bodyStartOffset !in 0..text.length) return false
+        val bodyOffset = offset - bodyStartOffset
+        val body = text.substring(bodyStartOffset)
+        if (bodyOffset !in body.indices) return false
+        val masked = maskCommonMarkCodeRegions(body)
+        return masked[bodyOffset] != body[bodyOffset]
     }
 
     private fun exactRelationPropsCompletions(document: IndexedDocument, position: Position): List<CompletionItem>? {

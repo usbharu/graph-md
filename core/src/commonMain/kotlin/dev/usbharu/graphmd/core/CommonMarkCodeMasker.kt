@@ -518,3 +518,8 @@ internal object CommonMarkCodeMasker {
             (offset until contentEnd).all { source[it] == ' ' || source[it] == '\t' }
     }
 }
+
+/**
+ * Masks CommonMark code blocks and code spans with spaces while preserving offsets.
+ */
+fun maskCommonMarkCodeRegions(source: String): String = CommonMarkCodeMasker.mask(source)
