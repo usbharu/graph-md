@@ -495,6 +495,26 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `node creation quick fix excludes ambiguous NodeTypes`() {
+        val nodeUri = "file:///workspace/alice.md"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/person-a.md" to "---\nid: Person\nkind: NodeType\n---",
+                "file:///workspace/types/person-b.md" to "---\nid: Person\nkind: NodeType\n---",
+                "file:///workspace/types/Company.md" to "---\nid: Company\nkind: NodeType\n---",
+                nodeUri to "---\nid: alice\nkind: Node\ntype: Company\n---\n@link[Bob](missing knows)",
+            ),
+        )
+
+        val action = fixture.actions(nodeUri, "Unknown Node target: missing")
+            .single { it.title == "Create Node 'missing'" }
+        val payload = action.command!!.arguments.single() as Map<*, *>
+        val choices = payload["choices"] as List<*>
+
+        assertEquals(listOf("Company"), choices.map { (it as Map<*, *>)["label"] })
+    }
+
+    @Test
     fun `type definition quick fixes keep their diagnostic kind`() {
         val nodeUri = "file:///workspace/alice.md"
         val fixture = serverFixture(

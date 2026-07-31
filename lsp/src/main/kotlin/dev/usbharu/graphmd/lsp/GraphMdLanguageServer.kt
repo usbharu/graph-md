@@ -1131,7 +1131,7 @@ internal class GraphMdWorkspaceIndex(
         val newUri = newPath.toUri().toString()
         if (documentSnapshot(newUri) != null || Files.exists(newPath)) return null
 
-        val nodeTypeIds = completionIds(ReferenceTargetKind.NodeType)
+        val nodeTypeIds = unambiguousDefinitionIds(ReferenceTargetKind.NodeType)
         if (target.kind == ReferenceTargetKind.Node || target.kind == ReferenceTargetKind.Media) {
             if (nodeTypeIds.isEmpty()) return null
             val choices = nodeTypeIds.map { nodeTypeId ->
@@ -1650,6 +1650,13 @@ internal class GraphMdWorkspaceIndex(
             ReferenceTargetKind.Timeline -> definitionsOf(kind).map { it.id }
         }.distinct().sorted()
     }
+
+    private fun unambiguousDefinitionIds(kind: ReferenceTargetKind): List<String> =
+        definitionsOf(kind)
+            .groupBy { it.id }
+            .filterValues { definitions -> definitions.size == 1 }
+            .keys
+            .sorted()
 
     private fun resolve(kind: ReferenceTargetKind, id: String): List<IndexedDefinition> {
         return definitionsCompatibleWith(kind).filter { it.id == id }
