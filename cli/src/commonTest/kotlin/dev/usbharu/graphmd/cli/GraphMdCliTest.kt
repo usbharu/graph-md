@@ -234,6 +234,222 @@ class GraphMdCliTest {
     }
 
     @Test
+    fun `human readable properties render values and valid time ranges`() {
+        val fs = FakeFileSystem(
+            files = mapOf(
+                "/workspace/Person.md" to """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    props:
+                      anytime:
+                        type: string
+                      bounded:
+                        type: string
+                      count:
+                        type: number
+                      escaped:
+                        type: string
+                      happenedAt:
+                        type: instant
+                      items:
+                        type: array
+                        items: string
+                      label:
+                        type: text
+                      multiple:
+                        type: string
+                      openFrom:
+                        type: string
+                      openTo:
+                        type: string
+                      period:
+                        type: duration
+                      plain:
+                        type: string
+                    ---
+                """.trimIndent(),
+                "/workspace/CommonEra.md" to """
+                    ---
+                    id: CommonEra
+                    kind: Timeline
+                    ---
+                """.trimIndent(),
+                "/workspace/Branch.md" to """
+                    ---
+                    id: Branch
+                    kind: Timeline
+                    ---
+                """.trimIndent(),
+                "/workspace/alice.md" to """
+                    ---
+                    id: alice
+                    kind: Node
+                    type: Person
+                    props:
+                      count: 2
+                      enabled: true
+                      happenedAt:
+                        value: Today
+                        timecode: 3
+                      items:
+                        - alpha
+                        - value: beta
+                          validTime:
+                            - timeline: Branch
+                              from:
+                                value: Open
+                                timecode: 1
+                              to:
+                                value: Close
+                                timecode: 2
+                      label:
+                        default: Display name
+                        ja: 表示名
+                      metadata:
+                        active: true
+                        code: sample
+                      nothing:
+                      period:
+                        timeline: CommonEra
+                        from:
+                          timeline: CommonEra
+                          value: Start
+                          timecode: 1
+                        to:
+                          timeline: CommonEra
+                          value: End
+                          timecode: 2
+                    ---
+                    @props{
+                      anytime(validTime=CommonEra) = "anytime",
+                      bounded(validTime=CommonEra(from=10,to=20)) = "bounded",
+                      escaped = "a\\b\tc\nd",
+                      multiple(validTime=[CommonEra,Branch(from=1,to=2)]) = "multiple",
+                      openFrom(validTime=CommonEra(from=10)) = "open-from",
+                      openTo(validTime=Branch(to=20)) = "open-to",
+                      plain = "plain"
+                    }
+                """.trimIndent(),
+            ),
+        )
+        val cli = GraphMdCli(fs)
+
+        val props = cli.run(listOf("props", "alice", "/workspace"))
+        val shown = cli.run(listOf("show", "alice", "/workspace"))
+        val json = cli.run(listOf("props", "alice", "/workspace", "--json"))
+        fun tableBlock(value: String): String = value.trimIndent().replace('→', '\t') + "\n"
+
+        assertEquals(0, props.exitCode, props.stderr)
+        assertTrue(props.stdout.contains("anytime\tanytime\tCommonEra\n"))
+        assertTrue(props.stdout.contains("bounded\tbounded\tCommonEra: 10.0 – 20.0\n"))
+        assertTrue(props.stdout.contains("count\t2.0\t-\n"))
+        assertTrue(props.stdout.contains("enabled\ttrue\t-\n"))
+        assertTrue(props.stdout.contains("escaped\ta\\\\b\\tc\\nd\t-\n"))
+        assertTrue(props.stdout.contains("alice\tfull\tlabel\ttext {\t-\n"))
+        assertTrue(props.stdout.contains("\t\t\t    value: Display name\n"))
+        assertTrue(props.stdout.contains("\t\t\t    value: 表示名\n"))
+        assertEquals(0, shown.exitCode, shown.stderr)
+        assertTrue(
+            shown.stdout.contains(
+                tableBlock(
+                    """
+                    happenedAt→instant {→-
+                    →  timeline: null
+                    →  value: Today
+                    →  timecode: 3.0
+                    →}
+                    """,
+                ),
+            ),
+            shown.stdout,
+        )
+        assertTrue(
+            shown.stdout.contains(
+                tableBlock(
+                    """
+                    items→array [→-
+                    →  [0]:
+                    →    value: alpha
+                    →    validTime: -
+                    →  [1]:
+                    →    value: beta
+                    →    validTime: Branch: Open (1.0) – Close (2.0)
+                    →]
+                    """,
+                ),
+            ),
+        )
+        assertTrue(
+            shown.stdout.contains(
+                tableBlock(
+                    """
+                    label→text {→-
+                    →  default:
+                    →    value: Display name
+                    →    validTime: -
+                    →  ja:
+                    →    value: 表示名
+                    →    validTime: -
+                    →}
+                    """,
+                ),
+            ),
+        )
+        assertTrue(
+            shown.stdout.contains(
+                tableBlock(
+                    """
+                    metadata→object {→-
+                    →  active:
+                    →    value: true
+                    →    validTime: -
+                    →  code:
+                    →    value: sample
+                    →    validTime: -
+                    →}
+                    """,
+                ),
+            ),
+        )
+        assertTrue(props.stdout.contains("multiple\tmultiple\tCommonEra, Branch: 1.0 – 2.0\n"))
+        assertTrue(props.stdout.contains("nothing\tnull\t-\n"))
+        assertTrue(props.stdout.contains("openFrom\topen-from\tCommonEra: 10.0 –\n"))
+        assertTrue(props.stdout.contains("openTo\topen-to\tBranch: – 20.0\n"))
+        assertTrue(
+            shown.stdout.contains(
+                tableBlock(
+                    """
+                    period→duration {→-
+                    →  timeline: CommonEra
+                    →  from:
+                    →    timePoint {
+                    →      timeline: CommonEra
+                    →      value: Start
+                    →      timecode: 1.0
+                    →    }
+                    →  to:
+                    →    timePoint {
+                    →      timeline: CommonEra
+                    →      value: End
+                    →      timecode: 2.0
+                    →    }
+                    →}
+                    """,
+                ),
+            ),
+        )
+        assertTrue(props.stdout.contains("plain\tplain\t-\n"))
+        assertFalse(props.stdout.contains("[{\"timeline\""))
+
+        assertTrue(shown.stdout.contains("bounded\tbounded\tCommonEra: 10.0 – 20.0\n"))
+        assertFalse(shown.stdout.contains("[{\"timeline\""))
+
+        assertEquals(0, json.exitCode, json.stderr)
+        assertTrue(json.stdout.contains("\"validTime\":[{\"timeline\":\"CommonEra\""))
+    }
+
+    @Test
     fun `links filters direction and derived relation type`() {
         val cli = GraphMdCli(linkFixture())
 
