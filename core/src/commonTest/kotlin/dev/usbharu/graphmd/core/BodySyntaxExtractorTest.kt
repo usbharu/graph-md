@@ -401,6 +401,21 @@ class BodySyntaxExtractorTest {
     }
 
     @Test
+    fun `extracts noncanonical timeline ids from directive validTime grammar`() {
+        val extracted = extractor.extract(
+            """@props(validTime=Era@Branch){age=25} @link(validTime=Other/Line)[Bob](bob friendOf)""",
+            "/tmp/alice.md",
+            "alice",
+        )
+
+        assertTrue(extracted.diagnostics.isEmpty(), extracted.diagnostics.joinToString("\n") { it.message })
+        val propsEntry = (extracted.propsBlocks.single().props.getValue("age") as RawArray).values.single() as RawObject
+        val propsTime = (propsEntry.values.getValue("validTime") as RawArray).values.single() as RawObject
+        assertEquals("Era@Branch", (propsTime.values.getValue("timeline") as RawString).value)
+        assertEquals("Other/Line", extracted.relations.single().validTime.single().timeline)
+    }
+
+    @Test
     fun `extracts props-wide and per-property validTime assertions`() {
         val extracted = extractor.extract(
             """@props(validTime=[CommonEra]){age=25,name(validTime=Branch(from=1,to=2))="Alice"}""",

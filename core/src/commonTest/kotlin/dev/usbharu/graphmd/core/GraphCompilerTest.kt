@@ -886,6 +886,25 @@ class GraphCompilerTest {
     }
 
     @Test
+    fun `compiler resolves noncanonical timeline ids parsed from body validTime`() {
+        val result = compiler().compile(
+            listOf(
+                TimelineDocument("Era@Branch", sourcePath = "/tmp/timeline.md"),
+                NodeTypeDocument("Sample", props = mapOf("age" to PropSchema(PropType.number)), sourcePath = "/tmp/type.md"),
+                NodeDocument(
+                    id = "sample",
+                    type = "Sample",
+                    body = "@props{age(validTime=Era@Branch)=20}",
+                    sourcePath = "/tmp/node.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.diagnostics.none { it.severity == Severity.Error }, result.diagnostics.joinToString("\n") { it.message })
+        assertEquals("Era@Branch", result.nodes.single().propEntries.getValue("age").single().validTime.single().timeline)
+    }
+
+    @Test
     fun `body props keep fallback and timed assertions for the same property`() {
         val result = compiler().compile(
             listOf(

@@ -97,6 +97,7 @@ internal class FrontMatterStructureScanner {
             val split = splitKeyValue(content)
             if (split == null) {
                 if (dashLength > 0) {
+                    if (content.trimStart().startsWith("[")) continue
                     addScalarTokens(
                         rawValue = content,
                         absoluteStart = lineStarts[lineIndex] + contentStart,
@@ -160,6 +161,7 @@ internal class FrontMatterStructureScanner {
     ) {
         val trimmedStart = rawValue.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
         val trimmed = rawValue.drop(trimmedStart).trimEnd()
+        if (trimmed.startsWith("[") && !trimmed.endsWith("]")) return
         if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
             splitYamlFlowItems(trimmed.substring(1, trimmed.length - 1)).forEach { item ->
                 val raw = item.raw.trim()
@@ -167,23 +169,36 @@ internal class FrontMatterStructureScanner {
                 if (raw.startsWith("[") && raw.endsWith("]")) return@forEach
                 val leading = item.raw.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
                 val start = absoluteStart + trimmedStart + 1 + item.start + leading
+                val decoded = decodeYamlScalar(raw)
                 destination += FrontMatterScalar(
-                    decodeYamlScalar(raw),
+                    decoded,
                     raw,
                     path,
-                    SourceRange(start, start + raw.length),
+                    scalarRange(raw, start, decoded),
                     owner,
                 )
             }
             return
         }
+        val decoded = decodeYamlScalar(trimmed)
         destination += FrontMatterScalar(
-            decodeYamlScalar(trimmed),
+            decoded,
             trimmed,
             path,
-            SourceRange(absoluteStart + trimmedStart, absoluteStart + trimmedStart + trimmed.length),
+            scalarRange(trimmed, absoluteStart + trimmedStart, decoded),
             owner,
         )
+    }
+
+    private fun scalarRange(raw: String, start: Int, decoded: String): SourceRange {
+        val quoted = raw.length >= 2 &&
+            ((raw.first() == '"' && raw.last() == '"') || (raw.first() == '\'' && raw.last() == '\''))
+        val canonical = decoded.matches(Regex("[A-Za-z_][A-Za-z0-9_.:-]*"))
+        return if (quoted && !canonical) {
+            SourceRange(start + 1, start + raw.length - 1)
+        } else {
+            SourceRange(start, start + raw.length)
+        }
     }
 
     private fun splitKeyValue(content: String): KeyValueSplit? {
