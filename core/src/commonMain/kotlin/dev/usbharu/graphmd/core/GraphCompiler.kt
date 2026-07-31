@@ -29,24 +29,57 @@ class GraphCompiler(
         val relTypeDocs = documents.filterIsInstance<RelTypeDocument>()
         val timelineDocs = documents.filterIsInstance<TimelineDocument>()
 
+        val ambiguousNodeIds = duplicateIds(nodeDocs)
+        val ambiguousNodeTypeIds = duplicateIds(nodeTypeDocs)
+        val ambiguousRelTypeIds = duplicateIds(relTypeDocs)
+        val ambiguousTimelineIds = duplicateIds(timelineDocs)
+
         diagnostics += checkUniqueIds(nodeDocs, DocumentKind.Node)
         diagnostics += checkUniqueIds(nodeTypeDocs, DocumentKind.NodeType)
         diagnostics += checkUniqueIds(relTypeDocs, DocumentKind.RelType)
         diagnostics += checkUniqueIds(timelineDocs, DocumentKind.Timeline)
 
+        relTypeDocs.filter { it.id in ambiguousRelTypeIds }.forEach { document ->
+            document.from.orEmpty().forEach { nodeTypeId ->
+                diagnostics += referenceDiagnostics(
+                    referenceCandidates,
+                    ReferenceTargetKind.NodeType,
+                    nodeTypeId,
+                    "Unknown NodeType: $nodeTypeId",
+                    document.sourcePath,
+                    document.id,
+                    ambiguousMessage = "Ambiguous NodeType in RelType from: $nodeTypeId",
+                )
+            }
+            document.to.orEmpty().forEach { nodeTypeId ->
+                diagnostics += referenceDiagnostics(
+                    referenceCandidates,
+                    ReferenceTargetKind.NodeType,
+                    nodeTypeId,
+                    "Unknown NodeType: $nodeTypeId",
+                    document.sourcePath,
+                    document.id,
+                    ambiguousMessage = "Ambiguous NodeType in RelType to: $nodeTypeId",
+                )
+            }
+        }
+
+        val uniqueTimelineDocs = timelineDocs.filterNot { it.id in ambiguousTimelineIds }
+        val uniqueNodeTypeDocs = nodeTypeDocs.filterNot { it.id in ambiguousNodeTypeIds }
+        val uniqueRelTypeDocs = relTypeDocs.filterNot { it.id in ambiguousRelTypeIds }
         val timelines = resolveTimelineMappings(
-            resolveTimelines(timelineDocs, referenceCandidates, diagnostics),
-            timelineDocs,
+            resolveTimelines(uniqueTimelineDocs, referenceCandidates, diagnostics),
+            uniqueTimelineDocs,
             referenceCandidates,
             diagnostics,
         )
-        val nodeTypes = resolveNodeTypes(nodeTypeDocs, timelines, referenceCandidates, diagnostics)
-        val relTypes = resolveRelTypes(relTypeDocs, timelines, nodeTypes, referenceCandidates, diagnostics)
+        val nodeTypes = resolveNodeTypes(uniqueNodeTypeDocs, timelines, referenceCandidates, diagnostics)
+        val relTypes = resolveRelTypes(uniqueRelTypeDocs, timelines, nodeTypes, referenceCandidates, diagnostics)
 
         val timelineById = timelines.associateBy { it.id }
         val nodeTypeById = nodeTypes.associateBy { it.id }
         val relTypeById = relTypes.associateBy { it.id }
-        val nodeDocById = nodeDocs.associateBy { it.id }
+        val nodeDocById = nodeDocs.filterNot { it.id in ambiguousNodeIds }.associateBy { it.id }
 
         val normalizedNodes = mutableListOf<NormalizedNode>()
         val relationSeeds = mutableListOf<NormalizedRelation>()
@@ -55,14 +88,14 @@ class GraphCompiler(
             diagnostics += validateNodeTopLevelFields(document)
             diagnostics += validateValidTimes(document.validTime, timelineById, referenceCandidates, document.sourcePath, document.id)
             val nodeSchema = nodeTypeById[document.type]
-            referenceDiagnostic(
+            diagnostics += referenceDiagnostics(
                 referenceCandidates,
                 ReferenceTargetKind.NodeType,
                 document.type,
                 "Unknown NodeType: ${document.type}",
                 document.sourcePath,
                 document.id,
-            )?.let(diagnostics::add)
+            )
             val extraction = extractor.extract(document.body, document.sourcePath, document.id)
             diagnostics += extraction.diagnostics
 
@@ -91,7 +124,7 @@ class GraphCompiler(
                 diagnostics += validateValidTimes(it.validTime, timelineById, referenceCandidates, document.sourcePath, document.id)
                 validateNestedValidTimes(it.value, timelineById, referenceCandidates, document.sourcePath, document.id, diagnostics)
             }
-            normalizedNodes += NormalizedNode(
+            val normalizedNode = NormalizedNode(
                 id = document.id,
                 type = document.type,
                 props = props,
@@ -101,10 +134,11 @@ class GraphCompiler(
                 propEntries = propEntries,
                 source = SourceInfo(document.sourcePath),
             )
+            if (document.id !in ambiguousNodeIds) normalizedNodes += normalizedNode
 
             extraction.relations.forEach { relation ->
                 val relSchema = relTypeById[relation.relType]
-                referenceDiagnostic(
+                diagnostics += referenceDiagnostics(
                     referenceCandidates,
                     ReferenceTargetKind.RelType,
                     relation.relType,
@@ -112,8 +146,8 @@ class GraphCompiler(
                     document.sourcePath,
                     document.id,
                     relation.range,
-                )?.let(diagnostics::add)
-                referenceDiagnostic(
+                )
+                diagnostics += referenceDiagnostics(
                     referenceCandidates,
                     ReferenceTargetKind.Node,
                     relation.target,
@@ -121,7 +155,7 @@ class GraphCompiler(
                     document.sourcePath,
                     document.id,
                     relation.range,
-                )?.let(diagnostics::add)
+                )
                 val relationValidTime = relation.validTime.ifEmpty { document.validTime }
                 val normalizedEntries = normalizePropEntries(
                     ownerLabel = "Relation ${document.id}->${relation.target}:${relation.relType}",
@@ -139,7 +173,7 @@ class GraphCompiler(
                     diagnostics += validateValidTimes(it.validTime, timelineById, referenceCandidates, document.sourcePath, document.id)
                     validateNestedValidTimes(it.value, timelineById, referenceCandidates, document.sourcePath, document.id, diagnostics)
                 }
-                relationSeeds += NormalizedRelation(
+                val relationSeed = NormalizedRelation(
                     from = document.id,
                     to = relation.target,
                     type = relation.relType,
@@ -150,6 +184,7 @@ class GraphCompiler(
                     propEntries = normalizedEntries,
                     targetUrl = nodeDocById[relation.target]?.takeIf { it.kind == DocumentKind.Media }?.url,
                 )
+                if (document.id !in ambiguousNodeIds) relationSeeds += relationSeed
                 diagnostics += validateValidTimes(
                     relation.validTime.ifEmpty { document.validTime },
                     timelineById,
@@ -183,6 +218,9 @@ class GraphCompiler(
             diagnostics = diagnostics,
         )
     }
+
+    private fun duplicateIds(documents: List<GraphDocument>): Set<String> =
+        documents.groupingBy { it.id }.eachCount().filterValues { it > 1 }.keys
 
     private fun checkUniqueIds(documents: List<GraphDocument>, kind: DocumentKind): List<Diagnostic> {
         return documents.groupBy { it.id }.filterValues { it.size > 1 }.flatMap { (id, duplicates) ->
@@ -222,6 +260,36 @@ class GraphCompiler(
             else -> unresolvedMessage
         }
         return referenceError(message, sourcePath, documentId, range)
+    }
+
+    private fun referenceDiagnostics(
+        candidatesById: Map<String, List<GraphDocument>>,
+        expectedKind: ReferenceTargetKind,
+        id: String,
+        unresolvedMessage: String,
+        sourcePath: String,
+        documentId: String,
+        range: SourceRange? = null,
+        ambiguousMessage: String? = null,
+    ): List<Diagnostic> {
+        val diagnostic = referenceDiagnostic(
+            candidatesById,
+            expectedKind,
+            id,
+            unresolvedMessage,
+            sourcePath,
+            documentId,
+            range,
+        ) ?: return emptyList()
+        if (!diagnostic.message.startsWith("Ambiguous ")) return listOf(diagnostic)
+        val compatibilityMessage = ambiguousMessage
+            ?: unresolvedMessage.replaceFirst("Unknown ", "Ambiguous ")
+        return buildList {
+            add(diagnostic)
+            if (compatibilityMessage != diagnostic.message) {
+                add(referenceError(compatibilityMessage, sourcePath, documentId, range))
+            }
+        }
     }
 
     private fun GraphDocument.referenceTargetKind(): ReferenceTargetKind = when (kind) {
@@ -272,14 +340,14 @@ class GraphCompiler(
         documentId: String,
     ): List<Diagnostic> = buildList {
         validTimes.forEach { validTime ->
-            referenceDiagnostic(
+            addAll(referenceDiagnostics(
                 referenceCandidates,
                 ReferenceTargetKind.Timeline,
                 validTime.timeline,
                 "Unknown Timeline: ${validTime.timeline}",
                 sourcePath,
                 documentId,
-            )?.let(::add)
+            ))
             val from = validTime.from?.timecode
             val to = validTime.to?.timecode
             if (from != null && to != null && from > to) {
@@ -335,14 +403,14 @@ class GraphCompiler(
                 return null
             }
             val parents = doc.extends.mapNotNull { parentId ->
-                referenceDiagnostic(
+                diagnostics += referenceDiagnostics(
                     referenceCandidates,
                     ReferenceTargetKind.Timeline,
                     parentId,
                     "Unknown parent Timeline: $parentId",
                     doc.sourcePath,
                     id,
-                )?.let(diagnostics::add)
+                )
                 resolve(parentId)
             }
             if (doc.mappings.isNotEmpty() && doc.timecode == null) {
@@ -380,18 +448,25 @@ class GraphCompiler(
         val ids = timelines.map { it.id }.toSet()
         val edges = ids.associateWith { mutableListOf<Edge>() }.toMutableMap()
 
-        fun connect(from: String, to: String, offset: Double, sourcePath: String, validateReference: Boolean = true) {
+        fun connect(
+            from: String,
+            to: String,
+            offset: Double,
+            sourcePath: String,
+            documentId: String,
+            validateReference: Boolean = true,
+        ) {
             if (validateReference) {
-                referenceDiagnostic(
+                diagnostics += referenceDiagnostics(
                     referenceCandidates,
                     ReferenceTargetKind.Timeline,
                     to,
                     "Unknown mapped Timeline: $to",
                     sourcePath,
-                    from,
-                )?.let(diagnostics::add)
+                    documentId,
+                )
             }
-            if (to !in ids) {
+            if (from !in ids || to !in ids) {
                 return
             }
             edges.getValue(from) += Edge(to, offset)
@@ -400,7 +475,7 @@ class GraphCompiler(
 
         docs.forEach { doc ->
             doc.extends.forEach { parent ->
-                if (parent in ids) connect(doc.id, parent, 0.0, doc.sourcePath, validateReference = false)
+                if (parent in ids) connect(doc.id, parent, 0.0, doc.sourcePath, doc.id, validateReference = false)
             }
             doc.mappings.forEach { mapping ->
                 if (mapping is OffsetTimelineMapping) {
@@ -409,18 +484,18 @@ class GraphCompiler(
                             diagnostics += schemaError("offset mapping requires exactly one of from or to", doc.sourcePath, doc.id)
                         !mapping.offset.isFinite() ->
                             diagnostics += schemaError("mapping.offset MUST be finite", doc.sourcePath, doc.id)
-                        mapping.to != null -> connect(doc.id, mapping.to, mapping.offset, doc.sourcePath)
+                        mapping.to != null -> connect(doc.id, mapping.to, mapping.offset, doc.sourcePath, doc.id)
                         mapping.from != null -> {
-                            referenceDiagnostic(
+                            diagnostics += referenceDiagnostics(
                                 referenceCandidates,
                                 ReferenceTargetKind.Timeline,
                                 mapping.from,
                                 "Unknown mapped Timeline: ${mapping.from}",
                                 doc.sourcePath,
                                 doc.id,
-                            )?.let(diagnostics::add)
+                            )
                             if (mapping.from in ids) {
-                                connect(mapping.from, doc.id, mapping.offset, doc.sourcePath, validateReference = false)
+                                connect(mapping.from, doc.id, mapping.offset, doc.sourcePath, doc.id, validateReference = false)
                             }
                         }
                     }
@@ -499,14 +574,14 @@ class GraphCompiler(
             val props = linkedMapOf<String, ResolvedPropSchema>()
             val parents = mutableListOf<NormalizedNodeType>()
             doc.extends.forEach { parentId ->
-                referenceDiagnostic(
+                diagnostics += referenceDiagnostics(
                     referenceCandidates,
                     ReferenceTargetKind.NodeType,
                     parentId,
                     "Unknown parent NodeType: $parentId",
                     doc.sourcePath,
                     id,
-                )?.let(diagnostics::add)
+                )
                 val parent = resolve(parentId)
                 if (parent != null) {
                     parents += parent
@@ -555,6 +630,11 @@ class GraphCompiler(
         val nodeTypeById = nodeTypes.associateBy { it.id }
         val resolved = mutableMapOf<String, NormalizedRelType>()
         val visiting = mutableSetOf<String>()
+        val ambiguousNodeTypeIds = referenceCandidates
+            .filterValues { candidates ->
+                candidates.count { it.referenceTargetKind() == ReferenceTargetKind.NodeType } > 1
+            }
+            .keys
 
         fun resolve(id: String): NormalizedRelType? {
             resolved[id]?.let { return it }
@@ -567,14 +647,14 @@ class GraphCompiler(
             var inheritedFrom: List<String>? = null
             var inheritedTo: List<String>? = null
             doc.extends.forEach { parentId ->
-                referenceDiagnostic(
+                diagnostics += referenceDiagnostics(
                     referenceCandidates,
                     ReferenceTargetKind.RelType,
                     parentId,
                     "Unknown parent RelType: $parentId",
                     doc.sourcePath,
                     id,
-                )?.let(diagnostics::add)
+                )
                 val parent = resolve(parentId)
                 if (parent != null) {
                     parent.props.forEach { (name, schema) ->
@@ -596,15 +676,27 @@ class GraphCompiler(
                     }
                 }
             }
-            (doc.from.orEmpty() + doc.to.orEmpty()).forEach { nodeTypeId ->
-                referenceDiagnostic(
+            doc.from.orEmpty().forEach { nodeTypeId ->
+                diagnostics += referenceDiagnostics(
                     referenceCandidates,
                     ReferenceTargetKind.NodeType,
                     nodeTypeId,
                     "Unknown NodeType: $nodeTypeId",
                     doc.sourcePath,
                     id,
-                )?.let(diagnostics::add)
+                    ambiguousMessage = "Ambiguous NodeType in RelType from: $nodeTypeId",
+                )
+            }
+            doc.to.orEmpty().forEach { nodeTypeId ->
+                diagnostics += referenceDiagnostics(
+                    referenceCandidates,
+                    ReferenceTargetKind.NodeType,
+                    nodeTypeId,
+                    "Unknown NodeType: $nodeTypeId",
+                    doc.sourcePath,
+                    id,
+                    ambiguousMessage = "Ambiguous NodeType in RelType to: $nodeTypeId",
+                )
             }
             doc.props.forEach { (name, schema) ->
                 val resolvedSchema = resolveSchema(
@@ -616,8 +708,28 @@ class GraphCompiler(
                 }
                 inheritedProps[name] = parent?.copy(required = parent.required && resolvedSchema.required) ?: resolvedSchema
             }
-            val finalFrom = combineConstraint(inheritedFrom, doc.from, nodeTypeById, diagnostics, doc.sourcePath, id, "from")
-            val finalTo = combineConstraint(inheritedTo, doc.to, nodeTypeById, diagnostics, doc.sourcePath, id, "to")
+            fun resolvableEndpoints(raw: List<String>?): List<String>? {
+                if (raw == null || raw.isEmpty()) return raw
+                return raw.filterNot { it in ambiguousNodeTypeIds }.takeIf { it.isNotEmpty() }
+            }
+            val finalFrom = combineConstraint(
+                inheritedFrom,
+                resolvableEndpoints(doc.from),
+                nodeTypeById,
+                diagnostics,
+                doc.sourcePath,
+                id,
+                "from",
+            )
+            val finalTo = combineConstraint(
+                inheritedTo,
+                resolvableEndpoints(doc.to),
+                nodeTypeById,
+                diagnostics,
+                doc.sourcePath,
+                id,
+                "to",
+            )
             visiting.remove(id)
             return NormalizedRelType(
                 id = doc.id,
@@ -694,22 +806,34 @@ class GraphCompiler(
                 is TimelineSelector.Id -> selector.id
                 is TimelineSelector.Mapped -> selector.to
             }
-            referenceDiagnostic(
+            diagnostics += referenceDiagnostics(
                 referenceCandidates,
                 ReferenceTargetKind.Timeline,
                 timelineId,
                 "Unknown Timeline: $timelineId",
                 sourcePath,
                 documentId,
-            )?.let(diagnostics::add)
+            )
         }
         schema.timeline?.let(::checkSelector)
         schema.timelines.orEmpty().forEach(::checkSelector)
+        fun TimelineSelector.isResolvable(): Boolean = when (this) {
+            is TimelineSelector.Id -> id in timelineById
+            is TimelineSelector.Mapped -> to in timelineById
+        }
+        val resolvedTimeline = schema.timeline?.takeIf { it.isResolvable() }
+        val resolvedTimelines = schema.timelines?.let { selectors ->
+            if (selectors.isEmpty()) {
+                selectors
+            } else {
+                selectors.filter { it.isResolvable() }.takeIf { it.isNotEmpty() }
+            }
+        }
         return ResolvedPropSchema(
             type = schema.type,
             required = schema.required,
-            timeline = schema.timeline,
-            timelines = schema.timelines,
+            timeline = resolvedTimeline,
+            timelines = resolvedTimelines,
             items = schema.items?.let {
                 resolveSchema(
                     it, timelineById, referenceCandidates, diagnostics, sourcePath, documentId, "$propName[]",
@@ -1034,7 +1158,7 @@ class GraphCompiler(
         val obj = rawValue as? RawObject
         val timeline = (obj?.values?.get("timeline") as? RawString)?.value
         if (timeline != null) {
-            val diagnostic = referenceDiagnostic(
+            val diagnosticsForReference = referenceDiagnostics(
                 referenceCandidates,
                 ReferenceTargetKind.Timeline,
                 timeline,
@@ -1042,8 +1166,8 @@ class GraphCompiler(
                 sourcePath,
                 documentId,
             )
-            if (diagnostic != null) {
-                diagnostics += diagnostic
+            if (diagnosticsForReference.isNotEmpty()) {
+                diagnostics += diagnosticsForReference
                 return null
             }
         }
@@ -1081,7 +1205,7 @@ class GraphCompiler(
         }
         val timeline = (obj.values["timeline"] as? RawString)?.value
         if (timeline != null) {
-            val diagnostic = referenceDiagnostic(
+            val diagnosticsForReference = referenceDiagnostics(
                 referenceCandidates,
                 ReferenceTargetKind.Timeline,
                 timeline,
@@ -1089,8 +1213,8 @@ class GraphCompiler(
                 sourcePath,
                 documentId,
             )
-            if (diagnostic != null) {
-                diagnostics += diagnostic
+            if (diagnosticsForReference.isNotEmpty()) {
+                diagnostics += diagnosticsForReference
                 return null
             }
         }
@@ -1105,7 +1229,9 @@ class GraphCompiler(
             obj.values["to"], "$propName.to", timelineById, referenceCandidates, sourcePath, documentId, diagnostics,
         )
         if (from == null && to == null) {
-            diagnostics += constraintError("$propName duration must define from or to", SourceInfo(sourcePath, documentId))
+            if ("from" !in obj.values && "to" !in obj.values) {
+                diagnostics += constraintError("$propName duration must define from or to", SourceInfo(sourcePath, documentId))
+            }
             return null
         }
         listOfNotNull(from?.timeline, to?.timeline).forEach { endpointTimeline ->
@@ -1140,7 +1266,7 @@ class GraphCompiler(
         val timecode = parseNumberTimecode(obj.values["timecode"], "$field.timecode", sourcePath, documentId, diagnostics) ?: return null
         val timeline = (obj.values["timeline"] as? RawString)?.value
         if (timeline != null) {
-            val diagnostic = referenceDiagnostic(
+            val diagnosticsForReference = referenceDiagnostics(
                 referenceCandidates,
                 ReferenceTargetKind.Timeline,
                 timeline,
@@ -1148,8 +1274,8 @@ class GraphCompiler(
                 sourcePath,
                 documentId,
             )
-            if (diagnostic != null) {
-                diagnostics += diagnostic
+            if (diagnosticsForReference.isNotEmpty()) {
+                diagnostics += diagnosticsForReference
                 return null
             }
         }

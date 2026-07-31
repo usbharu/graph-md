@@ -82,6 +82,125 @@ class GraphCompilerTest {
     }
 
     @Test
+    fun `reports every unknown RelType endpoint without requiring a link`() {
+        val result = compiler().compile(
+            listOf(
+                RelTypeDocument(
+                    id = "relatedTo",
+                    from = listOf("Known", "Missing", "Missing"),
+                    to = listOf("OtherMissing", "Known"),
+                    sourcePath = "/tmp/related.md",
+                ),
+                NodeTypeDocument("Known", sourcePath = "/tmp/known.md"),
+            ),
+        )
+
+        val referenceErrors = result.diagnostics.filter { it.category == DiagnosticCategory.ReferenceError }
+        assertEquals(
+            listOf(
+                "Unknown NodeType: Missing",
+                "Unknown NodeType: Missing",
+                "Unknown NodeType: OtherMissing",
+            ),
+            referenceErrors.map { it.message },
+        )
+        assertTrue(referenceErrors.all { it.source == SourceInfo("/tmp/related.md", "relatedTo") })
+        val relatedTo = result.relTypes.single()
+        assertEquals(listOf("Known", "Missing", "Missing"), relatedTo.from)
+        assertEquals(listOf("OtherMissing", "Known"), relatedTo.to)
+        assertTrue(result.relations.isEmpty())
+    }
+
+    @Test
+    fun `reports inherited unknown RelType endpoints only at their declaration`() {
+        val result = compiler().compile(
+            listOf(
+                RelTypeDocument(
+                    id = "child",
+                    extends = listOf("parent"),
+                    sourcePath = "/tmp/child.md",
+                ),
+                RelTypeDocument(
+                    id = "parent",
+                    from = listOf("Missing"),
+                    sourcePath = "/tmp/parent.md",
+                ),
+            ),
+        )
+
+        val referenceErrors = result.diagnostics.filter {
+            it.category == DiagnosticCategory.ReferenceError && it.message == "Unknown NodeType: Missing"
+        }
+        assertEquals(1, referenceErrors.size)
+        assertEquals(SourceInfo("/tmp/parent.md", "parent"), referenceErrors.single().source)
+        assertEquals(listOf("Missing"), result.relTypes.single { it.id == "child" }.from)
+    }
+
+    @Test
+    fun `validates endpoints in every duplicate RelType definition`() {
+        val result = compiler().compile(
+            listOf(
+                RelTypeDocument(
+                    id = "duplicate",
+                    from = listOf("MissingFrom"),
+                    sourcePath = "/tmp/duplicate-a.md",
+                ),
+                RelTypeDocument(
+                    id = "duplicate",
+                    to = listOf("MissingTo"),
+                    sourcePath = "/tmp/duplicate-b.md",
+                ),
+            ),
+        )
+
+        val referenceErrors = result.diagnostics.filter { it.category == DiagnosticCategory.ReferenceError }
+        assertEquals(listOf("Unknown NodeType: MissingFrom", "Unknown NodeType: MissingTo"), referenceErrors.map { it.message })
+        assertEquals(
+            listOf("/tmp/duplicate-a.md", "/tmp/duplicate-b.md"),
+            referenceErrors.map { it.source?.path },
+        )
+    }
+
+    @Test
+    fun `resolves retained noncanonical endpoint ids while recovering invalid ids`() {
+        val result = compiler().compileSources(
+            listOf(
+                SourceDocument(
+                    text = """
+                        ---
+                        id: relation
+                        kind: RelType
+                        from:
+                          - "Known Type"
+                          - ""
+                        ---
+                    """.trimIndent(),
+                    sourcePath = "/tmp/relation.md",
+                ),
+                SourceDocument(
+                    text = """
+                        ---
+                        id: "Known Type"
+                        kind: NodeType
+                        ---
+                    """.trimIndent(),
+                    sourcePath = "/tmp/known-type.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.diagnostics.any { it.message == "from items MUST be non-empty" })
+        assertTrue(result.diagnostics.any {
+            it.severity == Severity.Warning &&
+                it.message == "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*" &&
+                it.source?.documentId == "Known Type"
+        })
+        val referenceErrors = result.diagnostics.filter { it.category == DiagnosticCategory.ReferenceError }
+        assertEquals(listOf("Unknown NodeType: "), referenceErrors.map { it.message })
+        assertEquals(listOf("Known Type", ""), result.relTypes.single().from)
+    }
+
+    @Test
     fun `applies inherited schemas and narrower rel constraints`() {
         val result = compiler().compile(
             listOf(

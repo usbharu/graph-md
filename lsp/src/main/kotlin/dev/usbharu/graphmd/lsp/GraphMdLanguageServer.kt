@@ -316,7 +316,10 @@ internal class GraphMdWorkspaceIndex(
         yamlFrontMatterCompletions(document, position)?.let { return it }
         exactPropsCompletions(document, position)?.let { return it }
         exactRelationPropsCompletions(document, position)?.let { return it }
-        val referenceKind = analyzer.inferCompletionKind(document.analysis, document.offsetAt(position)) ?: return emptyList()
+        val referenceKind = analyzer.inferCompletionKind(
+            document.analysis,
+            document.analysisOffsetAt(position),
+        ) ?: return emptyList()
         return contextualReferenceIds(document, position, referenceKind).map { id ->
             CompletionItem(id).apply {
                 this.kind = when (referenceKind) {
@@ -331,12 +334,29 @@ internal class GraphMdWorkspaceIndex(
     fun definitions(uri: String, position: Position): List<Location> {
         val documents = documentsSnapshot()
         val document = documents.firstOrNull { it.uri == normalizeUri(uri) } ?: return emptyList()
-        val offset = document.offsetAt(position)
+        val offset = document.analysisOffsetAt(position)
         val reference = analyzer.findReferenceAt(document.analysis, offset)
         if (reference != null) {
             return resolve(reference.kind, reference.targetId, documents).map { resolved ->
                 Location(resolved.uri, resolved.range())
             }
+        }
+        val definition = analyzer.findDefinitionAt(document.analysis, offset)
+        if (definition != null) {
+            val self = Location(document.uri, document.analysisRangeOf(definition.range))
+            val candidates = resolve(definition.kind, definition.id, documents)
+                .map { resolved -> Location(resolved.uri, resolved.range()) }
+                .distinct()
+                .sortedWith(
+                    compareBy<Location>(
+                        { it.uri },
+                        { it.range.start.line },
+                        { it.range.start.character },
+                        { it.range.end.line },
+                        { it.range.end.character },
+                    ),
+                )
+            return listOf(self) + candidates.filterNot { it == self }
         }
         val propertyReference = analyzer.findPropertyReferenceAt(document.analysis, offset)
             ?: analyzer.findPropertyDefinitionAt(document.analysis, offset)?.let {
@@ -344,14 +364,14 @@ internal class GraphMdWorkspaceIndex(
             }
             ?: return emptyList()
         return resolveProperty(propertyReference, documents).map { resolved ->
-            Location(resolved.document.uri, resolved.document.rangeOf(resolved.definition.range))
+            Location(resolved.document.uri, resolved.document.analysisRangeOf(resolved.definition.range))
         }
     }
 
     fun references(uri: String, position: Position): List<Location> {
         val documents = documentsSnapshot()
         val document = documents.firstOrNull { it.uri == normalizeUri(uri) } ?: return emptyList()
-        val offset = document.offsetAt(position)
+        val offset = document.analysisOffsetAt(position)
         val reference = analyzer.findReferenceAt(document.analysis, offset)?.let { it.kind to it.targetId }
             ?: analyzer.findDefinitionAt(document.analysis, offset)?.let { it.kind to it.id }
             ?: return emptyList()
@@ -360,10 +380,10 @@ internal class GraphMdWorkspaceIndex(
         documents.forEach { indexed ->
             indexed.analysis.definitions
                 .filter { it.kind == reference.first && it.id == reference.second }
-                .forEach { locations += Location(indexed.uri, indexed.rangeOf(it.range)) }
+                .forEach { locations += Location(indexed.uri, indexed.analysisRangeOf(it.range)) }
             indexed.analysis.references
                 .filter { it.kind == reference.first && it.targetId == reference.second }
-                .forEach { locations += Location(indexed.uri, indexed.rangeOf(it.range)) }
+                .forEach { locations += Location(indexed.uri, indexed.analysisRangeOf(it.range)) }
         }
         return locations
     }
@@ -371,7 +391,7 @@ internal class GraphMdWorkspaceIndex(
     fun hover(uri: String, position: Position): Hover? {
         val documents = documentsSnapshot()
         val document = documents.firstOrNull { it.uri == normalizeUri(uri) } ?: return null
-        val offset = document.offsetAt(position)
+        val offset = document.analysisOffsetAt(position)
         val symbol = analyzer.findReferenceAt(document.analysis, offset)?.let { it.kind to it.targetId }
             ?: analyzer.findDefinitionAt(document.analysis, offset)?.let { it.kind to it.id }
             ?: return null
@@ -405,7 +425,7 @@ internal class GraphMdWorkspaceIndex(
         if (newName.isBlank() || newName.any { it.isWhitespace() }) return null
         val documents = documentsSnapshot()
         val document = documents.firstOrNull { it.uri == normalizeUri(uri) } ?: return null
-        val offset = document.offsetAt(position)
+        val offset = document.analysisOffsetAt(position)
         val symbol = analyzer.findReferenceAt(document.analysis, offset)?.let { it.kind to it.targetId }
             ?: analyzer.findDefinitionAt(document.analysis, offset)?.let { it.kind to it.id }
             ?: return null
@@ -413,10 +433,16 @@ internal class GraphMdWorkspaceIndex(
         documents.forEach { indexed ->
             indexed.analysis.definitions
                 .filter { it.kind == symbol.first && it.id == symbol.second }
-                .forEach { changes.getOrPut(indexed.uri) { mutableListOf() } += TextEdit(indexed.rangeOf(it.range), newName) }
+                .forEach {
+                    changes.getOrPut(indexed.uri) { mutableListOf() } +=
+                        TextEdit(indexed.analysisRangeOf(it.range), newName)
+                }
             indexed.analysis.references
                 .filter { it.kind == symbol.first && it.targetId == symbol.second }
-                .forEach { changes.getOrPut(indexed.uri) { mutableListOf() } += TextEdit(indexed.rangeOf(it.range), newName) }
+                .forEach {
+                    changes.getOrPut(indexed.uri) { mutableListOf() } +=
+                        TextEdit(indexed.analysisRangeOf(it.range), newName)
+                }
         }
         return WorkspaceEdit(changes)
     }
@@ -896,7 +922,7 @@ internal class GraphMdWorkspaceIndex(
                                 document,
                                 diagnostic,
                                 "Change relation type to '${rel.id}'",
-                                document.rangeOf(relReference.range),
+                                document.analysisRangeOf(relReference.range),
                                 rel.id,
                                 preferred = index == 0,
                             ),
@@ -1141,7 +1167,7 @@ internal class GraphMdWorkspaceIndex(
                 source = "graphmd"
                 code = Either.forLeft(diagnostic.category.name)
                 range = inferredDiagnosticLspRange(document, diagnostic)
-                    ?: document.rangeOf(diagnosticSourceRange(document, diagnostic) ?: SourceRange(0, 0))
+                    ?: document.analysisRangeOf(diagnosticSourceRange(document, diagnostic) ?: SourceRange(0, 0))
             }
         }
         val definitionsById = workspace.documents
@@ -1166,7 +1192,7 @@ internal class GraphMdWorkspaceIndex(
                         this.message = message
                         source = "graphmd"
                         code = Either.forLeft(DiagnosticCategory.ReferenceError.name)
-                        range = document.rangeOf(reference.range)
+                        range = document.analysisRangeOf(reference.range)
                     }
                 }
             }
@@ -1206,8 +1232,8 @@ internal class GraphMdWorkspaceIndex(
 
     private fun yamlFrontMatterCompletions(document: IndexedDocument, position: Position): List<CompletionItem>? {
         val resolver = FrontMatterCompletionResolver(
-            text = document.text,
-            offset = document.offsetAt(position),
+            text = document.analysis.text,
+            offset = document.analysisOffsetAt(position),
             parsedDocument = document.analysis.parsed.document,
             nodeTypeIds = completionIds(ReferenceTargetKind.NodeType),
             relTypeIds = completionIds(ReferenceTargetKind.RelType),
@@ -1611,7 +1637,7 @@ internal class GraphMdWorkspaceIndex(
                         (target.field == null || ref.field == target.field)
                 }?.range
             }
-            if (sourceRange != null) return document.rangeOf(sourceRange)
+            if (sourceRange != null) return document.analysisRangeOf(sourceRange)
         }
         unknownFieldName(diagnostic.message)?.let { field -> document.yamlFieldKeyRange(field)?.let { return it } }
         Regex("""Unknown document kind: (.+)""").matchEntire(diagnostic.message)?.let {
@@ -1729,62 +1755,87 @@ internal class FrontMatterCompletionResolver(
     private val nodePropsSchema: Map<String, ResolvedPropSchema> = emptyMap(),
 ) {
     fun resolve(): List<CompletionEntry>? {
-        val lines = text.replace("\r\n", "\n").split('\n')
+        val normalizedText = text.replace("\r\n", "\n").replace('\r', '\n')
+        val normalizedOffset = text
+            .take(offset.coerceIn(0, text.length))
+            .replace("\r\n", "\n")
+            .replace('\r', '\n')
+            .length
+        val lines = normalizedText.split('\n')
         if (lines.firstOrNull() != "---") return null
         val endLine = lines.drop(1).indexOfFirst { it == "---" || it == "..." }.let { if (it >= 0) it + 1 else -1 }
         if (endLine < 0) return null
         val lineStarts = computeLineStarts(lines)
-        if (offset >= lineStarts[endLine] + lines[endLine].length) return null
-        val lineIndex = lineStarts.indexOfLast { it <= offset }.coerceAtLeast(0)
+        if (normalizedOffset >= lineStarts[endLine] + lines[endLine].length) return null
+        val lineIndex = lineStarts.indexOfLast { it <= normalizedOffset }.coerceAtLeast(0)
         if (lineIndex == 0 || lineIndex >= endLine) return null
         val line = lines[lineIndex]
         val indent = indentOf(line)
         val trimmed = line.trimStart()
-        val cursorInLine = offset - lineStarts[lineIndex]
+        val cursorInLine = normalizedOffset - lineStarts[lineIndex]
         val beforeCursor = line.take(cursorInLine.coerceIn(0, line.length))
         val currentKeyPrefix = trimmed.takeWhile { it != ':' && !it.isWhitespace() }
         val usedTopLevelKeys = siblingKeysAtIndent(lines, lineIndex, 0)
+        val documentKind = parsedDocument?.kind ?: inferredDocumentKind(lines, endLine)
 
         if (trimmed.startsWith("-")) {
-            return listValueCompletions(lines, lineIndex, beforeCursor, parsedDocument)
+            return listValueCompletions(lines, lineIndex, beforeCursor, documentKind)
         }
 
         val keyMatch = Regex("""^([A-Za-z][A-Za-z0-9_-]*)?\s*:?(.*)$""").matchEntire(trimmed) ?: return null
         val keyCandidate = keyMatch.groupValues[1]
         val hasColon = ':' in trimmed
         if (!hasColon && indent == 0) {
-            return topLevelKeyCompletions(keyCandidate, usedTopLevelKeys)
+            return topLevelKeyCompletions(keyCandidate, usedTopLevelKeys, documentKind)
         }
 
         val path = contextPath(lines, lineIndex, indent, hasColon)
-        val valuePrefix = if (hasColon) beforeCursor.substringAfter(':', "").trimStart() else ""
-        nodePropsYamlCompletions(lines, lineIndex, indent, path, hasColon, currentKeyPrefix, valuePrefix)?.let { return it }
+        val valuePrefix = if (hasColon) scalarPrefix(beforeCursor.substringAfter(':', "")) else ""
+        nodePropsYamlCompletions(
+            lines,
+            lineIndex,
+            indent,
+            path,
+            hasColon,
+            currentKeyPrefix,
+            valuePrefix,
+            documentKind,
+        )?.let { return it }
         return when {
-            indent == 0 && keyCandidate.isNotEmpty() && !hasColon -> topLevelKeyCompletions(keyCandidate, usedTopLevelKeys)
+            indent == 0 && keyCandidate.isNotEmpty() && !hasColon ->
+                topLevelKeyCompletions(keyCandidate, usedTopLevelKeys, documentKind)
             hasColon && path == listOf("kind") -> enumCompletions(valuePrefix, listOf("Node", "Media", "NodeType", "RelType", "Timeline"), "kind")
-            hasColon && path == listOf("type") && parsedDocument is NodeDocument -> idCompletions(valuePrefix, nodeTypeIds, "NodeType")
-            hasColon && path == listOf("extends") && parsedDocument is NodeTypeDocument -> idCompletions(valuePrefix, nodeTypeIds, "NodeType")
-            hasColon && path == listOf("extends") && parsedDocument is RelTypeDocument -> idCompletions(valuePrefix, relTypeIds, "RelType")
-            hasColon && path == listOf("extends") && parsedDocument is TimelineDocument -> idCompletions(valuePrefix, timelineIds, "Timeline")
-            hasColon && parsedDocument is TimelineDocument && "mappings" in path && path.lastOrNull() in setOf("from", "to") ->
+            hasColon && path == listOf("type") && documentKind in setOf(DocumentKind.Node, DocumentKind.Media) ->
+                idCompletions(valuePrefix, nodeTypeIds, "NodeType")
+            hasColon && path == listOf("extends") && documentKind == DocumentKind.NodeType ->
+                idCompletions(valuePrefix, nodeTypeIds, "NodeType")
+            hasColon && path == listOf("extends") && documentKind == DocumentKind.RelType ->
+                idCompletions(valuePrefix, relTypeIds, "RelType")
+            hasColon && path == listOf("extends") && documentKind == DocumentKind.Timeline ->
+                idCompletions(valuePrefix, timelineIds, "Timeline")
+            hasColon && documentKind == DocumentKind.Timeline && "mappings" in path && path.lastOrNull() in setOf("from", "to") ->
                 idCompletions(valuePrefix, timelineIds, "Timeline")
             hasColon && (path == listOf("from") || path == listOf("to")) -> idCompletions(valuePrefix, nodeTypeIds, "NodeType")
             hasColon && path.lastOrNull() == "required" ->
                 enumCompletions(valuePrefix, listOf("true", "false"), "boolean")
             hasColon && path == listOf("timecode", "type") ->
                 enumCompletions(valuePrefix, listOf("number"), "timecode type")
-            hasColon && path.lastOrNull() == "type" ->
+            hasColon && documentKind in setOf(DocumentKind.NodeType, DocumentKind.RelType) &&
+                isPropSchemaTypePath(path) ->
                 enumCompletions(valuePrefix, listOf("number", "string", "text", "instant", "duration", "array"), "prop type")
             hasColon && path.lastOrNull() == "timeline" ->
                 timelineSelectorCompletions(valuePrefix)
             hasColon && valuePrefix.isEmpty() -> nestedKeyCompletions(path, "", lines, lineIndex)
-            indent == 0 -> topLevelKeyCompletions(keyCandidate, usedTopLevelKeys)
+            indent == 0 -> topLevelKeyCompletions(keyCandidate, usedTopLevelKeys, documentKind)
             else -> nestedKeyCompletions(path, currentKeyPrefix, lines, lineIndex)
         }
     }
 
-    private fun topLevelKeyCompletions(prefix: String, usedKeys: Set<String>): List<CompletionEntry> {
-        val kind = parsedDocument?.kind ?: inferredDocumentKind()
+    private fun topLevelKeyCompletions(
+        prefix: String,
+        usedKeys: Set<String>,
+        kind: DocumentKind?,
+    ): List<CompletionEntry> {
         val keys = mutableListOf("id", "kind")
         when (kind) {
             DocumentKind.Node -> keys += listOf("type", "validTime", "props")
@@ -1810,8 +1861,9 @@ internal class FrontMatterCompletionResolver(
         hasColon: Boolean,
         keyPrefix: String,
         valuePrefix: String,
+        documentKind: DocumentKind?,
     ): List<CompletionEntry>? {
-        if (parsedDocument !is NodeDocument && inferredDocumentKind() !in setOf(DocumentKind.Node, DocumentKind.Media)) return null
+        if (documentKind !in setOf(DocumentKind.Node, DocumentKind.Media)) return null
         if (nodePropsSchema.isEmpty()) return null
         if (path.firstOrNull() != "props") return null
 
@@ -1952,13 +2004,12 @@ internal class FrontMatterCompletionResolver(
         lines: List<String>,
         lineIndex: Int,
         beforeCursor: String,
-        parsedDocument: GraphDocument?,
+        documentKind: DocumentKind?,
     ): List<CompletionEntry>? {
         val parentKey = enclosingListKey(lines, lineIndex) ?: return null
         val afterDash = beforeCursor.substringAfter('-', "")
         val hasSpaceAfterDash = afterDash.firstOrNull()?.isWhitespace() == true
         val prefix = afterDash.trimStart()
-        val documentKind = parsedDocument?.kind ?: inferredDocumentKind()
         return when (parentKey) {
             "extends" -> when (documentKind) {
                 DocumentKind.NodeType -> idCompletions(prefix, nodeTypeIds, "NodeType")
@@ -2109,15 +2160,53 @@ internal class FrontMatterCompletionResolver(
     private fun indentOf(line: String): Int = line.indexOfFirst { !it.isWhitespace() }.let { if (it < 0) line.length else it }
 
     private fun isInsidePropSchema(path: List<String>): Boolean {
-        if (path.isEmpty()) return false
-        val propsIndex = path.indexOf("props")
-        val propertiesIndex = path.indexOf("properties")
-        return propsIndex >= 0 || propertiesIndex >= 0
+        return path.size >= 2 && path.first() == "props"
     }
 
-    private fun inferredDocumentKind(): DocumentKind? {
-        val raw = Regex("""(?m)^kind\s*:\s*([A-Za-z]+)""").find(text)?.groupValues?.get(1)
+    private fun isPropSchemaTypePath(path: List<String>): Boolean =
+        path.size >= 3 && path.first() == "props" && path.last() == "type"
+
+    private fun inferredDocumentKind(lines: List<String>, endLine: Int): DocumentKind? {
+        val raw = lines
+            .subList(1, endLine)
+            .firstNotNullOfOrNull { line ->
+                if (indentOf(line) != 0) return@firstNotNullOfOrNull null
+                val parts = line.split(':', limit = 2)
+                if (parts.size != 2 || parts[0].trim() != "kind") return@firstNotNullOfOrNull null
+                scalarPrefix(parts[1]).takeIf { it.isNotEmpty() }
+            }
         return DocumentKind.entries.firstOrNull { it.name == raw }
+    }
+
+    private fun scalarPrefix(raw: String): String {
+        val value = raw.trimStart()
+        val quote = value.firstOrNull().takeIf { it == '"' || it == '\'' }
+        if (quote == null) {
+            val commentStart = value.indices.firstOrNull { index ->
+                value[index] == '#' && (index == 0 || value[index - 1].isWhitespace())
+            }
+            return value.substring(0, commentStart ?: value.length).trimEnd()
+        }
+
+        val content = StringBuilder()
+        var index = 1
+        while (index < value.length) {
+            val character = value[index]
+            if (quote == '"' && character == '\\' && index + 1 < value.length) {
+                content.append(value[index + 1])
+                index += 2
+                continue
+            }
+            if (quote == '\'' && character == '\'' && value.getOrNull(index + 1) == '\'') {
+                content.append('\'')
+                index += 2
+                continue
+            }
+            if (character == quote) break
+            content.append(character)
+            index++
+        }
+        return content.toString()
     }
 
     private fun nodePropsContainer(path: List<String>): NodePropsContainer? {
@@ -2703,7 +2792,21 @@ private data class IndexedDocument(
 ) {
     private val lineStarts: List<Int> = buildList {
         add(0)
-        text.forEachIndexed { index, char -> if (char == '\n') add(index + 1) }
+        var index = 0
+        while (index < text.length) {
+            when (text[index]) {
+                '\r' -> {
+                    if (text.getOrNull(index + 1) == '\n') index++
+                    add(index + 1)
+                }
+                '\n' -> add(index + 1)
+            }
+            index++
+        }
+    }
+    private val analysisLineStarts: List<Int> = buildList {
+        add(0)
+        analysis.text.forEachIndexed { index, char -> if (char == '\n') add(index + 1) }
     }
 
     fun offsetAt(position: Position): Int {
@@ -2711,8 +2814,17 @@ private data class IndexedDocument(
         return (lineStart + position.character).coerceAtMost(text.length)
     }
 
+    fun analysisOffsetAt(position: Position): Int {
+        val lineStart = analysisLineStarts.getOrElse(position.line) { analysis.text.length }
+        return (lineStart + position.character).coerceAtMost(analysis.text.length)
+    }
+
     fun rangeOf(sourceRange: SourceRange): Range {
         return Range(positionAt(sourceRange.start), positionAt(sourceRange.end))
+    }
+
+    fun analysisRangeOf(sourceRange: SourceRange): Range {
+        return Range(analysisPositionAt(sourceRange.start), analysisPositionAt(sourceRange.end))
     }
 
     fun bodyRangeOf(sourceRange: SourceRange): Range {
@@ -2977,25 +3089,27 @@ private data class IndexedDocument(
     }
 
     private fun normalizedPositionAt(offset: Int): Position {
-        val normalizedText = analysis.text
-        val safeOffset = offset.coerceIn(0, normalizedText.length)
-        var line = 0
-        var lineStart = 0
-        for (index in 0 until safeOffset) {
-            if (normalizedText[index] == '\n') {
-                line++
-                lineStart = index + 1
-            }
-        }
-        return Position(line, safeOffset - lineStart)
+        return analysisPositionAt(offset)
+    }
+
+    private fun analysisPositionAt(offset: Int): Position {
+        val safeOffset = offset.coerceIn(0, analysis.text.length)
+        val line = analysisLineStarts.indexOfLast { it <= safeOffset }.coerceAtLeast(0)
+        return Position(line, safeOffset - analysisLineStarts[line])
     }
 
     private fun sourceLines(): List<SourceLine> = buildList {
         var start = 0
-        text.split('\n').forEach { line ->
-            add(SourceLine(start, line))
-            start += line.length + 1
+        var index = 0
+        while (index < text.length) {
+            if (text[index] == '\r' || text[index] == '\n') {
+                add(SourceLine(start, text.substring(start, index)))
+                if (text[index] == '\r' && text.getOrNull(index + 1) == '\n') index++
+                start = index + 1
+            }
+            index++
         }
+        add(SourceLine(start, text.substring(start)))
     }
 
     private fun blockEndOffset(lines: List<SourceLine>, startIndex: Int, indent: Int): Int {
@@ -3068,7 +3182,7 @@ private data class IndexedDefinition(
     val sourceRange: SourceRange,
     val document: IndexedDocument,
 ) {
-    fun range(): Range = document.rangeOf(sourceRange)
+    fun range(): Range = document.analysisRangeOf(sourceRange)
 }
 
 private data class DiagnosticReferenceTarget(
