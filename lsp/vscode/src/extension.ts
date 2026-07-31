@@ -252,7 +252,7 @@ function updatePreviewTargets(changed: boolean): void {
   }
 }
 
-function resolveDocumentHref(target: string, env?: unknown): string {
+function resolveDocumentHref(target: string, env?: unknown): string | null {
   const mediaTarget = previewTargets.snapshot.media.get(target);
   if (mediaTarget) return mediaTarget;
 
@@ -265,10 +265,10 @@ function resolveDocumentHref(target: string, env?: unknown): string {
     targetUri.scheme !== currentDocument.scheme ||
     targetUri.authority !== currentDocument.authority
   ) {
-    return target;
+    return null;
   }
 
-  return relativeMarkdownHref(currentDocument.fsPath, targetUri.fsPath) ?? target;
+  return relativeMarkdownHref(currentDocument.fsPath, targetUri.fsPath);
 }
 
 function resolveMediaHref(href: string): string | null {

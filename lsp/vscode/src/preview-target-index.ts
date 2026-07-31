@@ -15,6 +15,11 @@ interface IndexedContent {
   text: string;
 }
 
+interface PreviewTargetCandidate {
+  source: PreviewIndexSource;
+  mediaUrl: string | null;
+}
+
 export interface PreviewTargetSnapshot {
   readonly documents: ReadonlyMap<string, PreviewIndexSource>;
   readonly media: ReadonlyMap<string, string>;
@@ -156,25 +161,39 @@ export class PreviewTargetIndex {
     const effective = new Map(this.disk);
     this.overlays.forEach((content, uri) => effective.set(uri, content));
 
-    // A preview can only link to one document. Sorting makes duplicate-ID
-    // resolution stable regardless of filesystem scan/read completion order.
+    // A preview can only link to one document. Sorting makes candidate
+    // collection deterministic, while ambiguous IDs and aliases are omitted
+    // below instead of resolving to an arbitrary candidate.
     const contents = [...effective.values()].sort((left, right) =>
       left.source.uri < right.source.uri ? -1 : left.source.uri > right.source.uri ? 1 : 0);
-    const documents = new Map<string, PreviewIndexSource>();
-    const media = new Map<string, string>();
+    const documentCandidates = new Map<string, Map<string, PreviewTargetCandidate>>();
+    const mediaCandidates = new Map<string, Map<string, PreviewTargetCandidate>>();
 
     for (const content of contents) {
+      const kind = parseFrontMatterScalar(content.text, "kind");
+      if (kind !== "Node" && kind !== "Media") continue;
       const documentId = parseFrontMatterScalar(content.text, "id");
-      if (documentId && !documents.has(documentId)) {
-        documents.set(documentId, content.source);
-      }
+      if (!documentId) continue;
+      const metadata = kind === "Media" ? parseMediaFrontMatter(content.text) : null;
+      const candidate = { source: content.source, mediaUrl: metadata?.url ?? null };
+      addCandidate(documentCandidates, documentId, candidate);
 
-      const metadata = parseMediaFrontMatter(content.text);
-      if (!metadata) continue;
-      const keys = [metadata.id, content.source.uri, content.source.fsPath, ...content.source.aliases];
-      for (const key of keys) {
-        if (!media.has(key)) media.set(key, metadata.url);
+      const aliases = new Set([documentId]);
+      if (metadata) {
+        [content.source.uri, content.source.fsPath, ...content.source.aliases]
+          .forEach((alias) => aliases.add(alias));
       }
+      for (const alias of aliases) {
+        addCandidate(mediaCandidates, alias, candidate);
+      }
+    }
+
+    const documents = uniqueSources(documentCandidates);
+    const media = new Map<string, string>();
+    for (const [alias, candidates] of mediaCandidates) {
+      if (candidates.size !== 1) continue;
+      const candidate = [...candidates.values()][0];
+      if (candidate.mediaUrl !== null) media.set(alias, candidate.mediaUrl);
     }
 
     if (mapsEqual(this.current.documents, documents, sourceEqual) &&
@@ -236,6 +255,28 @@ export function parseFrontMatterScalar(text: string, name: string): string | nul
   if (!match) return null;
   return match[1].replace(/^(?:"(.*)"|'(.*)')$/, (_all, doubleQuoted, singleQuoted) =>
     doubleQuoted ?? singleQuoted);
+}
+
+function addCandidate(
+  groups: Map<string, Map<string, PreviewTargetCandidate>>,
+  key: string,
+  candidate: PreviewTargetCandidate,
+): void {
+  const candidates = groups.get(key) ?? new Map<string, PreviewTargetCandidate>();
+  candidates.set(candidate.source.uri, candidate);
+  groups.set(key, candidates);
+}
+
+function uniqueSources(
+  groups: Map<string, Map<string, PreviewTargetCandidate>>,
+): Map<string, PreviewIndexSource> {
+  const unique = new Map<string, PreviewIndexSource>();
+  for (const [key, candidates] of groups) {
+    if (candidates.size === 1) {
+      unique.set(key, [...candidates.values()][0].source);
+    }
+  }
+  return unique;
 }
 
 function sourceEqual(left: PreviewIndexSource, right: PreviewIndexSource): boolean {

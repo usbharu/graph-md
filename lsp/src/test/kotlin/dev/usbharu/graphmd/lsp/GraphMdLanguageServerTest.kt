@@ -546,6 +546,43 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `duplicate id diagnostics are stable exact and clear when the id becomes unique`() {
+        val firstUri = "file:///workspace/alice.md"
+        val secondUri = "file:///workspace/bob.md"
+        val duplicateText = "---\nid: duplicate\nkind: Node\ntype: Person\n---"
+        val fixture = serverFixture(
+            mapOf(
+                firstUri to duplicateText,
+                secondUri to duplicateText,
+            ),
+        )
+
+        for (uri in listOf(firstUri, secondUri)) {
+            val diagnostic = fixture.diagnostics.getValue(uri).single {
+                it.message == "Node id must be unique: duplicate"
+            }
+            assertEquals(Range(Position(1, 4), Position(1, 13)), diagnostic.range)
+            assertEquals(DiagnosticSeverity.Error, diagnostic.severity)
+            assertEquals("graphmd", diagnostic.source)
+            assertEquals("SchemaError", diagnostic.code.left)
+        }
+
+        fixture.server.textDocumentService.didChange(
+            DidChangeTextDocumentParams(
+                VersionedTextDocumentIdentifier(secondUri, 2),
+                listOf(TextDocumentContentChangeEvent("---\nid: unique\nkind: Node\ntype: Person\n---")),
+            ),
+        )
+
+        assertTrue(fixture.diagnostics.getValue(firstUri).none {
+            it.message == "Node id must be unique: duplicate"
+        })
+        assertTrue(fixture.diagnostics.getValue(secondUri).none {
+            it.message == "Node id must be unique: duplicate"
+        })
+    }
+
+    @Test
     fun `quick fixes repair temporal bounds and relation constraints`() {
         val nodeUri = "file:///workspace/alice.md"
         val fixture = serverFixture(

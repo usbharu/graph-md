@@ -114,14 +114,14 @@ test("deleting an open file preserves its overlay until the editor closes", () =
   assert.equal(index.snapshot.documents.size, 0);
 });
 
-test("duplicate IDs resolve deterministically and react to multiple overlays", () => {
+test("duplicate IDs stay unresolved and react to multiple overlays", () => {
   const index = new PreviewTargetIndex();
   const zeta = source("zeta");
   const alpha = source("alpha");
   index.setDisk(zeta, node("Duplicate"));
   index.setDisk(alpha, node("Duplicate"));
 
-  assert.equal(index.snapshot.documents.get("Duplicate").uri, alpha.uri);
+  assert.equal(index.snapshot.documents.has("Duplicate"), false);
 
   index.setOverlay(alpha, node("Renamed"));
   assert.equal(index.snapshot.documents.get("Duplicate").uri, zeta.uri);
@@ -129,6 +129,38 @@ test("duplicate IDs resolve deterministically and react to multiple overlays", (
   assert.equal(index.snapshot.documents.has("Duplicate"), false);
   assert.equal(index.snapshot.documents.get("Renamed").uri, alpha.uri);
   assert.equal(index.snapshot.documents.get("AlsoRenamed").uri, zeta.uri);
+});
+
+test("Node and Media IDs share an ambiguous namespace", () => {
+  const index = new PreviewTargetIndex();
+  const nodeSource = source("node");
+  const mediaSource = source("shared");
+  index.setDisk(nodeSource, node("Shared"));
+  index.setDisk(mediaSource, media("Shared", "https://example.test/shared.png"));
+
+  assert.equal(index.snapshot.documents.has("Shared"), false);
+  assert.equal(index.snapshot.media.has("Shared"), false);
+  assert.equal(index.snapshot.media.get("shared.md"), "https://example.test/shared.png");
+});
+
+test("non-Node documents do not become preview targets", () => {
+  const index = new PreviewTargetIndex();
+  index.setDisk(source("type"), "---\nid: Person\nkind: NodeType\n---\n");
+
+  assert.equal(index.snapshot.documents.has("Person"), false);
+  assert.equal(index.snapshot.media.has("Person"), false);
+});
+
+test("duplicate Media aliases stay unresolved while unique aliases resolve", () => {
+  const index = new PreviewTargetIndex();
+  const mediaA = source("a/photo", ["a/photo.md"]);
+  const mediaB = source("b/photo", ["b/photo.md"]);
+  index.setDisk(mediaA, media("photo-a", "https://example.test/a.png"));
+  index.setDisk(mediaB, media("photo-b", "https://example.test/b.png"));
+
+  assert.equal(index.snapshot.media.has("photo.md"), false);
+  assert.equal(index.snapshot.media.get("a/photo.md"), "https://example.test/a.png");
+  assert.equal(index.snapshot.media.get("b/photo.md"), "https://example.test/b.png");
 });
 
 test("body-only edits do not request an unnecessary target refresh", () => {
