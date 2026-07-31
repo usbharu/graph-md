@@ -461,7 +461,21 @@ class GraphMdLanguageServerTest {
         val nodeUri = "file:///workspace/alice.md"
         val fixture = serverFixture(
             mapOf(
-                "file:///workspace/types/Person.md" to "---\nid: Person\nkind: NodeType\n---",
+                "file:///workspace/types/Person.md" to """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    props:
+                      name:
+                        type: string
+                        required: true
+                      age:
+                        type: number
+                        required: true
+                      nickname:
+                        type: string
+                    ---
+                """.trimIndent(),
                 "file:///workspace/types/Company.md" to "---\nid: Company\nkind: NodeType\n---",
                 nodeUri to "---\nid: alice\nkind: Node\ntype: Person\n---\n@link[Bob](missing knows)",
             ),
@@ -481,7 +495,20 @@ class GraphMdLanguageServerTest {
         val choices = payload["choices"] as List<*>
         assertEquals(listOf("Company", "Person"), choices.map { (it as Map<*, *>)["label"] })
         assertTrue(choices.all { (it as Map<*, *>)["content"].toString().contains("kind: Node") })
-        assertTrue(choices.any { (it as Map<*, *>)["content"] == "---\nid: missing\nkind: Node\ntype: Person\n---\n" })
+        assertTrue(
+            choices.any {
+                (it as Map<*, *>)["content"] == """
+                    ---
+                    id: missing
+                    kind: Node
+                    type: Person
+                    props:
+                      name: ""
+                      age: 0
+                    ---
+                """.trimIndent() + "\n"
+            },
+        )
     }
 
     @Test

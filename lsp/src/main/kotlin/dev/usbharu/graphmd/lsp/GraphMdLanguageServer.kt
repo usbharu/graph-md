@@ -1182,8 +1182,39 @@ internal class GraphMdWorkspaceIndex(
         ReferenceTargetKind.NodeType -> "---\nid: ${target.id}\nkind: NodeType\nprops:\n---\n"
         ReferenceTargetKind.RelType -> "---\nid: ${target.id}\nkind: RelType\n---\n"
         ReferenceTargetKind.Timeline -> "---\nid: ${target.id}\nkind: Timeline\ntimecode:\n  type: number\n---\n"
-        ReferenceTargetKind.Node -> "---\nid: ${target.id}\nkind: Node\ntype: ${requireNotNull(nodeTypeId)}\n---\n"
-        ReferenceTargetKind.Media -> "---\nid: ${target.id}\nkind: Media\ntype: ${requireNotNull(nodeTypeId)}\nurl: \"\"\n---\n"
+        ReferenceTargetKind.Node -> nodeDefinitionContent(target, "Node", nodeTypeId)
+        ReferenceTargetKind.Media -> nodeDefinitionContent(target, "Media", nodeTypeId, includeUrl = true)
+    }
+
+    private fun nodeDefinitionContent(
+        target: DiagnosticReferenceTarget,
+        kind: String,
+        nodeTypeId: String?,
+        includeUrl: Boolean = false,
+    ): String {
+        val type = requireNotNull(nodeTypeId)
+        return buildString {
+            append("---\n")
+            append("id: ${target.id}\n")
+            append("kind: $kind\n")
+            append("type: $type\n")
+            if (includeUrl) append("url: \"\"\n")
+            append(requiredPropsContent(type))
+            append("---\n")
+        }
+    }
+
+    private fun requiredPropsContent(nodeTypeId: String): String {
+        val requiredProps = nodeTypeSchema(nodeTypeId)?.props
+            ?.filterValues { it.required }
+            .orEmpty()
+        if (requiredProps.isEmpty()) return ""
+        return buildString {
+            append("props:\n")
+            requiredProps.forEach { (key, schema) ->
+                append("  $key: ${defaultValue(schema)}\n")
+            }
+        }
     }
 
     private fun declarationActionForUnknownProperty(
