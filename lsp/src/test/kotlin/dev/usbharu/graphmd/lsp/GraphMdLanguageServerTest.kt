@@ -654,6 +654,164 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `definition resolves each document kind from its own id`() {
+        val documents = linkedMapOf(
+            "file:///workspace/node.md" to "---\nid: node\nkind: Node\ntype: Person\n---",
+            "file:///workspace/media.md" to "---\nid: \"media\"\nkind: Media\ntype: Person\nurl: https://example.com/image.png\n---",
+            "file:///workspace/Person.md" to "---\nid: Person\nkind: NodeType\n---",
+            "file:///workspace/friendOf.md" to "---\nid: friendOf\nkind: RelType\n---",
+            "file:///workspace/CommonEra.md" to "---\nid: CommonEra\nkind: Timeline\ntimecode:\n  type: number\n---",
+        )
+        val fixture = serverFixture(documents)
+
+        documents.forEach { (uri, text) ->
+            val idLineStart = text.indexOf("id:")
+            val colon = text.indexOf(':', idLineStart)
+            val valueStart = (colon + 1 until text.length).first { !text[it].isWhitespace() }
+            val valueEnd = text.indexOf('\n', valueStart)
+            val definitions = fixture.definitions(uri, valueStart)
+            assertEquals(1, definitions.size, uri)
+            val definition = definitions.single()
+
+            assertEquals(uri, definition.uri)
+            assertEquals(Position(1, valueStart - idLineStart), definition.range.start)
+            assertEquals(Position(1, valueEnd - idLineStart), definition.range.end)
+            assertEquals(definition, fixture.definitions(uri, valueEnd).single())
+        }
+
+        val nodeText = documents.getValue("file:///workspace/node.md")
+        assertEquals(
+            "file:///workspace/Person.md",
+            fixture.definitions("file:///workspace/node.md", nodeText.lastIndexOf("Person")).single().uri,
+        )
+    }
+
+    @Test
+    fun `definition id range follows existing scalar boundary semantics`() {
+        val uri = "file:///workspace/quoted.md"
+        val text = "---\nid: \"quoted\"\nkind: NodeType\n---"
+        val fixture = serverFixture(mapOf(uri to text))
+        val quoteStart = text.indexOf('"')
+        val afterClosingQuote = text.indexOf('"', quoteStart + 1) + 1
+
+        assertTrue(fixture.definitions(uri, text.indexOf("id")).isEmpty())
+        assertTrue(fixture.definitions(uri, text.indexOf(':') + 1).isEmpty())
+        assertEquals(uri, fixture.definitions(uri, quoteStart).single().uri)
+        assertEquals(uri, fixture.definitions(uri, afterClosingQuote - 1).single().uri)
+        assertEquals(uri, fixture.definitions(uri, afterClosingQuote).single().uri)
+        assertTrue(fixture.definitions(uri, text.indexOf("kind")).isEmpty())
+    }
+
+    @Test
+    fun `definition from duplicate id returns every candidate including current document`() {
+        val currentUri = "file:///workspace/z-current.md"
+        val firstUri = "file:///workspace/a-first.md"
+        val secondUri = "file:///workspace/b-second.md"
+        val text = "---\nid: duplicate\nkind: NodeType\n---"
+        val fixture = serverFixture(
+            linkedMapOf(
+                secondUri to text,
+                currentUri to text,
+                firstUri to text,
+            ),
+        )
+
+        assertEquals(
+            listOf(currentUri, firstUri, secondUri),
+            fixture.definitions(currentUri, text.indexOf("duplicate")).map { it.uri },
+        )
+        val locations = fixture.definitions(currentUri, text.indexOf("duplicate"))
+        assertEquals(locations.distinct(), locations)
+    }
+
+    @Test
+    fun `definition uses unsaved content and normalizes request uri`() {
+        val canonicalUri = "file:///workspace/current.md"
+        val requestUri = "file:///workspace/folder/../current.md"
+        val index = GraphMdWorkspaceIndex()
+        val original = "---\nid: original\nkind: NodeType\n---"
+        val unsaved = "---\nid: unsaved\nkind: NodeType\n---"
+        index.open(canonicalUri, original)
+        index.upsert(canonicalUri, unsaved)
+
+        val locations = index.definitions(requestUri, Position(1, 5))
+
+        assertEquals(canonicalUri, locations.single().uri)
+        assertEquals(Range(Position(1, 4), Position(1, 11)), locations.single().range)
+    }
+
+    @Test
+    fun `definitions properties and diagnostics use LSP positions in mixed CRLF documents`() {
+        val typeUri = "file:///workspace/Person.md"
+        val nodeUri = "file:///workspace/alice.md"
+        val typeText = "---\r\nkind: NodeType\nprops:\r  名前:\r\n    type: string\nid: Person\r---"
+        val nodeText =
+            "---\r\nkind: Node\rid: alice\ntype: Person\r\nprops:\r  名前: Alice\r\n---\n" +
+                "@link{}[😀](missing friendOf)"
+        val fixture = serverFixture(linkedMapOf(typeUri to typeText, nodeUri to nodeText))
+
+        val selfDefinition = fixture.definitions(typeUri, typeText.indexOf("Person")).single()
+        assertEquals(typeUri, selfDefinition.uri)
+        assertEquals(Range(Position(5, 4), Position(5, 10)), selfDefinition.range)
+
+        val referenceDefinition = fixture.definitions(nodeUri, nodeText.indexOf("Person")).single()
+        assertEquals(selfDefinition, referenceDefinition)
+
+        val propertyDefinition = fixture.definitions(nodeUri, nodeText.indexOf("名前") + 1).single()
+        assertEquals(typeUri, propertyDefinition.uri)
+        assertEquals(Range(Position(3, 2), Position(3, 4)), propertyDefinition.range)
+
+        val unresolved = fixture.diagnostics.getValue(nodeUri).first { it.message == "Unknown Node target: missing" }
+        val missingCharacter = nodeText.substringAfterLast('\n').indexOf("missing")
+        assertEquals(
+            Range(Position(7, missingCharacter), Position(7, missingCharacter + "missing".length)),
+            unresolved.range,
+        )
+    }
+
+    @Test
+    fun `definition handles lone CR empty lines and closing marker at EOF`() {
+        val uri = "file:///workspace/person.md"
+        val text = "---\rkind: NodeType\r\rid: person\r---"
+        val fixture = serverFixture(mapOf(uri to text))
+
+        val definition = fixture.definitions(uri, text.indexOf("person")).single()
+
+        assertEquals(uri, definition.uri)
+        assertEquals(Range(Position(3, 4), Position(3, 10)), definition.range)
+    }
+
+    @Test
+    fun `relation constraint quick fix maps analyzer range in CR document`() {
+        val nodeUri = "file:///workspace/alice.md"
+        val nodeText = "---\rkind: Node\rid: alice\rtype: Person\r---\r@link[😀](acme knows)"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/Person.md" to "---\nid: Person\nkind: NodeType\n---",
+                "file:///workspace/Company.md" to "---\nid: Company\nkind: NodeType\n---",
+                "file:///workspace/knows.md" to "---\nid: knows\nkind: RelType\nfrom: [Person]\nto: [Person]\n---",
+                "file:///workspace/worksAt.md" to "---\nid: worksAt\nkind: RelType\nfrom: [Person]\nto: [Company]\n---",
+                "file:///workspace/acme.md" to "---\nid: acme\nkind: Node\ntype: Company\n---",
+                nodeUri to nodeText,
+            ),
+        )
+
+        val edit = fixture.actions(nodeUri, "Relation target type Company is not allowed for knows")
+            .first { it.title == "Change relation type to 'worksAt'" }
+            .edit.changes.getValue(nodeUri).single()
+        val relationLine = nodeText.substringAfterLast('\r')
+        val start = relationLine.indexOf("knows")
+
+        assertEquals(Range(Position(5, start), Position(5, start + "knows".length)), edit.range)
+        assertEquals("worksAt", edit.newText)
+
+        val completions = fixture.server.textDocumentService.completion(
+            CompletionParams(TextDocumentIdentifier(nodeUri), Position(5, start + 2)),
+        ).get().left.orEmpty()
+        assertTrue(completions.any { it.label == "worksAt" })
+    }
+
+    @Test
     fun `property-less relation and timeline ids are discovered`() {
         val analysis = analyzer.analyze(
             """
@@ -1927,8 +2085,23 @@ class GraphMdLanguageServerTest {
     ) {
         fun definitions(uri: String, offset: Int): List<org.eclipse.lsp4j.Location> {
             val text = documents.getValue(uri)
-            val line = text.substring(0, offset).count { it == '\n' }
-            val lineStart = text.lastIndexOf('\n', offset - 1).let { if (it < 0) 0 else it + 1 }
+            var line = 0
+            var lineStart = 0
+            var index = 0
+            while (index < offset) {
+                when (text[index]) {
+                    '\r' -> {
+                        if (text.getOrNull(index + 1) == '\n' && index + 1 < offset) index++
+                        line++
+                        lineStart = index + 1
+                    }
+                    '\n' -> {
+                        line++
+                        lineStart = index + 1
+                    }
+                }
+                index++
+            }
             return server.textDocumentService.definition(
                 DefinitionParams(TextDocumentIdentifier(uri), Position(line, offset - lineStart)),
             ).get().left.orEmpty()

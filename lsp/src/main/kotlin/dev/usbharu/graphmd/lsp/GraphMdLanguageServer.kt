@@ -316,7 +316,10 @@ internal class GraphMdWorkspaceIndex(
         yamlFrontMatterCompletions(document, position)?.let { return it }
         exactPropsCompletions(document, position)?.let { return it }
         exactRelationPropsCompletions(document, position)?.let { return it }
-        val referenceKind = analyzer.inferCompletionKind(document.analysis, document.offsetAt(position)) ?: return emptyList()
+        val referenceKind = analyzer.inferCompletionKind(
+            document.analysis,
+            document.analysisOffsetAt(position),
+        ) ?: return emptyList()
         return contextualReferenceIds(document, position, referenceKind).map { id ->
             CompletionItem(id).apply {
                 this.kind = when (referenceKind) {
@@ -331,12 +334,29 @@ internal class GraphMdWorkspaceIndex(
     fun definitions(uri: String, position: Position): List<Location> {
         val documents = documentsSnapshot()
         val document = documents.firstOrNull { it.uri == normalizeUri(uri) } ?: return emptyList()
-        val offset = document.offsetAt(position)
+        val offset = document.analysisOffsetAt(position)
         val reference = analyzer.findReferenceAt(document.analysis, offset)
         if (reference != null) {
             return resolve(reference.kind, reference.targetId, documents).map { resolved ->
                 Location(resolved.uri, resolved.range())
             }
+        }
+        val definition = analyzer.findDefinitionAt(document.analysis, offset)
+        if (definition != null) {
+            val self = Location(document.uri, document.analysisRangeOf(definition.range))
+            val candidates = resolve(definition.kind, definition.id, documents)
+                .map { resolved -> Location(resolved.uri, resolved.range()) }
+                .distinct()
+                .sortedWith(
+                    compareBy<Location>(
+                        { it.uri },
+                        { it.range.start.line },
+                        { it.range.start.character },
+                        { it.range.end.line },
+                        { it.range.end.character },
+                    ),
+                )
+            return listOf(self) + candidates.filterNot { it == self }
         }
         val propertyReference = analyzer.findPropertyReferenceAt(document.analysis, offset)
             ?: analyzer.findPropertyDefinitionAt(document.analysis, offset)?.let {
@@ -344,14 +364,14 @@ internal class GraphMdWorkspaceIndex(
             }
             ?: return emptyList()
         return resolveProperty(propertyReference, documents).map { resolved ->
-            Location(resolved.document.uri, resolved.document.rangeOf(resolved.definition.range))
+            Location(resolved.document.uri, resolved.document.analysisRangeOf(resolved.definition.range))
         }
     }
 
     fun references(uri: String, position: Position): List<Location> {
         val documents = documentsSnapshot()
         val document = documents.firstOrNull { it.uri == normalizeUri(uri) } ?: return emptyList()
-        val offset = document.offsetAt(position)
+        val offset = document.analysisOffsetAt(position)
         val reference = analyzer.findReferenceAt(document.analysis, offset)?.let { it.kind to it.targetId }
             ?: analyzer.findDefinitionAt(document.analysis, offset)?.let { it.kind to it.id }
             ?: return emptyList()
@@ -360,10 +380,10 @@ internal class GraphMdWorkspaceIndex(
         documents.forEach { indexed ->
             indexed.analysis.definitions
                 .filter { it.kind == reference.first && it.id == reference.second }
-                .forEach { locations += Location(indexed.uri, indexed.rangeOf(it.range)) }
+                .forEach { locations += Location(indexed.uri, indexed.analysisRangeOf(it.range)) }
             indexed.analysis.references
                 .filter { it.kind == reference.first && it.targetId == reference.second }
-                .forEach { locations += Location(indexed.uri, indexed.rangeOf(it.range)) }
+                .forEach { locations += Location(indexed.uri, indexed.analysisRangeOf(it.range)) }
         }
         return locations
     }
@@ -371,7 +391,7 @@ internal class GraphMdWorkspaceIndex(
     fun hover(uri: String, position: Position): Hover? {
         val documents = documentsSnapshot()
         val document = documents.firstOrNull { it.uri == normalizeUri(uri) } ?: return null
-        val offset = document.offsetAt(position)
+        val offset = document.analysisOffsetAt(position)
         val symbol = analyzer.findReferenceAt(document.analysis, offset)?.let { it.kind to it.targetId }
             ?: analyzer.findDefinitionAt(document.analysis, offset)?.let { it.kind to it.id }
             ?: return null
@@ -405,7 +425,7 @@ internal class GraphMdWorkspaceIndex(
         if (newName.isBlank() || newName.any { it.isWhitespace() }) return null
         val documents = documentsSnapshot()
         val document = documents.firstOrNull { it.uri == normalizeUri(uri) } ?: return null
-        val offset = document.offsetAt(position)
+        val offset = document.analysisOffsetAt(position)
         val symbol = analyzer.findReferenceAt(document.analysis, offset)?.let { it.kind to it.targetId }
             ?: analyzer.findDefinitionAt(document.analysis, offset)?.let { it.kind to it.id }
             ?: return null
@@ -413,10 +433,16 @@ internal class GraphMdWorkspaceIndex(
         documents.forEach { indexed ->
             indexed.analysis.definitions
                 .filter { it.kind == symbol.first && it.id == symbol.second }
-                .forEach { changes.getOrPut(indexed.uri) { mutableListOf() } += TextEdit(indexed.rangeOf(it.range), newName) }
+                .forEach {
+                    changes.getOrPut(indexed.uri) { mutableListOf() } +=
+                        TextEdit(indexed.analysisRangeOf(it.range), newName)
+                }
             indexed.analysis.references
                 .filter { it.kind == symbol.first && it.targetId == symbol.second }
-                .forEach { changes.getOrPut(indexed.uri) { mutableListOf() } += TextEdit(indexed.rangeOf(it.range), newName) }
+                .forEach {
+                    changes.getOrPut(indexed.uri) { mutableListOf() } +=
+                        TextEdit(indexed.analysisRangeOf(it.range), newName)
+                }
         }
         return WorkspaceEdit(changes)
     }
@@ -893,7 +919,7 @@ internal class GraphMdWorkspaceIndex(
                                 document,
                                 diagnostic,
                                 "Change relation type to '${rel.id}'",
-                                document.rangeOf(relReference.range),
+                                document.analysisRangeOf(relReference.range),
                                 rel.id,
                                 preferred = index == 0,
                             ),
@@ -1127,7 +1153,7 @@ internal class GraphMdWorkspaceIndex(
                 source = "graphmd"
                 code = Either.forLeft(diagnostic.category.name)
                 range = inferredDiagnosticLspRange(document, diagnostic)
-                    ?: document.rangeOf(diagnosticSourceRange(document, diagnostic) ?: SourceRange(0, 0))
+                    ?: document.analysisRangeOf(diagnosticSourceRange(document, diagnostic) ?: SourceRange(0, 0))
             }
         }
         documents.keys.forEach { uri -> diagnostics.putIfAbsent(uri, mutableListOf()) }
@@ -1148,8 +1174,8 @@ internal class GraphMdWorkspaceIndex(
 
     private fun yamlFrontMatterCompletions(document: IndexedDocument, position: Position): List<CompletionItem>? {
         val resolver = FrontMatterCompletionResolver(
-            text = document.text,
-            offset = document.offsetAt(position),
+            text = document.analysis.text,
+            offset = document.analysisOffsetAt(position),
             parsedDocument = document.analysis.parsed.document,
             nodeTypeIds = completionIds(ReferenceTargetKind.NodeType),
             relTypeIds = completionIds(ReferenceTargetKind.RelType),
@@ -1553,7 +1579,7 @@ internal class GraphMdWorkspaceIndex(
                         (target.field == null || ref.field == target.field)
                 }?.range
             }
-            if (sourceRange != null) return document.rangeOf(sourceRange)
+            if (sourceRange != null) return document.analysisRangeOf(sourceRange)
         }
         unknownFieldName(diagnostic.message)?.let { field -> document.yamlFieldKeyRange(field)?.let { return it } }
         Regex("""Unknown document kind: (.+)""").matchEntire(diagnostic.message)?.let {
@@ -1657,7 +1683,7 @@ internal class FrontMatterCompletionResolver(
     private val nodePropsSchema: Map<String, ResolvedPropSchema> = emptyMap(),
 ) {
     fun resolve(): List<CompletionEntry>? {
-        val lines = text.replace("\r\n", "\n").split('\n')
+        val lines = text.replace("\r\n", "\n").replace('\r', '\n').split('\n')
         if (lines.firstOrNull() != "---") return null
         val endLine = lines.drop(1).indexOfFirst { it == "---" || it == "..." }.let { if (it >= 0) it + 1 else -1 }
         if (endLine < 0) return null
@@ -2631,7 +2657,21 @@ private data class IndexedDocument(
 ) {
     private val lineStarts: List<Int> = buildList {
         add(0)
-        text.forEachIndexed { index, char -> if (char == '\n') add(index + 1) }
+        var index = 0
+        while (index < text.length) {
+            when (text[index]) {
+                '\r' -> {
+                    if (text.getOrNull(index + 1) == '\n') index++
+                    add(index + 1)
+                }
+                '\n' -> add(index + 1)
+            }
+            index++
+        }
+    }
+    private val analysisLineStarts: List<Int> = buildList {
+        add(0)
+        analysis.text.forEachIndexed { index, char -> if (char == '\n') add(index + 1) }
     }
 
     fun offsetAt(position: Position): Int {
@@ -2639,8 +2679,17 @@ private data class IndexedDocument(
         return (lineStart + position.character).coerceAtMost(text.length)
     }
 
+    fun analysisOffsetAt(position: Position): Int {
+        val lineStart = analysisLineStarts.getOrElse(position.line) { analysis.text.length }
+        return (lineStart + position.character).coerceAtMost(analysis.text.length)
+    }
+
     fun rangeOf(sourceRange: SourceRange): Range {
         return Range(positionAt(sourceRange.start), positionAt(sourceRange.end))
+    }
+
+    fun analysisRangeOf(sourceRange: SourceRange): Range {
+        return Range(analysisPositionAt(sourceRange.start), analysisPositionAt(sourceRange.end))
     }
 
     fun bodyRangeOf(sourceRange: SourceRange): Range {
@@ -2905,25 +2954,27 @@ private data class IndexedDocument(
     }
 
     private fun normalizedPositionAt(offset: Int): Position {
-        val normalizedText = analysis.text
-        val safeOffset = offset.coerceIn(0, normalizedText.length)
-        var line = 0
-        var lineStart = 0
-        for (index in 0 until safeOffset) {
-            if (normalizedText[index] == '\n') {
-                line++
-                lineStart = index + 1
-            }
-        }
-        return Position(line, safeOffset - lineStart)
+        return analysisPositionAt(offset)
+    }
+
+    private fun analysisPositionAt(offset: Int): Position {
+        val safeOffset = offset.coerceIn(0, analysis.text.length)
+        val line = analysisLineStarts.indexOfLast { it <= safeOffset }.coerceAtLeast(0)
+        return Position(line, safeOffset - analysisLineStarts[line])
     }
 
     private fun sourceLines(): List<SourceLine> = buildList {
         var start = 0
-        text.split('\n').forEach { line ->
-            add(SourceLine(start, line))
-            start += line.length + 1
+        var index = 0
+        while (index < text.length) {
+            if (text[index] == '\r' || text[index] == '\n') {
+                add(SourceLine(start, text.substring(start, index)))
+                if (text[index] == '\r' && text.getOrNull(index + 1) == '\n') index++
+                start = index + 1
+            }
+            index++
         }
+        add(SourceLine(start, text.substring(start)))
     }
 
     private fun blockEndOffset(lines: List<SourceLine>, startIndex: Int, indent: Int): Int {
@@ -2996,7 +3047,7 @@ private data class IndexedDefinition(
     val sourceRange: SourceRange,
     val document: IndexedDocument,
 ) {
-    fun range(): Range = document.rangeOf(sourceRange)
+    fun range(): Range = document.analysisRangeOf(sourceRange)
 }
 
 private data class DiagnosticReferenceTarget(
