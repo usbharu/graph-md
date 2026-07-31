@@ -15,12 +15,12 @@ class BodySyntaxExtractor {
         val propsBlocks = mutableListOf<ExtractedPropsBlock>()
         val relations = mutableListOf<ExtractedRelation>()
         var propsSyntaxValid = true
-        val masked = maskCodeRegions(body)
+        val masked = CommonMarkCodeMasker.mask(body)
         var index = 0
         while (index < masked.length) {
             if (masked[index] == '@' && !isEscaped(masked, index)) {
                 when {
-                    masked.startsWith("@props", index) -> {
+                    isDirectiveKeywordAt(masked, index, "@props") -> {
                         var objectStart = index + "@props".length
                         var defaultValidTime: RawArray? = null
                         if (masked.getOrNull(objectStart) == '(') {
@@ -79,7 +79,7 @@ class BodySyntaxExtractor {
                             diagnostics += syntaxDiagnostic("Unclosed @props block", sourcePath, documentId, index, body.length)
                         }
                     }
-                    masked.startsWith("@link", index) -> {
+                    isDirectiveKeywordAt(masked, index, "@link") -> {
                         val relation = parseCanonicalRelation(masked, body, index, sourcePath, documentId, diagnostics)
                         if (relation != null) {
                             relations += relation.first
@@ -148,7 +148,7 @@ class BodySyntaxExtractor {
             diagnostics += syntaxDiagnostic("@link must be followed immediately by a link", sourcePath, documentId, start, cursor)
             return null
         }
-        val parsed = parseRelation(masked, original, cursor - 1, sourcePath, documentId, diagnostics) ?: return null
+        val parsed = parseRelation(masked, original, cursor - 1, start, sourcePath, documentId, diagnostics) ?: return null
         val relation = parsed.first.copy(props = props, range = SourceRange(start, parsed.second), validTime = validTime)
         return relation to parsed.second
     }
@@ -217,83 +217,60 @@ class BodySyntaxExtractor {
         masked: String,
         original: String,
         start: Int,
+        diagnosticStart: Int,
         sourcePath: String,
         documentId: String,
         diagnostics: MutableList<Diagnostic>,
     ): Pair<ExtractedRelation, Int>? {
         val closeLabel = findUnescaped(masked, ']', start + 2) ?: run {
-            diagnostics += syntaxDiagnostic("Unclosed relation label", sourcePath, documentId, start, original.length)
+            diagnostics += syntaxDiagnostic("Unclosed relation label", sourcePath, documentId, diagnosticStart, original.length)
             return null
         }
         if (masked.getOrNull(closeLabel + 1) != '(') {
-            diagnostics += syntaxDiagnostic("Relation must be followed by (...)", sourcePath, documentId, start, closeLabel + 1)
+            diagnostics += syntaxDiagnostic("Relation must be followed by (...)", sourcePath, documentId, diagnosticStart, closeLabel + 1)
             return null
         }
         val closeParen = findUnescaped(masked, ')', closeLabel + 2) ?: run {
-            diagnostics += syntaxDiagnostic("Unclosed relation target", sourcePath, documentId, start, original.length)
+            diagnostics += syntaxDiagnostic("Unclosed relation target", sourcePath, documentId, diagnosticStart, original.length)
             return null
         }
         val label = unescapeLabel(original.substring(start + 2, closeLabel))
         val targetAndType = original.substring(closeLabel + 2, closeParen).trim()
         val parts = RelationTargetParser.parse(targetAndType)
         if (parts == null) {
-            diagnostics += syntaxDiagnostic("Relation target and type must be separated by horizontal spaces", sourcePath, documentId, start, closeParen)
+            diagnostics += syntaxDiagnostic(
+                "Relation target and type must be separated by horizontal spaces",
+                sourcePath,
+                documentId,
+                diagnosticStart,
+                closeParen,
+            )
             return null
         }
         var end = closeParen + 1
         val props = if (masked.getOrNull(end) == '{') {
             val range = readBalanced(masked, end, '{', '}')
             if (range == null) {
-                diagnostics += syntaxDiagnostic("Unclosed relation props", sourcePath, documentId, start, original.length)
+                diagnostics += syntaxDiagnostic("Unclosed relation props", sourcePath, documentId, diagnosticStart, original.length)
                 return null
             }
             end = range.end
             try {
                 InlinePropsParser(original.substring(closeParen + 1, range.end)).parseObject().values
             } catch (e: InlinePropsParseException) {
-                diagnostics += syntaxDiagnostic(e.message ?: "Invalid relation props", sourcePath, documentId, start, range.end)
+                diagnostics += syntaxDiagnostic(
+                    e.message ?: "Invalid relation props",
+                    sourcePath,
+                    documentId,
+                    diagnosticStart,
+                    range.end,
+                )
                 return null
             }
         } else {
             emptyMap()
         }
         return ExtractedRelation(parts.first, parts.second, label, props, SourceRange(start, end)) to end
-    }
-
-    private fun maskCodeRegions(body: String): String {
-        val chars = body.toCharArray()
-        var i = 0
-        var lineStart = true
-        while (i < chars.size) {
-            if (lineStart && body.startsWith("```", i)) {
-                val end = body.indexOf("\n```", i + 3).let { if (it >= 0) it + 4 else chars.size }
-                for (j in i until minOf(end, chars.size)) chars[j] = ' '
-                i = end
-                lineStart = true
-                continue
-            }
-            if (lineStart && body.startsWith("    ", i)) {
-                var j = i
-                while (j < chars.size && chars[j] != '\n') {
-                    chars[j] = ' '
-                    j++
-                }
-                i = j
-                lineStart = true
-                continue
-            }
-            if (chars[i] == '`') {
-                val end = body.indexOf('`', i + 1)
-                val actualEnd = if (end >= 0) end else chars.size - 1
-                for (j in i..actualEnd) chars[j] = ' '
-                i = actualEnd + 1
-                lineStart = false
-                continue
-            }
-            lineStart = chars[i] == '\n'
-            i++
-        }
-        return chars.concatToString()
     }
 
     private fun readBalanced(text: String, start: Int, open: Char, close: Char): SourceRange? {
@@ -356,6 +333,13 @@ class BodySyntaxExtractor {
         }
         return slashCount % 2 == 1
     }
+
+    private fun isDirectiveKeywordAt(text: String, index: Int, keyword: String): Boolean =
+        text.startsWith(keyword, index) &&
+            !text.getOrNull(index + keyword.length).isIdentifierContinuation()
+
+    private fun Char?.isIdentifierContinuation(): Boolean =
+        this != null && (isLetterOrDigit() || this in setOf('_', '.', ':', '-'))
 
     private fun unescapeLabel(label: String): String {
         return label.replace("\\]", "]").replace("\\\\", "\\")
