@@ -763,6 +763,30 @@ class GraphCompilerTest {
     }
 
     @Test
+    fun `unknown timeline mapping endpoints are diagnosed without stopping other mappings`() {
+        val result = compiler().compile(
+            listOf(
+                TimelineDocument(id = "A", sourcePath = "/tmp/a.md"),
+                TimelineDocument(
+                    id = "B",
+                    timecode = TimecodeSchema(TimecodeType.number),
+                    mappings = listOf(
+                        OffsetTimelineMapping(from = "MissingFrom", offset = 1.0),
+                        OffsetTimelineMapping(to = "MissingTo", offset = 2.0),
+                        OffsetTimelineMapping(from = "A", offset = 3.0),
+                    ),
+                    sourcePath = "/tmp/b.md",
+                ),
+            ),
+        )
+
+        assertTrue(result.diagnostics.any { it.message == "Unknown mapped Timeline: MissingFrom" })
+        assertTrue(result.diagnostics.any { it.message == "Unknown mapped Timeline: MissingTo" })
+        assertEquals(3.0, result.timelines.single { it.id == "A" }.mappedOffsets["B"])
+        assertEquals(-3.0, result.timelines.single { it.id == "B" }.mappedOffsets["A"])
+    }
+
+    @Test
     fun `normalizes property variants and array element validTime with lexical fallback`() {
         val result = compiler().compileSources(
             listOf(

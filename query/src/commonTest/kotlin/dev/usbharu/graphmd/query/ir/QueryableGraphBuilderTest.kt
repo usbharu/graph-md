@@ -5,6 +5,7 @@ import dev.usbharu.graphmd.core.model.SourceDocument
 import dev.usbharu.graphmd.core.model.StringValue
 import dev.usbharu.graphmd.query.model.NodeId
 import dev.usbharu.graphmd.query.model.PropertyPath
+import dev.usbharu.graphmd.query.model.TimelineId
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -57,6 +58,88 @@ class QueryableGraphBuilderTest {
         assertTrue(graph.propertyAssertions.any { it.path == PropertyPath("tags", "0") })
         val city = graph.propertyAssertions.single { it.path == PropertyPath("profile", "city") }
         assertEquals("Tokyo", assertIs<StringValue>(city.value).value)
+    }
+
+    @Test
+    fun `builds a partial graph when source references unknown IDs`() {
+        val sources = listOf(
+            SourceDocument(
+                sourcePath = "/graph/timeline.md",
+                text = """
+                    ---
+                    id: TimelineA
+                    kind: Timeline
+                    timecode:
+                      type: number
+                    ---
+                """.trimIndent(),
+            ),
+            SourceDocument(
+                sourcePath = "/graph/person.md",
+                text = """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    props:
+                      age:
+                        type: number
+                    ---
+                """.trimIndent(),
+            ),
+            SourceDocument(
+                sourcePath = "/graph/friend.md",
+                text = """
+                    ---
+                    id: friendOf
+                    kind: RelType
+                    from: [Person]
+                    to: [Person]
+                    ---
+                """.trimIndent(),
+            ),
+            SourceDocument(
+                sourcePath = "/graph/alice.md",
+                text = """
+                    ---
+                    id: alice
+                    kind: Node
+                    type: Person
+                    validTime:
+                      - timeline: MissingTimeline
+                      - timeline: TimelineA
+                    props:
+                      age:
+                        - value: 1
+                          validTime:
+                            - timeline: MissingTimeline
+                        - value: 2
+                          validTime:
+                            - timeline: TimelineA
+                    ---
+                    @link(validTime=MissingTimeline)[Bob](bob friendOf)
+                """.trimIndent(),
+            ),
+            SourceDocument(
+                sourcePath = "/graph/bob.md",
+                text = """
+                    ---
+                    id: bob
+                    kind: Node
+                    type: Person
+                    ---
+                """.trimIndent(),
+            ),
+        )
+        val compilation = GraphCompiler().compileSources(sources)
+
+        val graph = QueryableGraphBuilder(sources).build(compilation)
+
+        assertEquals(2, graph.nodes.size)
+        assertEquals(1, graph.relationAssertions.size)
+        assertTrue(compilation.diagnostics.any { "Unknown Timeline: MissingTimeline" in it.message })
+        assertTrue(graph.nodes.single { it.id == NodeId("alice") }.validTime.intervals.all {
+            it.timelineId == TimelineId("TimelineA")
+        })
     }
 
     private fun fixture(): List<SourceDocument> = listOf(

@@ -475,6 +475,7 @@ class GraphCompiler(
         }
 
         docs.forEach { doc ->
+            if (doc.id !in ids) return@forEach
             doc.extends.forEach { parent ->
                 if (parent in ids) connect(doc.id, parent, 0.0, doc.sourcePath, doc.id, validateReference = false)
             }
