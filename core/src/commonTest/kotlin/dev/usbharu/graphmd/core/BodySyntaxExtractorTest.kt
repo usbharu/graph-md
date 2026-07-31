@@ -53,6 +53,55 @@ class BodySyntaxExtractorTest {
     }
 
     @Test
+    fun `supports quoted noncanonical rel type without whitespace`() {
+        val extracted = extractor.extract(
+            """@link[Bob](bob "friend/of")""",
+            "/tmp/alice.md",
+            "alice",
+        )
+
+        assertTrue(extracted.diagnostics.isEmpty(), extracted.diagnostics.joinToString("\n") { it.message })
+        assertEquals("friend/of", extracted.relations.single().relType)
+    }
+
+    @Test
+    fun `rejects whitespace in quoted and unquoted rel types`() {
+        listOf(
+            """@link[Bob](bob friend Of)""",
+            "@link[Bob](bob friend\tOf)",
+            "@link[Bob](bob friend\u00a0Of)",
+            """@link[Bob](bob "friend Of")""",
+            """@link[Bob](bob "friend\ Of")""",
+            "@link[Bob](bob \"friend\tOf\")",
+            "@link[Bob](bob \"friend\u00a0Of\")",
+        ).forEach { body ->
+            val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
+
+            assertTrue(extracted.relations.isEmpty(), body)
+            val diagnostic = extracted.diagnostics.single {
+                it.message == "Relation target and type must be separated by horizontal spaces"
+            }
+            assertEquals(SourceRange(0, body.lastIndexOf(')')), diagnostic.source?.range)
+        }
+    }
+
+    @Test
+    fun `keeps target and malformed relation recovery when rel type whitespace is rejected`() {
+        val body = """
+            @link[Allowed target label](bob "friend Of")
+            @link[Carol](carol friendOf)
+        """.trimIndent()
+
+        val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
+
+        assertEquals(listOf("carol"), extracted.relations.map { it.target })
+        assertEquals("Carol", extracted.relations.single().label)
+        assertTrue(extracted.diagnostics.any {
+            it.message == "Relation target and type must be separated by horizontal spaces"
+        })
+    }
+
+    @Test
     fun `reports malformed relation`() {
         val body = """@link{}[Bob](bob)"""
 
@@ -199,6 +248,40 @@ class BodySyntaxExtractorTest {
 
         assertEquals(1, extracted.relations.size)
         assertTrue(extracted.diagnostics.isEmpty())
+    }
+
+    @Test
+    fun `ignores directive keywords followed by identifier characters`() {
+        val body = """
+            @linking @links @link_foo @link1 @link.foo @link:foo @link-foo @linké @link日本語
+            https://example.com/@link:section user@link.example
+            @propsExtra{name = "Ignored"} @props_foo{name = "Ignored"} @props1{name = "Ignored"}
+            @props.foo{name = "Ignored"} @props:foo{name = "Ignored"} @props-foo{name = "Ignored"}
+            @link[Bob](bob friendOf)
+            @props{name = "Alice"}
+        """.trimIndent()
+
+        val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
+
+        assertTrue(extracted.diagnostics.isEmpty(), extracted.diagnostics.joinToString("\n") { it.message })
+        assertEquals(1, extracted.propsBlocks.size)
+        assertEquals("Alice", (extracted.propsBlocks.single().props.getValue("name") as RawString).value)
+        assertEquals(1, extracted.relations.size)
+        assertEquals("bob", extracted.relations.single().target)
+    }
+
+    @Test
+    fun `recognizes standalone link keyword and boundaries before punctuation and whitespace`() {
+        val body = """
+            @link,
+            @link [Bob](bob friendOf)
+            @link
+        """.trimIndent()
+
+        val extracted = extractor.extract(body, "/tmp/alice.md", "alice")
+
+        assertEquals(3, extracted.diagnostics.count { it.message == "@link must be followed immediately by a link" })
+        assertEquals(0, extracted.relations.size)
     }
 
     @Test
