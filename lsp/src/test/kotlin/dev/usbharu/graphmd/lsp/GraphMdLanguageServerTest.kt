@@ -11,6 +11,7 @@ import dev.usbharu.graphmd.core.model.ResolvedPropSchema
 import dev.usbharu.graphmd.core.model.SourceDocument
 import dev.usbharu.graphmd.core.model.TimelineSelector
 import org.eclipse.lsp4j.CompletionParams
+import org.eclipse.lsp4j.CompletionItemKind
 import org.eclipse.lsp4j.CodeActionContext
 import org.eclipse.lsp4j.CodeAction
 import org.eclipse.lsp4j.CodeActionKind
@@ -2017,6 +2018,142 @@ class GraphMdLanguageServerTest {
             timelineIds = emptyList(),
         ).resolve()?.map { it.label }.orEmpty()
         assertEquals(listOf("Entity"), listItems)
+    }
+
+    @Test
+    fun `front matter type completion distinguishes document type from property schema type`() {
+        fun complete(markedText: String): List<CompletionEntry> {
+            val marker = "<cursor>"
+            val offset = markedText.indexOf(marker)
+            assertTrue(offset >= 0)
+            return FrontMatterCompletionResolver(
+                text = markedText.replace(marker, ""),
+                offset = offset,
+                parsedDocument = null,
+                nodeTypeIds = listOf("Company", "Person"),
+                relTypeIds = listOf("worksAt"),
+                timelineIds = listOf("CommonEra"),
+            ).resolve().orEmpty()
+        }
+
+        listOf(
+            "---\nid: alice\nkind: Node\ntype: <cursor>\n---",
+            "---\nid: alice\nkind: Node   \ntype: <cursor>\n---",
+            "---\nid: alice\nkind: Node # node document\ntype: <cursor>\n---",
+            "---\nid: alice\nkind: \"Node\" # node document\ntype: <cursor>\n---",
+            "---\nid: alice\nkind: 'Node' # node document\ntype: <cursor>\n---",
+            "---\nid: alice\nkind: Node\ntype:    <cursor>\n---",
+            "---\nid: alice\nkind: Node\ntype: \"<cursor>\"\n---",
+            "---\nid: image\nkind: Media\ntype: <cursor>\nurl: image.png\n---",
+            "---\nid: image\nkind: Media   # media document\ntype: <cursor>\nurl: image.png\n---",
+            "---\nid: image\nkind: \"Media\" # media document\ntype: <cursor>\nurl: image.png\n---",
+            "---\nid: alice\nkind: Node\nprops:\n  score:\n    type: number\n\n# reset to a top-level sibling\ntype: <cursor>\n---",
+        ).forEach { text ->
+            assertEquals(listOf("Company", "Person"), complete(text).map { it.label }, text)
+        }
+
+        val partial = complete("---\nid: alice\nkind: Node\ntype: Per<cursor>\n---")
+        assertEquals(listOf("Person"), partial.map { it.label })
+        assertEquals(CompletionItemKind.Reference, partial.single().kind)
+        assertEquals("Person", partial.single().insertText)
+        assertEquals("NodeType", partial.single().detail)
+        assertEquals(
+            listOf("Person"),
+            complete("---\nid: alice\nkind: Node\ntype: 'Per<cursor>'\n---").map { it.label },
+        )
+        listOf(
+            "---\nid: alice\nkind: Node\ntype: Per   <cursor>\n---",
+            "---\nid: alice\nkind: Node\ntype: Per # partial type<cursor>\n---",
+            "---\nid: alice\nkind: Node\ntype: \"Per\" # partial type<cursor>\n---",
+        ).forEach { text ->
+            assertEquals(listOf("Person"), complete(text).map { it.label }, text)
+        }
+        assertTrue(complete("---\nid: alice\nkind: \"Node#draft\"\ntype: <cursor>\n---").isEmpty())
+        assertTrue(complete("---\nid: alice\nkind: \"No\\\"de\" # escaped quote\ntype: <cursor>\n---").isEmpty())
+        assertTrue(complete("---\nid: alice\nkind: 'No''de' # escaped quote\ntype: <cursor>\n---").isEmpty())
+
+        val nodeTypeProp = complete(
+            """
+            ---
+            id: Person
+            kind: NodeType
+            props:
+              name:
+                # scalar property schema
+                type: <cursor>
+            ---
+            """.trimIndent(),
+        )
+        assertEquals(listOf("number", "string", "text", "instant", "duration", "array"), nodeTypeProp.map { it.label })
+        assertTrue(nodeTypeProp.none { it.label in setOf("Company", "Person") })
+
+        val relTypeProp = complete(
+            """
+            ---
+            id: worksAt
+            kind: RelType
+            from: [Person]
+            to: [Company]
+            props:
+              since:
+                type: st<cursor>
+            ---
+            """.trimIndent(),
+        )
+        assertEquals(listOf("string"), relTypeProp.map { it.label })
+
+        assertTrue(complete("---\nid: Person\nkind: NodeType\ntype: <cursor>\n---").isEmpty())
+        assertTrue(complete("---\nid: worksAt\nkind: RelType\ntype: <cursor>\n---").isEmpty())
+        assertEquals(
+            listOf("Person"),
+            complete("---\nid: worksAt\nkind: RelType\nfrom: Per<cursor>\nto: [Company]\n---").map { it.label },
+        )
+        assertEquals(
+            listOf("Person"),
+            complete("---\nid: worksAt\nkind: RelType\nfrom:\n  - Per<cursor>\nto: [Company]\n---").map { it.label },
+        )
+    }
+
+    @Test
+    fun `front matter type completion handles crlf offsets`() {
+        val markedText = "---\r\nid: alice\r\nkind: Node # document kind\r\n\r\n# type follows\r\ntype: Per<cursor>\r\n---"
+        val marker = "<cursor>"
+        val offset = markedText.indexOf(marker)
+        val items = FrontMatterCompletionResolver(
+            text = markedText.replace(marker, ""),
+            offset = offset,
+            parsedDocument = null,
+            nodeTypeIds = listOf("Company", "Person"),
+            relTypeIds = emptyList(),
+            timelineIds = emptyList(),
+        ).resolve().orEmpty()
+
+        assertEquals(listOf("Person"), items.map { it.label })
+    }
+
+    @Test
+    fun `server completes unfinished node type with workspace node types only`() {
+        val uri = "file:///workspace/alice.md"
+        val text = "---\nid: alice\nkind: Node # node document\ntype: \n---"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/Person.md" to "---\nid: Person\nkind: NodeType\n---",
+                "file:///workspace/types/Company.md" to "---\nid: Company\nkind: NodeType\n---",
+                "file:///workspace/types/worksAt.md" to "---\nid: worksAt\nkind: RelType\n---",
+                uri to text,
+            ),
+        )
+
+        val items = fixture.server.textDocumentService.completion(
+            CompletionParams(TextDocumentIdentifier(uri), Position(3, "type: ".length)),
+        ).get().left.orEmpty()
+
+        assertEquals(listOf("Company", "Person"), items.map { it.label })
+        assertTrue(items.all { it.kind == CompletionItemKind.Reference })
+        assertEquals(listOf("Company", "Person"), items.map { it.insertText })
+        assertTrue(items.all { it.detail == "NodeType" })
+        assertEquals(listOf("1-Company", "1-Person"), items.map { it.sortText })
+        assertTrue(items.all { it.textEdit == null })
     }
 
     private fun serverFixture(documents: Map<String, String>): ServerFixture {

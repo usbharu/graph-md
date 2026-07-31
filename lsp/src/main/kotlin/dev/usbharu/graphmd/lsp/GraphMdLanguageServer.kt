@@ -1683,62 +1683,87 @@ internal class FrontMatterCompletionResolver(
     private val nodePropsSchema: Map<String, ResolvedPropSchema> = emptyMap(),
 ) {
     fun resolve(): List<CompletionEntry>? {
-        val lines = text.replace("\r\n", "\n").replace('\r', '\n').split('\n')
+        val normalizedText = text.replace("\r\n", "\n").replace('\r', '\n')
+        val normalizedOffset = text
+            .take(offset.coerceIn(0, text.length))
+            .replace("\r\n", "\n")
+            .replace('\r', '\n')
+            .length
+        val lines = normalizedText.split('\n')
         if (lines.firstOrNull() != "---") return null
         val endLine = lines.drop(1).indexOfFirst { it == "---" || it == "..." }.let { if (it >= 0) it + 1 else -1 }
         if (endLine < 0) return null
         val lineStarts = computeLineStarts(lines)
-        if (offset >= lineStarts[endLine] + lines[endLine].length) return null
-        val lineIndex = lineStarts.indexOfLast { it <= offset }.coerceAtLeast(0)
+        if (normalizedOffset >= lineStarts[endLine] + lines[endLine].length) return null
+        val lineIndex = lineStarts.indexOfLast { it <= normalizedOffset }.coerceAtLeast(0)
         if (lineIndex == 0 || lineIndex >= endLine) return null
         val line = lines[lineIndex]
         val indent = indentOf(line)
         val trimmed = line.trimStart()
-        val cursorInLine = offset - lineStarts[lineIndex]
+        val cursorInLine = normalizedOffset - lineStarts[lineIndex]
         val beforeCursor = line.take(cursorInLine.coerceIn(0, line.length))
         val currentKeyPrefix = trimmed.takeWhile { it != ':' && !it.isWhitespace() }
         val usedTopLevelKeys = siblingKeysAtIndent(lines, lineIndex, 0)
+        val documentKind = parsedDocument?.kind ?: inferredDocumentKind(lines, endLine)
 
         if (trimmed.startsWith("-")) {
-            return listValueCompletions(lines, lineIndex, beforeCursor, parsedDocument)
+            return listValueCompletions(lines, lineIndex, beforeCursor, documentKind)
         }
 
         val keyMatch = Regex("""^([A-Za-z][A-Za-z0-9_-]*)?\s*:?(.*)$""").matchEntire(trimmed) ?: return null
         val keyCandidate = keyMatch.groupValues[1]
         val hasColon = ':' in trimmed
         if (!hasColon && indent == 0) {
-            return topLevelKeyCompletions(keyCandidate, usedTopLevelKeys)
+            return topLevelKeyCompletions(keyCandidate, usedTopLevelKeys, documentKind)
         }
 
         val path = contextPath(lines, lineIndex, indent, hasColon)
-        val valuePrefix = if (hasColon) beforeCursor.substringAfter(':', "").trimStart() else ""
-        nodePropsYamlCompletions(lines, lineIndex, indent, path, hasColon, currentKeyPrefix, valuePrefix)?.let { return it }
+        val valuePrefix = if (hasColon) scalarPrefix(beforeCursor.substringAfter(':', "")) else ""
+        nodePropsYamlCompletions(
+            lines,
+            lineIndex,
+            indent,
+            path,
+            hasColon,
+            currentKeyPrefix,
+            valuePrefix,
+            documentKind,
+        )?.let { return it }
         return when {
-            indent == 0 && keyCandidate.isNotEmpty() && !hasColon -> topLevelKeyCompletions(keyCandidate, usedTopLevelKeys)
+            indent == 0 && keyCandidate.isNotEmpty() && !hasColon ->
+                topLevelKeyCompletions(keyCandidate, usedTopLevelKeys, documentKind)
             hasColon && path == listOf("kind") -> enumCompletions(valuePrefix, listOf("Node", "Media", "NodeType", "RelType", "Timeline"), "kind")
-            hasColon && path == listOf("type") && parsedDocument is NodeDocument -> idCompletions(valuePrefix, nodeTypeIds, "NodeType")
-            hasColon && path == listOf("extends") && parsedDocument is NodeTypeDocument -> idCompletions(valuePrefix, nodeTypeIds, "NodeType")
-            hasColon && path == listOf("extends") && parsedDocument is RelTypeDocument -> idCompletions(valuePrefix, relTypeIds, "RelType")
-            hasColon && path == listOf("extends") && parsedDocument is TimelineDocument -> idCompletions(valuePrefix, timelineIds, "Timeline")
-            hasColon && parsedDocument is TimelineDocument && "mappings" in path && path.lastOrNull() in setOf("from", "to") ->
+            hasColon && path == listOf("type") && documentKind in setOf(DocumentKind.Node, DocumentKind.Media) ->
+                idCompletions(valuePrefix, nodeTypeIds, "NodeType")
+            hasColon && path == listOf("extends") && documentKind == DocumentKind.NodeType ->
+                idCompletions(valuePrefix, nodeTypeIds, "NodeType")
+            hasColon && path == listOf("extends") && documentKind == DocumentKind.RelType ->
+                idCompletions(valuePrefix, relTypeIds, "RelType")
+            hasColon && path == listOf("extends") && documentKind == DocumentKind.Timeline ->
+                idCompletions(valuePrefix, timelineIds, "Timeline")
+            hasColon && documentKind == DocumentKind.Timeline && "mappings" in path && path.lastOrNull() in setOf("from", "to") ->
                 idCompletions(valuePrefix, timelineIds, "Timeline")
             hasColon && (path == listOf("from") || path == listOf("to")) -> idCompletions(valuePrefix, nodeTypeIds, "NodeType")
             hasColon && path.lastOrNull() == "required" ->
                 enumCompletions(valuePrefix, listOf("true", "false"), "boolean")
             hasColon && path == listOf("timecode", "type") ->
                 enumCompletions(valuePrefix, listOf("number"), "timecode type")
-            hasColon && path.lastOrNull() == "type" ->
+            hasColon && documentKind in setOf(DocumentKind.NodeType, DocumentKind.RelType) &&
+                isPropSchemaTypePath(path) ->
                 enumCompletions(valuePrefix, listOf("number", "string", "text", "instant", "duration", "array"), "prop type")
             hasColon && path.lastOrNull() == "timeline" ->
                 timelineSelectorCompletions(valuePrefix)
             hasColon && valuePrefix.isEmpty() -> nestedKeyCompletions(path, "", lines, lineIndex)
-            indent == 0 -> topLevelKeyCompletions(keyCandidate, usedTopLevelKeys)
+            indent == 0 -> topLevelKeyCompletions(keyCandidate, usedTopLevelKeys, documentKind)
             else -> nestedKeyCompletions(path, currentKeyPrefix, lines, lineIndex)
         }
     }
 
-    private fun topLevelKeyCompletions(prefix: String, usedKeys: Set<String>): List<CompletionEntry> {
-        val kind = parsedDocument?.kind ?: inferredDocumentKind()
+    private fun topLevelKeyCompletions(
+        prefix: String,
+        usedKeys: Set<String>,
+        kind: DocumentKind?,
+    ): List<CompletionEntry> {
         val keys = mutableListOf("id", "kind")
         when (kind) {
             DocumentKind.Node -> keys += listOf("type", "validTime", "props")
@@ -1764,8 +1789,9 @@ internal class FrontMatterCompletionResolver(
         hasColon: Boolean,
         keyPrefix: String,
         valuePrefix: String,
+        documentKind: DocumentKind?,
     ): List<CompletionEntry>? {
-        if (parsedDocument !is NodeDocument && inferredDocumentKind() !in setOf(DocumentKind.Node, DocumentKind.Media)) return null
+        if (documentKind !in setOf(DocumentKind.Node, DocumentKind.Media)) return null
         if (nodePropsSchema.isEmpty()) return null
         if (path.firstOrNull() != "props") return null
 
@@ -1906,13 +1932,12 @@ internal class FrontMatterCompletionResolver(
         lines: List<String>,
         lineIndex: Int,
         beforeCursor: String,
-        parsedDocument: GraphDocument?,
+        documentKind: DocumentKind?,
     ): List<CompletionEntry>? {
         val parentKey = enclosingListKey(lines, lineIndex) ?: return null
         val afterDash = beforeCursor.substringAfter('-', "")
         val hasSpaceAfterDash = afterDash.firstOrNull()?.isWhitespace() == true
         val prefix = afterDash.trimStart()
-        val documentKind = parsedDocument?.kind ?: inferredDocumentKind()
         return when (parentKey) {
             "extends" -> when (documentKind) {
                 DocumentKind.NodeType -> idCompletions(prefix, nodeTypeIds, "NodeType")
@@ -2063,15 +2088,53 @@ internal class FrontMatterCompletionResolver(
     private fun indentOf(line: String): Int = line.indexOfFirst { !it.isWhitespace() }.let { if (it < 0) line.length else it }
 
     private fun isInsidePropSchema(path: List<String>): Boolean {
-        if (path.isEmpty()) return false
-        val propsIndex = path.indexOf("props")
-        val propertiesIndex = path.indexOf("properties")
-        return propsIndex >= 0 || propertiesIndex >= 0
+        return path.size >= 2 && path.first() == "props"
     }
 
-    private fun inferredDocumentKind(): DocumentKind? {
-        val raw = Regex("""(?m)^kind\s*:\s*([A-Za-z]+)""").find(text)?.groupValues?.get(1)
+    private fun isPropSchemaTypePath(path: List<String>): Boolean =
+        path.size >= 3 && path.first() == "props" && path.last() == "type"
+
+    private fun inferredDocumentKind(lines: List<String>, endLine: Int): DocumentKind? {
+        val raw = lines
+            .subList(1, endLine)
+            .firstNotNullOfOrNull { line ->
+                if (indentOf(line) != 0) return@firstNotNullOfOrNull null
+                val parts = line.split(':', limit = 2)
+                if (parts.size != 2 || parts[0].trim() != "kind") return@firstNotNullOfOrNull null
+                scalarPrefix(parts[1]).takeIf { it.isNotEmpty() }
+            }
         return DocumentKind.entries.firstOrNull { it.name == raw }
+    }
+
+    private fun scalarPrefix(raw: String): String {
+        val value = raw.trimStart()
+        val quote = value.firstOrNull().takeIf { it == '"' || it == '\'' }
+        if (quote == null) {
+            val commentStart = value.indices.firstOrNull { index ->
+                value[index] == '#' && (index == 0 || value[index - 1].isWhitespace())
+            }
+            return value.substring(0, commentStart ?: value.length).trimEnd()
+        }
+
+        val content = StringBuilder()
+        var index = 1
+        while (index < value.length) {
+            val character = value[index]
+            if (quote == '"' && character == '\\' && index + 1 < value.length) {
+                content.append(value[index + 1])
+                index += 2
+                continue
+            }
+            if (quote == '\'' && character == '\'' && value.getOrNull(index + 1) == '\'') {
+                content.append('\'')
+                index += 2
+                continue
+            }
+            if (character == quote) break
+            content.append(character)
+            index++
+        }
+        return content.toString()
     }
 
     private fun nodePropsContainer(path: List<String>): NodePropsContainer? {
