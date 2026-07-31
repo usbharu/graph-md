@@ -1370,6 +1370,414 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `reference diagnostics distinguish candidate counts and kinds`() {
+        fun node(id: String, type: String, body: String = "") = """
+            ---
+            id: $id
+            kind: Node
+            type: $type
+            ---
+            $body
+        """.trimIndent()
+
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/ambiguous-a.md" to graphDocument("Ambiguous", "NodeType"),
+                "file:///workspace/types/ambiguous-b.md" to graphDocument("Ambiguous", "NodeType"),
+                "file:///workspace/types/wrong.md" to graphDocument("Wrong", "RelType"),
+                "file:///workspace/types/mixed-node-type.md" to graphDocument("Mixed", "NodeType"),
+                "file:///workspace/types/mixed-rel-type.md" to graphDocument("Mixed", "RelType"),
+                "file:///workspace/types/resolved-mixed-node-type.md" to graphDocument("ResolvedMixed", "NodeType"),
+                "file:///workspace/types/resolved-mixed-rel-type.md" to graphDocument("ResolvedMixed", "RelType"),
+                "file:///workspace/types/person.md" to graphDocument("Person", "NodeType"),
+                "file:///workspace/types/friend-of.md" to graphDocument("friendOf", "RelType"),
+                "file:///workspace/unresolved.md" to node("unresolved", "Missing"),
+                "file:///workspace/wrong.md" to node("wrong", "Wrong"),
+                "file:///workspace/ambiguous.md" to node("ambiguous", "Ambiguous"),
+                "file:///workspace/mixed.md" to node("mixed", "Person", "Hello @link{}[Mixed](Mixed friendOf)"),
+                "file:///workspace/resolved-mixed.md" to node("resolvedMixed", "ResolvedMixed"),
+                "file:///workspace/resolved.md" to node("resolved", "Person"),
+            ),
+        )
+
+        val unresolved = fixture.diagnostics.getValue("file:///workspace/unresolved.md")
+            .single { it.message == "Unknown NodeType: Missing" }
+        assertEquals(DiagnosticSeverity.Error, unresolved.severity)
+        assertEquals("ReferenceError", unresolved.code.left)
+        assertEquals(Range(Position(3, 6), Position(3, 13)), unresolved.range)
+
+        val wrong = fixture.diagnostics.getValue("file:///workspace/wrong.md")
+            .single { it.message == "Expected NodeType but found RelType: Wrong" }
+        assertEquals(Range(Position(3, 6), Position(3, 11)), wrong.range)
+
+        val ambiguous = fixture.diagnostics.getValue("file:///workspace/ambiguous.md")
+            .single { it.message == "Ambiguous NodeType reference: Ambiguous" }
+        assertEquals(Range(Position(3, 6), Position(3, 15)), ambiguous.range)
+
+        val mixed = fixture.diagnostics.getValue("file:///workspace/mixed.md")
+            .single { it.message == "Expected Node but found NodeType, RelType: Mixed" }
+        assertEquals(Range(Position(5, 21), Position(5, 26)), mixed.range)
+
+        assertTrue(
+            fixture.diagnostics.getValue("file:///workspace/resolved-mixed.md")
+                .none { it.code?.left == "ReferenceError" && "ResolvedMixed" in it.message },
+        )
+        assertTrue(
+            fixture.diagnostics.getValue("file:///workspace/resolved.md")
+                .none { it.code?.left == "ReferenceError" && "Person" in it.message },
+        )
+    }
+
+    @Test
+    fun `quoted nested Timeline diagnostics use scalar interior ranges`() {
+        val nodeUri = "file:///workspace/quoted-timelines.md"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/person.md" to graphDocument("Person", "NodeType"),
+                "file:///workspace/types/quoted-wrong.md" to graphDocument("QuotedWrong", "NodeType"),
+                "file:///workspace/timelines/quoted-ambiguous-a.md" to graphDocument("QuotedAmbiguous", "Timeline"),
+                "file:///workspace/timelines/quoted-ambiguous-b.md" to graphDocument("QuotedAmbiguous", "Timeline"),
+                nodeUri to """
+                    ---
+                    id: quoted
+                    kind: Node
+                    type: Person
+                    validTime:
+                      - timeline: "QuotedWrong" # wrong kind
+                      - timeline: 'QuotedAmbiguous' # duplicate
+                    props:
+                      label: "QuotedWrong"
+                    ---
+                """.trimIndent(),
+            ),
+        )
+
+        val wrong = fixture.diagnostics.getValue(nodeUri)
+            .single { it.message == "Expected Timeline but found NodeType: QuotedWrong" }
+        assertEquals(Range(Position(5, 15), Position(5, 26)), wrong.range)
+        assertEquals(DiagnosticSeverity.Error, wrong.severity)
+        assertEquals("ReferenceError", wrong.code.left)
+
+        val ambiguous = fixture.diagnostics.getValue(nodeUri)
+            .single { it.message == "Ambiguous Timeline reference: QuotedAmbiguous" }
+        assertEquals(Range(Position(6, 15), Position(6, 30)), ambiguous.range)
+        assertTrue(fixture.actions(nodeUri, ambiguous).isEmpty())
+        assertTrue(
+            fixture.diagnostics.getValue(nodeUri)
+                .none { it.range.start.line == 8 && it.code?.left == "ReferenceError" },
+        )
+    }
+
+    @Test
+    fun `yaml Timeline comments and structural paths stay consistent with compiler`() {
+        val resolvedUri = "file:///workspace/commented.md"
+        val timelinePropsUri = "file:///workspace/timeline-props.md"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/person.md" to graphDocument("Person", "NodeType"),
+                "file:///workspace/timelines/t.md" to graphDocument("T", "Timeline"),
+                resolvedUri to """
+                    ---
+                    id: commented
+                    kind: Node
+                    type: Person
+                    validTime:
+                      - timeline: T # era
+                    ---
+                """.trimIndent(),
+                timelinePropsUri to """
+                    ---
+                    id: Labels
+                    kind: Timeline
+                    props:
+                      from: note
+                      to: other
+                      timeline: label
+                    ---
+                """.trimIndent(),
+            ),
+        )
+
+        assertTrue(
+            fixture.diagnostics.getValue(resolvedUri).none { it.code?.left == "ReferenceError" },
+            fixture.diagnostics.getValue(resolvedUri).joinToString(),
+        )
+        assertTrue(
+            fixture.diagnostics.getValue(timelinePropsUri).none { it.code?.left == "ReferenceError" },
+            fixture.diagnostics.getValue(timelinePropsUri).joinToString(),
+        )
+    }
+
+    @Test
+    fun `mapped selector forms report exact candidate diagnostics`() {
+        val schemaUri = "file:///workspace/types/mapped-selectors.md"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/wrong-mapped.md" to graphDocument("WrongMapped", "NodeType"),
+                "file:///workspace/timelines/ambiguous-mapped-a.md" to graphDocument("AmbiguousMapped", "Timeline"),
+                "file:///workspace/timelines/ambiguous-mapped-b.md" to graphDocument("AmbiguousMapped", "Timeline"),
+                schemaUri to """
+                    ---
+                    id: Event
+                    kind: NodeType
+                    props:
+                      canonical:
+                        type: instant
+                        timeline:
+                          - id: WrongMapped
+                            mapped: true
+                      legacy:
+                        type: instant
+                        timeline:
+                          - AmbiguousMapped:
+                              mapped: true
+                    ---
+                """.trimIndent(),
+            ),
+        )
+
+        val diagnostics = fixture.diagnostics.getValue(schemaUri)
+        val wrong = diagnostics.single {
+            it.message == "Expected Timeline but found NodeType: WrongMapped"
+        }
+        assertEquals(Range(Position(7, 12), Position(7, 23)), wrong.range)
+
+        val ambiguous = diagnostics.single {
+            it.message == "Ambiguous Timeline reference: AmbiguousMapped"
+        }
+        assertEquals(Range(Position(12, 8), Position(12, 23)), ambiguous.range)
+        assertTrue(fixture.actions(schemaUri, ambiguous).isEmpty())
+        assertTrue(diagnostics.none { it.code?.left == "SchemaError" }, diagnostics.joinToString())
+    }
+
+    @Test
+    fun `mapped selectors require boolean flags and preserve punctuated ids`() {
+        val schemaUri = "file:///workspace/types/mapped-selector-boundaries.md"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/third-age.md" to graphDocument("Third.Age", "NodeType"),
+                "file:///workspace/types/missing.md" to graphDocument("MissingMapped", "NodeType"),
+                "file:///workspace/types/legacy.md" to graphDocument("InvalidLegacy", "NodeType"),
+                "file:///workspace/timelines/leading-a.md" to graphDocument("_Leading", "Timeline"),
+                "file:///workspace/timelines/leading-b.md" to graphDocument("_Leading", "Timeline"),
+                schemaUri to """
+                    ---
+                    id: Boundary
+                    kind: NodeType
+                    props:
+                      punctuation:
+                        type: instant
+                        timeline:
+                          - Third.Age:
+                              mapped: false
+                      leading:
+                        type: instant
+                        timeline:
+                          - id: _Leading
+                            mapped: true
+                      missing:
+                        type: instant
+                        timeline:
+                          - id: MissingMapped
+                      nonBoolean:
+                        type: instant
+                        timeline:
+                          - InvalidLegacy:
+                              mapped: nope
+                    ---
+                """.trimIndent(),
+            ),
+        )
+
+        val diagnostics = fixture.diagnostics.getValue(schemaUri)
+        val punctuation = diagnostics.single {
+            it.message == "Expected Timeline but found NodeType: Third.Age"
+        }
+        assertEquals(Range(Position(7, 8), Position(7, 17)), punctuation.range)
+        val leading = diagnostics.single {
+            it.message == "Ambiguous Timeline reference: _Leading"
+        }
+        assertEquals(Range(Position(12, 12), Position(12, 20)), leading.range)
+        assertTrue(
+            diagnostics.none {
+                it.code?.left == "ReferenceError" &&
+                    (it.message.contains("MissingMapped") || it.message.contains("InvalidLegacy"))
+            },
+            diagnostics.joinToString(),
+        )
+        assertEquals(2, diagnostics.count { it.code?.left == "SchemaError" && "selector MUST" in it.message })
+    }
+
+    @Test
+    fun `singular mapped selectors require direct sibling flags`() {
+        val schemaUri = "file:///workspace/types/singular-mapped-selectors.md"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/singular-wrong.md" to graphDocument("SingularWrong", "NodeType"),
+                "file:///workspace/types/deep-wrong.md" to graphDocument("DeepWrong", "NodeType"),
+                "file:///workspace/types/deep-legacy.md" to graphDocument("DeepLegacy", "NodeType"),
+                "file:///workspace/timelines/singular-a.md" to graphDocument("Singular.Ambiguous", "Timeline"),
+                "file:///workspace/timelines/singular-b.md" to graphDocument("Singular.Ambiguous", "Timeline"),
+                schemaUri to """
+                    ---
+                    id: SingularSelectors
+                    kind: NodeType
+                    props:
+                      canonical:
+                        type: instant
+                        timeline:
+                          id: SingularWrong
+                          mapped: true
+                      legacy:
+                        type: instant
+                        timeline:
+                          Singular.Ambiguous:
+                            mapped: false
+                      deepCanonical:
+                        type: instant
+                        timeline:
+                          id: DeepWrong
+                          nested:
+                            mapped: true
+                      deepLegacy:
+                        type: instant
+                        timeline:
+                          DeepLegacy:
+                            nested:
+                              mapped: false
+                    ---
+                """.trimIndent(),
+            ),
+        )
+
+        val diagnostics = fixture.diagnostics.getValue(schemaUri)
+        assertEquals(
+            Range(Position(7, 10), Position(7, 23)),
+            diagnostics.single {
+                it.message == "Expected Timeline but found NodeType: SingularWrong"
+            }.range,
+        )
+        val ambiguous = diagnostics.single {
+            it.message == "Ambiguous Timeline reference: Singular.Ambiguous"
+        }
+        assertEquals(Range(Position(12, 6), Position(12, 24)), ambiguous.range)
+        assertTrue(fixture.actions(schemaUri, ambiguous).isEmpty())
+        assertTrue(
+            diagnostics.none {
+                it.code?.left == "ReferenceError" &&
+                    (it.message.contains("DeepWrong") || it.message.contains("DeepLegacy"))
+            },
+            diagnostics.joinToString(),
+        )
+        assertEquals(2, diagnostics.count { it.code?.left == "SchemaError" && "selector MUST" in it.message })
+    }
+
+    @Test
+    fun `legacy selector payload ids do not become canonical references`() {
+        val schemaUri = "file:///workspace/types/overlapping-selectors.md"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/timelines/nested-a.md" to graphDocument("Nested", "Timeline"),
+                "file:///workspace/timelines/nested-b.md" to graphDocument("Nested", "Timeline"),
+                "file:///workspace/timelines/listed.md" to graphDocument("Listed", "Timeline"),
+                "file:///workspace/types/spurious.md" to graphDocument("Spurious", "NodeType"),
+                "file:///workspace/types/also-spurious.md" to graphDocument("AlsoSpurious", "NodeType"),
+                schemaUri to """
+                    ---
+                    id: Overlapping
+                    kind: NodeType
+                    props:
+                      singular:
+                        type: instant
+                        timeline:
+                          Nested:
+                            id: Spurious
+                            mapped: true
+                      listed:
+                        type: instant
+                        timeline:
+                          - Listed:
+                              id: AlsoSpurious
+                              mapped: false
+                    ---
+                """.trimIndent(),
+            ),
+        )
+
+        val diagnostics = fixture.diagnostics.getValue(schemaUri)
+        val nested = diagnostics.single { it.message == "Ambiguous Timeline reference: Nested" }
+        assertEquals(Range(Position(7, 6), Position(7, 12)), nested.range)
+        assertTrue(fixture.actions(schemaUri, nested).isEmpty())
+        assertTrue(
+            diagnostics.none {
+                it.code?.left == "ReferenceError" &&
+                    (it.message.contains("Spurious") || it.message.contains("AlsoSpurious"))
+            },
+            diagnostics.joinToString(),
+        )
+    }
+
+    @Test
+    fun `numeric duration endpoints produce exact Timeline diagnostics`() {
+        val nodeUri = "file:///workspace/numeric-duration.md"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/wrong-numeric.md" to graphDocument("WrongNumeric", "NodeType"),
+                "file:///workspace/types/wrong-nested.md" to graphDocument("WrongNested", "NodeType"),
+                "file:///workspace/timelines/numeric-a.md" to graphDocument("AmbiguousNumeric", "Timeline"),
+                "file:///workspace/timelines/numeric-b.md" to graphDocument("AmbiguousNumeric", "Timeline"),
+                "file:///workspace/timelines/base.md" to graphDocument("Base", "Timeline"),
+                "file:///workspace/types/event.md" to """
+                    ---
+                    id: Event
+                    kind: NodeType
+                    props:
+                      integer:
+                        type: duration
+                      decimal:
+                        type: duration
+                      nested:
+                        type: duration
+                    ---
+                """.trimIndent(),
+                nodeUri to """
+                    ---
+                    id: event
+                    kind: Node
+                    type: Event
+                    props:
+                      integer:
+                        timeline: WrongNumeric
+                        from: 1
+                      decimal:
+                        timeline: AmbiguousNumeric
+                        to: 1.5
+                      nested:
+                        timeline: Base
+                        from:
+                          timeline: WrongNested
+                          timecode: 2
+                    ---
+                """.trimIndent(),
+            ),
+        )
+
+        val diagnostics = fixture.diagnostics.getValue(nodeUri)
+        assertEquals(
+            Range(Position(6, 14), Position(6, 26)),
+            diagnostics.single { it.message == "Expected Timeline but found NodeType: WrongNumeric" }.range,
+        )
+        assertEquals(
+            Range(Position(9, 14), Position(9, 30)),
+            diagnostics.single { it.message == "Ambiguous Timeline reference: AmbiguousNumeric" }.range,
+        )
+        assertEquals(
+            Range(Position(14, 16), Position(14, 27)),
+            diagnostics.single { it.message == "Expected Timeline but found NodeType: WrongNested" }.range,
+        )
+    }
+
+    @Test
     fun `invalid id warning highlights only the id value`() {
         val uri = "file:///workspace/invalid-id.md"
         val escapedUri = "file:///workspace/escaped-invalid-id.md"

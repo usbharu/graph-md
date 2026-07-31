@@ -454,15 +454,175 @@ class GraphDocumentAnalyzer {
         document: GraphDocument?,
         references: MutableList<SymbolReference>,
     ) {
+        data class Container(val indent: Int, val key: String)
+        data class ListItem(val indent: Int, val id: Int)
+        data class SelectorContext(val listItemId: Int?, val path: List<String>)
+        data class Scalar(
+            val path: List<String>,
+            val key: String,
+            val id: String,
+            val range: SourceRange,
+            val listItemId: Int? = null,
+        )
+
+        fun scalar(
+            raw: String,
+            absoluteStart: Int,
+            path: List<String>,
+            key: String,
+            listItemId: Int? = null,
+        ): Scalar? {
+            val uncommented = stripYamlTrailingComment(raw)
+            val leading = uncommented.indexOfFirst { !it.isWhitespace() }.takeIf { it >= 0 } ?: return null
+            val token = uncommented.substring(leading).trimEnd()
+            val (id, contentOffset, contentLength) = when {
+                token.length >= 2 && token.first() == '"' && token.last() == '"' -> Triple(
+                    decodeDoubleQuotedYamlScalar(token.substring(1, token.lastIndex)),
+                    1,
+                    token.length - 2,
+                )
+                token.length >= 2 && token.first() == '\'' && token.last() == '\'' -> Triple(
+                    token.substring(1, token.lastIndex).replace("''", "'"),
+                    1,
+                    token.length - 2,
+                )
+                token.matches(Regex("""[A-Za-z_][A-Za-z0-9_.:-]*""")) -> Triple(token, 0, token.length)
+                else -> return null
+            }
+            val start = absoluteStart + leading + contentOffset
+            return Scalar(path, key, id, SourceRange(start, start + contentLength), listItemId)
+        }
+
+        val containers = mutableListOf<Container>()
+        val listItems = mutableListOf<ListItem>()
+        val scalars = mutableListOf<Scalar>()
+        val keysByPath = mutableMapOf<List<String>, MutableSet<String>>()
+        val keysBySelectorContext = mutableMapOf<SelectorContext, MutableSet<String>>()
+        val containerKeysByPath = mutableMapOf<List<String>, MutableSet<String>>()
+        val numericKeysByPath = mutableMapOf<List<String>, MutableSet<String>>()
+        val mappedBooleanContexts = mutableSetOf<SelectorContext>()
+        var nextListItemId = 0
         for (lineIndex in 1 until endLine) {
             val line = lines[lineIndex]
-            val match = Regex("""^(\s*)(?:-\s*)?(timeline|from|to):\s*([A-Za-z_][A-Za-z0-9_.:-]*)\s*$""").matchEntire(line) ?: continue
-            val field = match.groupValues[2]
-            if (field in setOf("from", "to") && document !is TimelineDocument) continue
-            val id = match.groupValues[3]
-            val start = lineStarts[lineIndex] + line.lastIndexOf(id)
-            if (references.any { it.kind == ReferenceTargetKind.Timeline && it.range.start == start }) continue
-            references += SymbolReference(id, ReferenceTargetKind.Timeline, field, SourceRange(start, start + id.length))
+            val indent = line.indexOfFirst { !it.isWhitespace() }.takeIf { it >= 0 } ?: continue
+            val uncommented = stripYamlTrailingComment(line)
+            val rawContent = uncommented.substring(indent)
+            if (rawContent.isBlank() || rawContent.startsWith("#")) continue
+            while (containers.lastOrNull()?.indent?.let { it >= indent } == true) containers.removeLast()
+            while (listItems.lastOrNull()?.indent?.let { it >= indent } == true) listItems.removeLast()
+            val path = containers.map { it.key }
+            val listContent = rawContent.removePrefix("- ").takeIf { rawContent.startsWith("- ") }
+            if (listContent != null) listItems += ListItem(indent, nextListItemId++)
+            val listItemId = listItems.lastOrNull()?.id
+            val content = listContent ?: rawContent
+            val contentOffset = indent + if (listContent != null) 2 else 0
+            val mapping = Regex("""^([A-Za-z_][A-Za-z0-9_.-]*)\s*:(.*)$""").matchEntire(content)
+            if (mapping == null) {
+                if (listContent != null && path.lastOrNull() == "timeline") {
+                    scalar(
+                        content,
+                        lineStarts[lineIndex] + contentOffset,
+                        path,
+                        "timeline",
+                        listItemId,
+                    )?.let(scalars::add)
+                }
+                continue
+            }
+            val key = mapping.groupValues[1]
+            val rawValue = mapping.groupValues[2]
+            keysByPath.getOrPut(path) { mutableSetOf() } += key
+            val selectorContext = SelectorContext(listItemId, path)
+            keysBySelectorContext.getOrPut(selectorContext) { mutableSetOf() } += key
+            val parsedRawValue = stripYamlTrailingComment(rawValue).trim()
+            if (key == "mapped" && parsedRawValue in setOf("true", "false")) {
+                mappedBooleanContexts += selectorContext
+            }
+            if (
+                key in setOf("timecode", "from", "to") &&
+                (
+                    parsedRawValue.matches(Regex("""[-+]?[0-9]+""")) ||
+                        parsedRawValue.matches(Regex("""[-+]?[0-9]+\.[0-9]+"""))
+                    )
+            ) {
+                numericKeysByPath.getOrPut(path) { mutableSetOf() } += key
+            }
+            val colonOffset = content.indexOf(':') + 1
+            if (rawValue.isBlank()) {
+                containerKeysByPath.getOrPut(path) { mutableSetOf() } += key
+                if (
+                    path.lastOrNull() == "timeline" &&
+                    key !in setOf("id", "mapped")
+                ) {
+                    val keyStart = lineStarts[lineIndex] + contentOffset
+                    scalars += Scalar(
+                        path,
+                        "legacySelector",
+                        key,
+                        SourceRange(keyStart, keyStart + key.length),
+                        listItemId,
+                    )
+                }
+                containers += Container(indent, key)
+            } else if (
+                key == "timeline" &&
+                stripYamlTrailingComment(rawValue).trim().let { it.startsWith("[") && it.endsWith("]") }
+            ) {
+                val uncommentedValue = stripYamlTrailingComment(rawValue)
+                val openingBracket = uncommentedValue.indexOf('[')
+                val inner = uncommentedValue.substring(openingBracket + 1, uncommentedValue.lastIndexOf(']'))
+                splitYamlInlineList(inner).forEach { item ->
+                    scalar(
+                        item.raw,
+                        lineStarts[lineIndex] + contentOffset + colonOffset + openingBracket + 1 + item.start,
+                        path,
+                        key,
+                        listItemId,
+                    )?.let(scalars::add)
+                }
+            } else {
+                scalar(
+                    rawValue,
+                    lineStarts[lineIndex] + contentOffset + colonOffset,
+                    path,
+                    key,
+                    listItemId,
+                )?.let(scalars::add)
+            }
+        }
+
+        scalars.filter { candidate ->
+            val path = candidate.path
+            when {
+                candidate.key == "timeline" && "validTime" in path -> true
+                document is NodeTypeDocument || document is RelTypeDocument -> {
+                    path.firstOrNull() == "props" && (
+                        candidate.key == "timeline" ||
+                            candidate.key == "id" && path.lastOrNull() == "timeline" &&
+                            SelectorContext(candidate.listItemId, path) in mappedBooleanContexts ||
+                            candidate.key == "legacySelector" && path.lastOrNull() == "timeline" &&
+                            keysBySelectorContext[SelectorContext(candidate.listItemId, path)] == setOf(candidate.id) &&
+                            SelectorContext(candidate.listItemId, path + candidate.id) in mappedBooleanContexts
+                        )
+                }
+                document is TimelineDocument ->
+                    path.firstOrNull() == "mappings" && candidate.key in setOf("from", "to")
+                document is NodeDocument && path.firstOrNull() == "props" -> {
+                    candidate.key == "timeline" && (
+                            "timecode" in numericKeysByPath[candidate.path].orEmpty() ||
+                            numericKeysByPath[candidate.path].orEmpty().any { it in setOf("from", "to") } ||
+                            containerKeysByPath[candidate.path].orEmpty().any { endpoint ->
+                                endpoint in setOf("from", "to") &&
+                                    "timecode" in numericKeysByPath[candidate.path + endpoint].orEmpty()
+                            }
+                        )
+                }
+                else -> false
+            }
+        }.forEach { candidate ->
+            if (references.none { it.kind == ReferenceTargetKind.Timeline && it.range.start == candidate.range.start }) {
+                references += SymbolReference(candidate.id, ReferenceTargetKind.Timeline, candidate.key, candidate.range)
+            }
         }
     }
 
@@ -759,10 +919,12 @@ class GraphDocumentAnalyzer {
     }
 
     private fun stripYamlScalar(value: String): String {
-        val trimmed = value.trim()
+        val trimmed = stripYamlTrailingComment(value).trim()
         return when {
-            trimmed.length >= 2 && trimmed.first() == '"' && trimmed.last() == '"' -> trimmed.substring(1, trimmed.length - 1)
-            trimmed.length >= 2 && trimmed.first() == '\'' && trimmed.last() == '\'' -> trimmed.substring(1, trimmed.length - 1)
+            trimmed.length >= 2 && trimmed.first() == '"' && trimmed.last() == '"' ->
+                decodeDoubleQuotedYamlScalar(trimmed.substring(1, trimmed.length - 1))
+            trimmed.length >= 2 && trimmed.first() == '\'' && trimmed.last() == '\'' ->
+                trimmed.substring(1, trimmed.length - 1).replace("''", "'")
             else -> trimmed
         }
     }
