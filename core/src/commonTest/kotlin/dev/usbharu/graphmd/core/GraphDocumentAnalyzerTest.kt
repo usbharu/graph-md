@@ -1630,6 +1630,51 @@ class GraphDocumentAnalyzerTest {
     }
 
     @Test
+    fun `limits body validTime completion to timeline tokens in GraphMD syntax outside code`() {
+        val text = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            ---
+            ::: history validTime=[FirstEra, SecondEra(from=1,to=2)] annotation
+            body
+            :::
+            @props(validTime=DirectiveEra){age=1}
+            @props{age(validTime=[PropertyEra, OtherEra])=2}
+            @link(validTime=LinkEra)[Bob](bob friendOf)
+            prose validTime=NotGraphMd
+            ```markdown
+            ::: hidden validTime=CodeEra
+            @props(validTime=CodeDirective){age=3}
+            ```
+        """.trimIndent()
+        val analysis = analyzer.analyze(text, "/tmp/n.md")
+
+        assertEquals(
+            ReferenceTargetKind.Timeline,
+            analyzer.inferCompletionKind(analysis, text.indexOf("SecondEra") + 3),
+        )
+        assertNull(analyzer.inferCompletionKind(analysis, text.indexOf("from=1") + "from=".length))
+        assertNull(analyzer.inferCompletionKind(analysis, text.indexOf("annotation") + 3))
+        assertEquals(
+            ReferenceTargetKind.Timeline,
+            analyzer.inferCompletionKind(analysis, text.indexOf("DirectiveEra") + 3),
+        )
+        assertEquals(
+            ReferenceTargetKind.Timeline,
+            analyzer.inferCompletionKind(analysis, text.indexOf("OtherEra") + 3),
+        )
+        assertEquals(
+            ReferenceTargetKind.Timeline,
+            analyzer.inferCompletionKind(analysis, text.indexOf("LinkEra") + 3),
+        )
+        assertNull(analyzer.inferCompletionKind(analysis, text.indexOf("NotGraphMd") + 3))
+        assertNull(analyzer.inferCompletionKind(analysis, text.indexOf("CodeEra") + 3))
+        assertNull(analyzer.inferCompletionKind(analysis, text.indexOf("CodeDirective") + 3))
+    }
+
+    @Test
     fun `body completion returns null for malformed or non graph parentheses`() {
         val unclosed = """
             ---

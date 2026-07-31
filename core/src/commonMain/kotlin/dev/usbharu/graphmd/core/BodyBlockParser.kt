@@ -20,6 +20,8 @@ internal data class BodyBlockLineMarker(
 )
 
 internal object BodyBlockHeaderParser {
+    private val validTimeAssignment = Regex("""(?:^|[ \t])validTime[ \t]*=[ \t]*""")
+
     fun parse(header: String): ParsedBodyBlockHeader {
         val names = mutableListOf<String>()
         var validTime = emptyList<ValidTime>()
@@ -59,6 +61,9 @@ internal object BodyBlockHeaderParser {
                 }
                 val argument = "validTime=${header.substring(expressionStart, expressionEnd)}"
                 val parsed = parseInlineValidTimeArgument(argument)
+                if (parsed.validTime.isEmpty()) {
+                    throw InlinePropsParseException("validTime must be non-empty")
+                }
                 validTime = parsed.validTime
                 val shift = expressionStart - "validTime=".length
                 timelineReferences = parsed.timelineReferences.map { reference ->
@@ -80,6 +85,53 @@ internal object BodyBlockHeaderParser {
             skipHorizontal()
         }
         return ParsedBodyBlockHeader(names, validTime, timelineReferences)
+    }
+
+    fun isTimelineCompletionPosition(header: String, offset: Int): Boolean {
+        val safeOffset = offset.coerceIn(0, header.length)
+        return validTimeAssignment.findAll(header).any { match ->
+            if (!isTopLevelHeaderOffset(header, match.range.first)) return@any false
+            val equals = header.indexOf('=', match.range.first)
+            val expressionStart = match.range.last + 1
+            val expressionEnd = validTimeExpressionEnd(header, expressionStart)
+            when {
+                safeOffset in (equals + 1)..expressionStart -> true
+                safeOffset !in expressionStart..expressionEnd -> false
+                else -> isValidTimeTimelineCompletionPosition(
+                    header.substring(expressionStart, expressionEnd),
+                    safeOffset - expressionStart,
+                )
+            }
+        }
+    }
+
+    private fun isTopLevelHeaderOffset(text: String, offset: Int): Boolean {
+        var parentheses = 0
+        var brackets = 0
+        var braces = 0
+        var inString = false
+        var escaped = false
+        for (index in 0 until offset) {
+            val char = text[index]
+            if (inString) {
+                when {
+                    escaped -> escaped = false
+                    char == '\\' -> escaped = true
+                    char == '"' -> inString = false
+                }
+            } else {
+                when (char) {
+                    '"' -> inString = true
+                    '(' -> parentheses++
+                    ')' -> parentheses--
+                    '[' -> brackets++
+                    ']' -> brackets--
+                    '{' -> braces++
+                    '}' -> braces--
+                }
+            }
+        }
+        return !inString && parentheses == 0 && brackets == 0 && braces == 0
     }
 
     private fun validTimeExpressionEnd(text: String, start: Int): Int {
@@ -113,6 +165,80 @@ internal object BodyBlockHeaderParser {
         }
         return index
     }
+}
+
+internal fun isValidTimeTimelineCompletionPosition(expression: String, offset: Int): Boolean {
+    val safeOffset = offset.coerceIn(0, expression.length)
+    var index = 0
+
+    fun skipWhitespace() {
+        while (expression.getOrNull(index)?.isWhitespace() == true) index++
+    }
+
+    var array = false
+    skipWhitespace()
+    if (expression.getOrNull(index) == '[') {
+        array = true
+        index++
+    }
+
+    while (index <= expression.length) {
+        val expectedStart = index
+        skipWhitespace()
+        if (safeOffset in expectedStart..index && (index >= expression.length || expression[index] != ']')) {
+            return true
+        }
+        if (index >= expression.length || array && expression[index] == ']') return false
+
+        val referenceStart = index
+        while (expression.getOrNull(index)?.let { char ->
+                !char.isWhitespace() && char !in setOf(',', '(', ')', '[', ']', '{', '}', '=')
+            } == true
+        ) {
+            index++
+        }
+        if (index == referenceStart) return false
+        if (safeOffset in referenceStart..index) return true
+
+        skipWhitespace()
+        if (expression.getOrNull(index) == '(') {
+            val end = balancedExpressionEnd(expression, index, '(', ')') ?: return false
+            if (safeOffset in index until end) return false
+            index = end
+            skipWhitespace()
+        }
+
+        if (!array) return false
+        when (expression.getOrNull(index)) {
+            ',' -> index++
+            ']' -> return false
+            else -> return false
+        }
+    }
+    return false
+}
+
+private fun balancedExpressionEnd(text: String, start: Int, open: Char, close: Char): Int? {
+    var depth = 0
+    var inString = false
+    var escaped = false
+    for (index in start until text.length) {
+        val char = text[index]
+        if (inString) {
+            when {
+                escaped -> escaped = false
+                char == '\\' -> escaped = true
+                char == '"' -> inString = false
+            }
+        } else {
+            when (char) {
+                '"' -> inString = true
+                open -> depth++
+                close -> if (--depth == 0) return index + 1
+            }
+        }
+    }
+    return null
 }
 
 internal object BodyBlockParser {

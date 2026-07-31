@@ -170,7 +170,11 @@ class GraphDocumentAnalyzer {
         return if (offset < analysis.frontMatterEndOffset) {
             inferFrontMatterCompletionKind(analysis.text, offset, document.kind)
         } else {
-            inferBodyCompletionKind(analysis.text, offset)
+            val bodyStart = analysis.frontMatterEndOffset.coerceAtMost(analysis.text.length)
+            inferBodyCompletionKind(
+                analysis.text.substring(bodyStart),
+                offset.coerceAtLeast(bodyStart) - bodyStart,
+            )
         }
     }
 
@@ -220,30 +224,192 @@ class GraphDocumentAnalyzer {
     }
 
     private fun inferBodyCompletionKind(text: String, offset: Int): ReferenceTargetKind? {
-        val textBeforeCursor = text.substring(0, offset.coerceIn(0, text.length))
-        val validTimeMarker = Regex("""validTime\s*=\s*""").findAll(textBeforeCursor).lastOrNull()
-        if (validTimeMarker != null) {
-            val between = text.substring(validTimeMarker.range.last + 1, offset.coerceAtMost(text.length))
-            if ('\n' !in between && '}' !in between && between.count { it == '(' } >= between.count { it == ')' }) {
-                return ReferenceTargetKind.Timeline
-            }
+        val safeOffset = offset.coerceIn(0, text.length)
+        val masking = CommonMarkCodeMasker.analyze(text)
+        val masked = masking.masked
+        bodyBlockTimelineCompletionAt(text, masking, safeOffset)?.let { inTimeline ->
+            return if (inTimeline) ReferenceTargetKind.Timeline else null
         }
-        val openParen = text.lastIndexOf('(', startIndex = offset)
-        val closeParen = if (openParen >= 0) text.indexOf(')', startIndex = openParen) else -1
-        if (openParen < 0 || closeParen < 0 || offset > closeParen) return null
-        val labelOpen = text.lastIndexOf('[', startIndex = openParen)
+        if (isInlineTimelineCompletionAt(text, masked, safeOffset)) return ReferenceTargetKind.Timeline
+
+        val openParen = masked.lastIndexOf('(', startIndex = safeOffset)
+        val closeParen = if (openParen >= 0) masked.indexOf(')', startIndex = openParen) else -1
+        if (openParen < 0 || closeParen < 0 || safeOffset > closeParen) return null
+        val labelOpen = masked.lastIndexOf('[', startIndex = openParen)
         if (labelOpen < 0) return null
-        val oldRelation = labelOpen > 0 && text[labelOpen - 1] == '@'
-        val canonicalStart = text.lastIndexOf("@link", startIndex = labelOpen)
-        if (!oldRelation && (canonicalStart < 0 || text.substring(canonicalStart, labelOpen).any { it == '\n' })) return null
-        val inner = text.substring(openParen + 1, closeParen)
-        val relativeOffset = offset - openParen - 1
+        val oldRelation = labelOpen > 0 && masked[labelOpen - 1] == '@'
+        val canonicalStart = masked.lastIndexOf("@link", startIndex = labelOpen)
+        if (!oldRelation && (canonicalStart < 0 || masked.substring(canonicalStart, labelOpen).any { it == '\n' })) return null
+        val inner = masked.substring(openParen + 1, closeParen)
+        val relativeOffset = safeOffset - openParen - 1
         val firstWhitespace = inner.indexOfFirst { it.isWhitespace() }
         return if (firstWhitespace < 0 || relativeOffset <= firstWhitespace) {
             ReferenceTargetKind.Node
         } else {
             ReferenceTargetKind.RelType
         }
+    }
+
+    private fun bodyBlockTimelineCompletionAt(
+        body: String,
+        masking: CommonMarkMasking,
+        offset: Int,
+    ): Boolean? {
+        if (body.isEmpty()) return null
+        val previousIndex = (offset - 1).coerceAtLeast(0)
+        val lineStart = body.lastIndexOf('\n', previousIndex).let { if (it < 0) 0 else it + 1 }
+        if (lineStart !in masking.rootLineStarts) return null
+        val newline = body.indexOf('\n', lineStart).let { if (it < 0) body.length else it }
+        val lineEnd = if (newline > lineStart && body[newline - 1] == '\r') newline - 1 else newline
+        val marker = parseBodyBlockLineMarker(masking.masked, body, lineStart, lineEnd) ?: return null
+        val header = marker.header ?: return false
+        val headerStart = marker.headerStart ?: return false
+        if (offset !in headerStart..lineEnd) return false
+        return BodyBlockHeaderParser.isTimelineCompletionPosition(header, offset - headerStart)
+    }
+
+    private fun isInlineTimelineCompletionAt(original: String, masked: String, offset: Int): Boolean {
+        var index = 0
+        while (index < masked.length && index <= offset) {
+            val directive = when {
+                masked.startsWith("@props", index) &&
+                    !isEscaped(masked, index) &&
+                    !isIdentifierPart(masked.getOrNull(index + "@props".length)) -> "@props"
+                masked.startsWith("@link", index) &&
+                    !isEscaped(masked, index) &&
+                    !isIdentifierPart(masked.getOrNull(index + "@link".length)) -> "@link"
+                else -> null
+            }
+            if (directive == null) {
+                index++
+                continue
+            }
+
+            var cursor = index + directive.length
+            if (masked.getOrNull(cursor) == '(') {
+                val closedEnd = readBalancedEnd(masked, cursor, '(', ')')
+                val contentStart = cursor + 1
+                val contentEnd = closedEnd?.minus(1) ?: incompleteInlineSyntaxEnd(masked, contentStart)
+                if (offset in contentStart..contentEnd) {
+                    return isValidTimeArgumentCompletionAt(
+                        original.substring(contentStart, contentEnd),
+                        offset - contentStart,
+                    )
+                }
+                if (closedEnd == null) {
+                    index = contentEnd.coerceAtLeast(index + 1)
+                    continue
+                }
+                cursor = closedEnd
+            }
+
+            if (masked.getOrNull(cursor) == '{') {
+                val objectEnd = readBalancedEnd(masked, cursor, '{', '}')
+                    ?: incompleteInlineSyntaxEnd(masked, cursor + 1)
+                if (offset in cursor..objectEnd) {
+                    return isInlineObjectValidTimeCompletionAt(
+                        original.substring(cursor, objectEnd),
+                        offset - cursor,
+                    )
+                }
+                cursor = objectEnd
+            }
+            index = cursor.coerceAtLeast(index + 1)
+        }
+        return false
+    }
+
+    private fun isValidTimeArgumentCompletionAt(argument: String, offset: Int): Boolean {
+        val assignment = Regex("""^\s*validTime\s*=\s*""").find(argument) ?: return false
+        val equals = argument.indexOf('=', assignment.range.first)
+        val expressionStart = assignment.range.last + 1
+        val safeOffset = offset.coerceIn(0, argument.length)
+        if (safeOffset in (equals + 1)..expressionStart) return true
+        if (safeOffset !in expressionStart..argument.length) return false
+        return isValidTimeTimelineCompletionPosition(
+            argument.substring(expressionStart),
+            safeOffset - expressionStart,
+        )
+    }
+
+    private fun isInlineObjectValidTimeCompletionAt(objectText: String, offset: Int): Boolean {
+        val assignment = Regex("""(?:^|[\s,(])validTime\s*=\s*""")
+        val safeOffset = offset.coerceIn(0, objectText.length)
+        return assignment.findAll(objectText).any { match ->
+            val keywordStart = objectText.indexOf("validTime", match.range.first)
+            if (!isInsidePropertyAnnotation(objectText, keywordStart)) return@any false
+            val equals = objectText.indexOf('=', keywordStart)
+            val expressionStart = match.range.last + 1
+            val expressionEnd = inlineValidTimeExpressionEnd(objectText, expressionStart)
+            when {
+                safeOffset in (equals + 1)..expressionStart -> true
+                safeOffset !in expressionStart..expressionEnd -> false
+                else -> isValidTimeTimelineCompletionPosition(
+                    objectText.substring(expressionStart, expressionEnd),
+                    safeOffset - expressionStart,
+                )
+            }
+        }
+    }
+
+    private fun isInsidePropertyAnnotation(text: String, offset: Int): Boolean {
+        val parentheses = mutableListOf<Int>()
+        var inString = false
+        var escaped = false
+        for (index in 0 until offset) {
+            val char = text[index]
+            if (inString) {
+                when {
+                    escaped -> escaped = false
+                    char == '\\' -> escaped = true
+                    char == '"' -> inString = false
+                }
+            } else {
+                when (char) {
+                    '"' -> inString = true
+                    '(' -> parentheses += index
+                    ')' -> if (parentheses.isNotEmpty()) parentheses.removeAt(parentheses.lastIndex)
+                }
+            }
+        }
+        val opening = parentheses.lastOrNull() ?: return false
+        var before = opening - 1
+        while (before >= 0 && text[before].isWhitespace()) before--
+        return text.getOrNull(before)?.let {
+            it.isLetterOrDigit() || it in setOf('_', '.', ':', '-')
+        } == true
+    }
+
+    private fun inlineValidTimeExpressionEnd(text: String, start: Int): Int {
+        var parentheses = 0
+        var brackets = 0
+        var braces = 0
+        var inString = false
+        var escaped = false
+        var index = start
+        while (index < text.length) {
+            val char = text[index]
+            if (inString) {
+                when {
+                    escaped -> escaped = false
+                    char == '\\' -> escaped = true
+                    char == '"' -> inString = false
+                }
+            } else {
+                when (char) {
+                    '"' -> inString = true
+                    '(' -> parentheses++
+                    ')' -> if (parentheses == 0 && brackets == 0 && braces == 0) return index else parentheses--
+                    '[' -> brackets++
+                    ']' -> brackets--
+                    '{' -> braces++
+                    '}' -> braces--
+                    ',' -> if (parentheses == 0 && brackets == 0 && braces == 0) return index
+                }
+            }
+            index++
+        }
+        return index
     }
 
     private fun extractBodyReferences(body: String, baseOffset: Int): List<SymbolReference> {

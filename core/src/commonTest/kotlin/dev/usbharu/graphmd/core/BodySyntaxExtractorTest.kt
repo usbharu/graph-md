@@ -634,4 +634,25 @@ class BodySyntaxExtractorTest {
         assertTrue(extracted.blocks.isEmpty())
         assertTrue(extracted.diagnostics.any { it.message.startsWith("Invalid block header:") })
     }
+
+    @Test
+    fun `rejects empty validTime even when a later value is valid`() {
+        val extracted = extractor.extract(
+            """
+            ::: history validTime=[] validTime=Valid
+            @props{age=10}
+            :::
+            """.trimIndent(),
+            "/tmp/alice.md",
+            "alice",
+        )
+
+        assertTrue(extracted.blocks.isEmpty())
+        assertTrue(
+            extracted.diagnostics.any {
+                it.message == "Invalid block header: validTime must be non-empty"
+            },
+        )
+        assertTrue(extracted.propsBlocks.single().props.getValue("age") !is RawArray)
+    }
 }

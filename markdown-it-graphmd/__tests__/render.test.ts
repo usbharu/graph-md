@@ -287,6 +287,20 @@ describe("named body blocks", () => {
     expect(html).not.toContain("::: outer");
   });
 
+  it("uses CommonMark list padding when excluding fence-shaped list content", () => {
+    const html = render(
+      [
+        "::: outer",
+        "-     item",
+        "  ::::: fake",
+        ":::",
+      ].join("\n"),
+    );
+
+    expect(html).not.toContain("::: outer");
+    expect(html).toContain("::::: fake");
+  });
+
   it("keeps a nested opening fence that is not longer than its parent", () => {
     const html = render(
       [
@@ -318,9 +332,11 @@ describe("named body blocks", () => {
 
   it("keeps malformed and unclosed blocks as ordinary markdown", () => {
     const invalid = render("::: history validTime=Broken(from=)\ntext\n:::");
+    const emptyValidTime = render("::: history validTime=[]\ntext\n:::");
     const unclosed = render("::: history validTime=CommonEra\ntext");
 
     expect(invalid).toContain("::: history");
+    expect(emptyValidTime).toContain("::: history");
     expect(unclosed).toContain("::: history");
   });
 });

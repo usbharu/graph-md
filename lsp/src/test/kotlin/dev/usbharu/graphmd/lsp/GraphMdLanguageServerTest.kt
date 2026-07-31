@@ -1193,6 +1193,8 @@ class GraphMdLanguageServerTest {
         assertEquals(timelineUri, fixture.definitions(nodeUri, winningOffset + 1).single().uri)
         assertEquals(2, fixture.references(nodeUri, winningOffset + 1).size)
         assertTrue("WinningEra" in fixture.completions(nodeUri, winningOffset + 3).map { it.label })
+        assertTrue(fixture.completions(nodeUri, nodeText.indexOf("annotation") + 3).isEmpty())
+        assertTrue(fixture.completions(nodeUri, nodeText.indexOf("CodeEra") + 3).isEmpty())
 
         val rename = assertNotNull(fixture.rename(nodeUri, winningOffset + 1, "RenamedEra"))
         assertEquals(

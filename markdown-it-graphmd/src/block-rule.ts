@@ -204,9 +204,19 @@ function isContainerLine(src: string, line: SourceLine, listIndents: number[]): 
   const insideList = listIndents.length > 0;
   const markerLength = listMarkerLength(src, cursor, lineEnd);
   if (markerLength !== null && (insideList || indent <= 3)) {
-    let contentStart = cursor + markerLength;
-    while (contentStart < lineEnd && src.charCodeAt(contentStart) === SPACE) contentStart += 1;
-    const contentIndent = Math.max(contentStart - lineStart, indent + markerLength + 1);
+    const markerEnd = cursor + markerLength;
+    let contentStart = markerEnd;
+    let spaces = 0;
+    while (contentStart < lineEnd && src.charCodeAt(contentStart) === SPACE) {
+      contentStart += 1;
+      spaces += 1;
+    }
+    if (contentStart < lineEnd && src.charCodeAt(contentStart) === TAB) contentStart += 1;
+    if (spaces > 4) contentStart = markerEnd + 1;
+    const empty = contentStart >= lineEnd;
+    const contentIndent = empty
+      ? indent + markerLength + 1
+      : indent + columnWidth(src, cursor, contentStart);
     listIndents.push(contentIndent);
     return true;
   }
@@ -240,4 +250,14 @@ function listMarkerLength(src: string, start: number, end: number): number | nul
 
 function isHorizontal(code: number): boolean {
   return code === SPACE || code === TAB;
+}
+
+function columnWidth(src: string, start: number, end: number): number {
+  let columns = 0;
+  for (let cursor = start; cursor < end; cursor += 1) {
+    columns = src.charCodeAt(cursor) === TAB
+      ? columns + 4 - (columns % 4)
+      : columns + 1;
+  }
+  return columns;
 }
