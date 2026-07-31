@@ -31,6 +31,7 @@ import kotlin.io.path.isRegularFile
 import kotlin.io.path.readText
 
 private val GRAPH_MD_ID_REGEX = Regex("[A-Za-z_][A-Za-z0-9_.:-]*")
+private const val CREATE_DEFINITION_COMMAND = "graphmd.createDefinition"
 
 class GraphMdLanguageServer : LanguageServer, LanguageClientAware, GraphMdSearchService {
     private val workspaceIndex = GraphMdWorkspaceIndex()
@@ -783,12 +784,14 @@ internal class GraphMdWorkspaceIndex(
     private fun quickFix(
         title: String,
         diagnostic: org.eclipse.lsp4j.Diagnostic,
-        edit: WorkspaceEdit,
+        edit: WorkspaceEdit?,
         preferred: Boolean = false,
+        command: Command? = null,
     ): CodeAction = CodeAction(title).apply {
         kind = CodeActionKind.QuickFix
         diagnostics = listOf(diagnostic)
         this.edit = edit
+        this.command = command
         isPreferred = preferred
     }
 
@@ -1127,16 +1130,37 @@ internal class GraphMdWorkspaceIndex(
         val newPath = definitionDirectory.resolve("${target.id}.md")
         val newUri = newPath.toUri().toString()
         if (documentSnapshot(newUri) != null || Files.exists(newPath)) return null
-        val sourceType = (document.analysis.parsed.document as? NodeDocument)?.type
-            ?: completionIds(ReferenceTargetKind.NodeType).firstOrNull()
-            ?: "NodeType"
-        val content = when (target.kind) {
-            ReferenceTargetKind.NodeType -> "---\nid: ${target.id}\nkind: NodeType\nprops:\n---\n"
-            ReferenceTargetKind.RelType -> "---\nid: ${target.id}\nkind: RelType\n---\n"
-            ReferenceTargetKind.Timeline -> "---\nid: ${target.id}\nkind: Timeline\ntimecode:\n  type: number\n---\n"
-            ReferenceTargetKind.Node -> "---\nid: ${target.id}\nkind: Node\ntype: $sourceType\n---\n"
-            ReferenceTargetKind.Media -> "---\nid: ${target.id}\nkind: Media\ntype: $sourceType\nurl: \"\"\n---\n"
+
+        val nodeTypeIds = unambiguousDefinitionIds(ReferenceTargetKind.NodeType)
+        if (target.kind == ReferenceTargetKind.Node || target.kind == ReferenceTargetKind.Media) {
+            if (nodeTypeIds.isEmpty()) return null
+            val choices = nodeTypeIds.map { nodeTypeId ->
+                mapOf(
+                    "label" to nodeTypeId,
+                    "content" to definitionContent(target, nodeTypeId),
+                )
+            }
+            return quickFix(
+                title = "Create ${target.kind.displayName()} '${target.id}'",
+                diagnostic = diagnostic,
+                edit = null,
+                command = Command(
+                    "Create ${target.kind.displayName()} '${target.id}'",
+                    CREATE_DEFINITION_COMMAND,
+                    listOf(
+                        mapOf(
+                            "uri" to newUri,
+                            "kind" to target.kind.displayName(),
+                            "id" to target.id,
+                            "choices" to choices,
+                        ),
+                    ),
+                ),
+                preferred = completionIds(target.kind).isEmpty(),
+            )
         }
+
+        val content = definitionContent(target, null)
         val changes = listOf<Either<TextDocumentEdit, ResourceOperation>>(
             Either.forRight(CreateFile(newUri, CreateFileOptions(false, true))),
             Either.forLeft(
@@ -1152,6 +1176,45 @@ internal class GraphMdWorkspaceIndex(
             WorkspaceEdit(changes),
             preferred = completionIds(target.kind).isEmpty(),
         )
+    }
+
+    private fun definitionContent(target: DiagnosticReferenceTarget, nodeTypeId: String?): String = when (target.kind) {
+        ReferenceTargetKind.NodeType -> "---\nid: ${target.id}\nkind: NodeType\nprops:\n---\n"
+        ReferenceTargetKind.RelType -> "---\nid: ${target.id}\nkind: RelType\n---\n"
+        ReferenceTargetKind.Timeline -> "---\nid: ${target.id}\nkind: Timeline\ntimecode:\n  type: number\n---\n"
+        ReferenceTargetKind.Node -> nodeDefinitionContent(target, "Node", nodeTypeId)
+        ReferenceTargetKind.Media -> nodeDefinitionContent(target, "Media", nodeTypeId, includeUrl = true)
+    }
+
+    private fun nodeDefinitionContent(
+        target: DiagnosticReferenceTarget,
+        kind: String,
+        nodeTypeId: String?,
+        includeUrl: Boolean = false,
+    ): String {
+        val type = requireNotNull(nodeTypeId)
+        return buildString {
+            append("---\n")
+            append("id: ${target.id}\n")
+            append("kind: $kind\n")
+            append("type: $type\n")
+            if (includeUrl) append("url: \"\"\n")
+            append(requiredPropsContent(type))
+            append("---\n")
+        }
+    }
+
+    private fun requiredPropsContent(nodeTypeId: String): String {
+        val requiredProps = nodeTypeSchema(nodeTypeId)?.props
+            ?.filterValues { it.required }
+            .orEmpty()
+        if (requiredProps.isEmpty()) return ""
+        return buildString {
+            append("props:\n")
+            requiredProps.forEach { (key, schema) ->
+                append("  $key: ${defaultValue(schema)}\n")
+            }
+        }
     }
 
     private fun declarationActionForUnknownProperty(
@@ -1618,6 +1681,13 @@ internal class GraphMdWorkspaceIndex(
             ReferenceTargetKind.Timeline -> definitionsOf(kind).map { it.id }
         }.distinct().sorted()
     }
+
+    private fun unambiguousDefinitionIds(kind: ReferenceTargetKind): List<String> =
+        definitionsOf(kind)
+            .groupBy { it.id }
+            .filterValues { definitions -> definitions.size == 1 }
+            .keys
+            .sorted()
 
     private fun resolve(kind: ReferenceTargetKind, id: String): List<IndexedDefinition> {
         return definitionsCompatibleWith(kind).filter { it.id == id }

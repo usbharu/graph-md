@@ -61,6 +61,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class GraphMdLanguageServerTest {
@@ -453,6 +454,119 @@ class GraphMdLanguageServerTest {
         val replacement = actions.first { it.title == "Change NodeType to 'Person'" }
         assertEquals("Person", replacement.edit.changes.getValue("file:///workspace/alice.md").single().newText)
         assertTrue(replacement.isPreferred)
+    }
+
+    @Test
+    fun `node creation quick fix delegates NodeType selection to VS Code`() {
+        val nodeUri = "file:///workspace/alice.md"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/Person.md" to """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    props:
+                      name:
+                        type: string
+                        required: true
+                      age:
+                        type: number
+                        required: true
+                      nickname:
+                        type: string
+                    ---
+                """.trimIndent(),
+                "file:///workspace/types/Company.md" to "---\nid: Company\nkind: NodeType\n---",
+                nodeUri to "---\nid: alice\nkind: Node\ntype: Person\n---\n@link[Bob](missing knows)",
+            ),
+        )
+
+        val action = fixture.actions(nodeUri, "Unknown Node target: missing")
+            .single { it.title == "Create Node 'missing'" }
+
+        assertNull(action.edit)
+        val command = assertNotNull(action.command)
+        assertEquals("graphmd.createDefinition", command.command)
+        val payload = command.arguments.single() as Map<*, *>
+        assertEquals("Node", payload["kind"])
+        assertEquals("missing", payload["id"])
+        assertTrue((payload["uri"] as String).endsWith("/missing.md"))
+
+        val choices = payload["choices"] as List<*>
+        assertEquals(listOf("Company", "Person"), choices.map { (it as Map<*, *>)["label"] })
+        assertTrue(choices.all { (it as Map<*, *>)["content"].toString().contains("kind: Node") })
+        assertTrue(
+            choices.any {
+                (it as Map<*, *>)["content"] == """
+                    ---
+                    id: missing
+                    kind: Node
+                    type: Person
+                    props:
+                      name: ""
+                      age: 0
+                    ---
+                """.trimIndent() + "\n"
+            },
+        )
+    }
+
+    @Test
+    fun `node creation quick fix is unavailable without an existing NodeType`() {
+        val nodeUri = "file:///workspace/alice.md"
+        val fixture = serverFixture(
+            mapOf(nodeUri to "---\nid: alice\nkind: Node\ntype: Person\n---\n@link[Bob](missing knows)"),
+        )
+
+        assertTrue(fixture.actions(nodeUri, "Unknown Node target: missing").none { it.title == "Create Node 'missing'" })
+    }
+
+    @Test
+    fun `node creation quick fix excludes ambiguous NodeTypes`() {
+        val nodeUri = "file:///workspace/alice.md"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/person-a.md" to "---\nid: Person\nkind: NodeType\n---",
+                "file:///workspace/types/person-b.md" to "---\nid: Person\nkind: NodeType\n---",
+                "file:///workspace/types/Company.md" to "---\nid: Company\nkind: NodeType\n---",
+                nodeUri to "---\nid: alice\nkind: Node\ntype: Company\n---\n@link[Bob](missing knows)",
+            ),
+        )
+
+        val action = fixture.actions(nodeUri, "Unknown Node target: missing")
+            .single { it.title == "Create Node 'missing'" }
+        val payload = action.command!!.arguments.single() as Map<*, *>
+        val choices = payload["choices"] as List<*>
+
+        assertEquals(listOf("Company"), choices.map { (it as Map<*, *>)["label"] })
+    }
+
+    @Test
+    fun `type definition quick fixes keep their diagnostic kind`() {
+        val nodeUri = "file:///workspace/alice.md"
+        val fixture = serverFixture(
+            mapOf(
+                "file:///workspace/types/Person.md" to "---\nid: Person\nkind: NodeType\n---",
+                nodeUri to """
+                    ---
+                    id: alice
+                    kind: Node
+                    type: Person
+                    validTime:
+                      - timeline: MissingEra
+                    ---
+                    @link[Bob](missing missingRel)
+                """.trimIndent(),
+            ),
+        )
+
+        val relTypeAction = fixture.actions(nodeUri, "Unknown RelType: missingRel")
+            .single { it.title == "Create RelType 'missingRel'" }
+        val timelineAction = fixture.actions(nodeUri, "Unknown Timeline: MissingEra")
+            .single { it.title == "Create Timeline 'MissingEra'" }
+
+        assertTrue(assertNotNull(relTypeAction.edit).documentChanges[1].left.edits.single().newText.contains("kind: RelType"))
+        assertTrue(assertNotNull(timelineAction.edit).documentChanges[1].left.edits.single().newText.contains("kind: Timeline"))
     }
 
     @Test
