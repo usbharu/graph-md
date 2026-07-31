@@ -51,9 +51,9 @@ describe("relation link", () => {
     expect(dataProps(html)).toBe('{"note":{"default":"close","ja":"親密"}}');
   });
 
-  it("supports double-quoted relType with spaces", () => {
+  it("rejects double-quoted relType values with spaces", () => {
     const html = render('@link{}[Bob](bob "best friend")');
-    expect(html).toContain('data-link-rel="best friend"');
+    expect(html).not.toContain("data-link-rel=");
   });
 
   it("unescapes and html-escapes the label", () => {
@@ -84,6 +84,24 @@ describe("relation link", () => {
   it("applies hrefTransform", () => {
     const html = render("@link{}[Bob](bob friendOf)", { hrefTransform: (t) => `${t}.html` });
     expect(html).toContain('href="bob.html"');
+  });
+
+  it.each(["missing", "duplicate"])("omits href when %s is unresolved by a transform", (target) => {
+    const html = render(
+      `@link(validTime=CommonEra){note="<unsafe>"}[A & B](${target} friendOf)`,
+      { hrefTransform: () => null },
+    );
+
+    expect(html).toContain('<a data-link-rel="friendOf"');
+    expect(html).not.toContain("href=");
+    expect(html).toContain('data-link-valid-time="CommonEra"');
+    expect(dataProps(html)).toBe('{"note":"<unsafe>"}');
+    expect(html).toContain("A &amp; B</a>");
+  });
+
+  it("keeps the raw target href when no transform is configured", () => {
+    const html = render("@link{}[Bob](missing friendOf)");
+    expect(html).toContain('<a href="missing" data-link-rel="friendOf">Bob</a>');
   });
 
   it("passes the render environment to hrefTransform", () => {

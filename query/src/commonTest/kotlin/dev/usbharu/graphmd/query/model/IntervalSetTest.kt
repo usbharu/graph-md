@@ -73,6 +73,33 @@ class IntervalSetTest {
         assertEquals(onA, onB)
     }
 
+    @Test
+    fun `timeline catalog skips unknown source validTime timelines`() {
+        val catalog = TimelineCatalog.from(
+            listOf(
+                NormalizedTimeline(
+                    id = "A",
+                    timecode = null,
+                    mappings = emptyList(),
+                    props = emptyMap(),
+                    ancestorIds = emptySet(),
+                    source = SourceInfo("a.md"),
+                ),
+            ),
+        )
+
+        val result = catalog.fromValidTimes(
+            listOf(
+                ValidTime("Missing"),
+                ValidTime("A", TimePoint(40.0), TimePoint(30.0)),
+                ValidTime("A", TimePoint(20.0), TimePoint(30.0)),
+            ),
+        )
+
+        assertEquals(1, result.intervals.size)
+        assertEquals(TimelineId("A"), result.intervals.single().timelineId)
+    }
+
     private fun interval(start: Double, end: Double): TemporalInterval =
         TemporalInterval(
             timeline,
