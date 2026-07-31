@@ -30,7 +30,10 @@ import org.eclipse.lsp4j.InsertTextFormat
 import org.eclipse.lsp4j.MessageActionItem
 import org.eclipse.lsp4j.MessageParams
 import org.eclipse.lsp4j.PublishDiagnosticsParams
+import org.eclipse.lsp4j.ReferenceContext
+import org.eclipse.lsp4j.ReferenceParams
 import org.eclipse.lsp4j.Range
+import org.eclipse.lsp4j.RenameParams
 import org.eclipse.lsp4j.Position
 import org.eclipse.lsp4j.RenameOptions
 import org.eclipse.lsp4j.ShowMessageRequestParams
@@ -836,6 +839,51 @@ class GraphMdLanguageServerTest {
         assertTrue(analysis.references.any { it.kind == ReferenceTargetKind.Node && it.targetId == "bob" })
         assertTrue(analysis.references.any { it.kind == ReferenceTargetKind.RelType && it.targetId == "friendOf" })
         assertEquals(2, analysis.references.count { it.kind == ReferenceTargetKind.Timeline && it.targetId == "CommonEra" })
+    }
+
+    @Test
+    fun `nested front matter id and type do not participate in navigation rename or diagnostics`() {
+        val typeUri = "file:///workspace/types/Person.md"
+        val nodeUri = "file:///workspace/alice.md"
+        val typeText = "---\nid: Person\nkind: NodeType\n---"
+        val nodeText = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            props:
+              metadata:
+                id: alice
+                type: MissingNestedType
+              values:
+                - id: nested-list
+                  type: Person
+            ---
+        """.trimIndent()
+        val fixture = serverFixture(mapOf(typeUri to typeText, nodeUri to nodeText))
+
+        assertTrue(fixture.definitions(nodeUri, nodeText.indexOf("MissingNestedType") + 1).isEmpty())
+        assertTrue(fixture.definitions(nodeUri, nodeText.indexOf("id: alice", nodeText.indexOf("props:")) + 4).isEmpty())
+        assertEquals(
+            typeUri,
+            fixture.definitions(nodeUri, nodeText.indexOf("type: Person") + "type: ".length + 1).single().uri,
+        )
+        assertTrue(
+            fixture.diagnostics.getValue(nodeUri).none { it.message == "Unknown NodeType: MissingNestedType" },
+        )
+
+        val definitionPosition = Position(1, 5)
+        val references = fixture.server.textDocumentService.references(
+            ReferenceParams(TextDocumentIdentifier(typeUri), definitionPosition, ReferenceContext(true)),
+        ).get()
+        assertEquals(2, references.size)
+
+        val rename = fixture.server.textDocumentService.rename(
+            RenameParams(TextDocumentIdentifier(typeUri), definitionPosition, "Human"),
+        ).get()
+        assertNotNull(rename)
+        assertEquals(2, rename.changes.orEmpty().values.sumOf { it.size })
+        assertEquals(1, rename.changes.orEmpty().getValue(nodeUri).size)
     }
 
     @Test

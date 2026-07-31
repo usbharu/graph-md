@@ -442,7 +442,7 @@ private class MiniYamlParser(
     private val sourcePath: String,
     private val diagnostics: MutableList<Diagnostic>,
 ) {
-    private val lines = text.split('\n').map { it.trimEnd() }
+    private val lines = text.split('\n').map { stripYamlComment(it).trimEnd() }
     private var index = 0
 
     fun parse(): YamlValue? {
@@ -568,13 +568,18 @@ private class MiniYamlParser(
         if (value.startsWith("[") && value.endsWith("]")) {
             val inner = value.substring(1, value.lastIndex)
             if (inner.isBlank()) return YamlList(emptyList())
-            return YamlList(splitYamlInlineList(inner).map { parseInlineValue(it.raw) })
+            return YamlList(
+                splitYamlFlowItems(inner)
+                    .map { it.raw.trim() }
+                    .filter { it.isNotEmpty() }
+                    .map(::parseInlineValue),
+            )
         }
         if (value.startsWith("\"") && value.endsWith("\"") && value.length >= 2) {
-            return YamlString(decodeDoubleQuotedYamlScalar(value.substring(1, value.length - 1)))
+            return YamlString(decodeYamlScalar(value))
         }
         if (value.startsWith("'") && value.endsWith("'") && value.length >= 2) {
-            return YamlString(value.substring(1, value.length - 1).replace("''", "'"))
+            return YamlString(decodeYamlScalar(value))
         }
         return when {
             value == "null" -> YamlNull
@@ -587,16 +592,16 @@ private class MiniYamlParser(
     }
 
     private fun splitKeyValue(content: String): Pair<String, String?>? {
-        val colonIndex = content.indexOf(':')
+        val colonIndex = findYamlMappingColon(content)
         if (colonIndex <= 0) return null
-        val key = content.substring(0, colonIndex).trim()
+        val key = decodeYamlScalar(content.substring(0, colonIndex))
         if (key.isEmpty()) return null
         val rest = content.substring(colonIndex + 1)
         return key to rest.takeIf { it.isNotBlank() }?.trim()
     }
 
     private fun looksLikeInlineMapEntry(content: String): Boolean {
-        val colonIndex = content.indexOf(':')
+        val colonIndex = findYamlMappingColon(content)
         if (colonIndex <= 0) return false
         val next = content.getOrNull(colonIndex + 1) ?: return true
         return next == ' ' || next == '\t'
