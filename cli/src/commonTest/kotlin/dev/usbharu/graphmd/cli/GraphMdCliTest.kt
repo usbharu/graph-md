@@ -802,6 +802,43 @@ class GraphMdCliTest {
     }
 
     @Test
+    fun `source valid time with reversed bounds does not crash temporal property filtering`() {
+        val fs = FakeFileSystem(
+            files = mapOf(
+                "/workspace/TimelineA.md" to timeline("TimelineA"),
+                "/workspace/Person.md" to """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    props:
+                      age:
+                        type: number
+                    ---
+                """.trimIndent(),
+                "/workspace/alice.md" to """
+                    ---
+                    id: alice
+                    kind: Node
+                    type: Person
+                    validTime:
+                      - timeline: TimelineA
+                    ---
+                    @props{age(validTime=TimelineA(from=20,to=10))=16,age=17}
+                """.trimIndent(),
+            ),
+        )
+
+        val result = GraphMdCli(fs).run(
+            listOf("props", "alice", "/workspace", "--valid-time", "TimelineA", "--json"),
+        )
+
+        assertEquals(0, result.exitCode, result.stderr)
+        assertFalse(result.stdout.contains("\"value\":16.0"))
+        assertTrue(result.stdout.contains("\"value\":17.0"))
+        assertFalse(result.stderr.contains("An interval must not be empty"))
+    }
+
+    @Test
     fun `lint with valid time only reports visible documents`() {
         val fs = FakeFileSystem(
             files = mapOf(

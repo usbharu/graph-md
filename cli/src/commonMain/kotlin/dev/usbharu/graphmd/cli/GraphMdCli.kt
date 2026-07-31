@@ -562,10 +562,13 @@ private class TemporalView(
             ) {
                 return@mapNotNull null
             }
+            val from = validTime.from?.timecode
+            val to = validTime.to?.timecode
+            if (from != null && to != null && from > to) return@mapNotNull null
             TemporalInterval(
                 timelineId = requestedTimelineId,
-                start = validTime.from?.timecode?.let { IntervalBoundary(it, inclusive = true) },
-                end = validTime.to?.timecode?.let { IntervalBoundary(it, inclusive = true) },
+                start = from?.let { IntervalBoundary(it, inclusive = true) },
+                end = to?.let { IntervalBoundary(it, inclusive = true) },
             )
         },
     )
