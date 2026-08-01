@@ -205,10 +205,8 @@ class InlinePropsParser(private val input: String) {
                 skipHorizontalAndNewlines()
                 val rawPoint = parseValue()
                 val point = when (rawPoint) {
-                    is RawInteger -> RawObject(mapOf("timecode" to rawPoint))
-                    is RawNumber -> RawObject(mapOf("timecode" to rawPoint))
-                    is RawObject -> rawPoint
-                    else -> fail("validTime bound must be numeric or a timePoint object")
+                    is RawInteger, is RawNumber, is RawString, is RawObject -> rawPoint
+                    else -> fail("validTime bound must be a temporal coordinate")
                 }
                 values[bound] = point
                 skipHorizontalAndNewlines()

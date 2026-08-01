@@ -135,5 +135,11 @@ private fun IntervalSet.toWireValue(): Any = if (isUniversal) {
 }
 
 private fun IntervalBoundary?.toWireValue(): Any? = this?.let {
-    mapOf("value" to value, "inclusive" to inclusive)
+    mapOf(
+        "value" to mapOf(
+            "numerator" to exactValue.numerator,
+            "denominator" to exactValue.denominator,
+        ),
+        "inclusive" to inclusive,
+    )
 }

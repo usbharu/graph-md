@@ -839,39 +839,34 @@ internal class GmqlExecutor(
             return filtered.takeUnless { it.isEmpty }?.let { binding.copy(validity = it, matchedValidity = it) }
         }
         val timeline = TimelineId(checkNotNull(valid.timeline))
-        val assertedTimeline = graph.timelineCatalog.assertionScopeId(timeline)
-        val scopedValidity = if (binding.validity.isUniversal) {
-            IntervalSet.empty()
-        } else {
-            IntervalSet.of(binding.validity.intervals.filter { it.timelineId == assertedTimeline })
-        }
-        if (scopedValidity.isEmpty) return null
         val window = when (valid.operator) {
             GmqlValidOperator.AT -> {
                 val expression = checkNotNull(valid.instant)
-                val instant = finiteTemporalBoundary(evaluate(expression, binding, parameters), expression.range)
-                IntervalSet.of(graph.timelineCatalog.assertedInterval(
-                    timeline, IntervalBoundary(instant, true), IntervalBoundary(instant, true),
-                ))
+                val instant = temporalBoundary(
+                    timeline,
+                    evaluate(expression, binding, parameters),
+                    expression.range,
+                )
+                graph.timelineCatalog.searchIntervals(timeline, instant to true, instant to true)
             }
             else -> {
                 val interval = checkNotNull(valid.interval)
                 val start = interval.start?.let {
-                    IntervalBoundary(
-                        finiteTemporalBoundary(evaluate(it, binding, parameters), it.range),
-                        interval.includeStart,
-                    )
+                    temporalBoundary(timeline, evaluate(it, binding, parameters), it.range) to interval.includeStart
                 }
                 val end = interval.end?.let {
-                    IntervalBoundary(
-                        finiteTemporalBoundary(evaluate(it, binding, parameters), it.range),
-                        interval.includeEnd,
-                    )
+                    temporalBoundary(timeline, evaluate(it, binding, parameters), it.range) to interval.includeEnd
                 }
-                if (start != null && end != null && TemporalInterval.isEmpty(start, end)) return null
-                IntervalSet.of(graph.timelineCatalog.assertedInterval(timeline, start, end))
+                graph.timelineCatalog.searchIntervals(timeline, start, end)
             }
         }
+        val windowAxes = window.intervals.mapTo(hashSetOf()) { it.timelineId }
+        val scopedValidity = if (binding.validity.isUniversal) {
+            IntervalSet.empty()
+        } else {
+            IntervalSet.of(binding.validity.intervals.filter { it.timelineId in windowAxes })
+        }
+        if (scopedValidity.isEmpty) return null
         val matched = scopedValidity intersect window
         val accepts = when (valid.operator) {
             GmqlValidOperator.AT, GmqlValidOperator.OVERLAPS -> !matched.isEmpty
@@ -882,19 +877,28 @@ internal class GmqlExecutor(
         return if (accepts) binding.copy(validity = scopedValidity, matchedValidity = matched) else null
     }
 
-    private fun finiteTemporalBoundary(evaluated: Eval, range: GmqlSourceRange): Double {
-        val value = decimalValue(evaluated.value)
-        if (!value.isFinite()) {
+    private fun temporalBoundary(
+        timeline: TimelineId,
+        evaluated: Eval,
+        range: GmqlSourceRange,
+    ): TemporalCoordinate {
+        return try {
+            when (val value = evaluated.value) {
+                is GmqlValue.IntegerValue -> TemporalCoordinate.Rational(ExactRational.of(value.value))
+                is GmqlValue.DecimalValue -> TemporalCoordinate.Rational(ExactRational.fromDouble(value.value))
+                is GmqlValue.StringValue -> graph.timelineCatalog.parseCoordinate(timeline, value.value)
+                else -> throw IllegalArgumentException("unsupported value type")
+            }
+        } catch (_: IllegalArgumentException) {
             throw GmqlEvaluationException(
                 diagnostic(
                     "GMQL4003",
-                    "Temporal boundary must evaluate to a finite Decimal.",
+                    "Temporal boundary is not valid for Timeline '${timeline.value}'.",
                     range,
                     GmqlDiagnosticKind.TEMPORAL,
                 ),
             )
         }
-        return value
     }
 
     private fun tick() {
@@ -1086,10 +1090,30 @@ private fun NormalizedValue.toGmqlValue(): GmqlValue = when (this) {
     is ObjectValue -> GmqlValue.CollectionValue(values.entries.map {
         GmqlValue.CollectionValue(listOf(GmqlValue.StringValue(it.key), it.value.toGmqlValue()))
     })
-    is InstantValue -> GmqlValue.DecimalValue((timecode as NumberTimecode).value)
+    is InstantValue -> coordinate.toGmqlValue()
     is DurationValue -> GmqlValue.CollectionValue(
-        listOfNotNull(from?.let { GmqlValue.DecimalValue(it.timecode) }, to?.let { GmqlValue.DecimalValue(it.timecode) }),
+        listOfNotNull(from?.coordinate?.toGmqlValue(), to?.coordinate?.toGmqlValue()),
     )
+}
+
+private fun TemporalCoordinate.toGmqlValue(): GmqlValue = when (this) {
+    is TemporalCoordinate.Rational -> if (value.denominator == 1L) {
+        GmqlValue.IntegerValue(value.numerator)
+    } else {
+        GmqlValue.DecimalValue(value.toDouble())
+    }
+    is TemporalCoordinate.CalendarDate -> GmqlValue.StringValue(
+        "$year-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}",
+    )
+    is TemporalCoordinate.EraDate -> GmqlValue.StringValue(
+        "$era $year-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}",
+    )
+    is TemporalCoordinate.FrameIndex -> GmqlValue.IntegerValue(value)
+    is TemporalCoordinate.Timecode -> GmqlValue.StringValue(
+        "${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:" +
+            "${seconds.toString().padStart(2, '0')}:${frames.toString().padStart(2, '0')}",
+    )
+    is TemporalCoordinate.Label -> GmqlValue.StringValue(value)
 }
 
 private fun List<GmqlValue.TemporalEntry>.unionTime(): IntervalSet =

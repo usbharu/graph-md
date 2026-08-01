@@ -63,7 +63,7 @@ internal data class DemoPlan(
 
     private fun timelineDocument(index: Int, random: Random): DemoDocument {
         val id = timelineId(index)
-        val parents = randomParentIndices(index, random).map(::timelineId)
+        val parent = randomParentIndices(index, random).firstOrNull()?.let(::timelineId)
         val language = if (index % 2 == 0) {
             "この時系列は出来事を整理するための基準です。"
         } else {
@@ -76,9 +76,7 @@ internal data class DemoPlan(
                 appendLine("---")
                 appendLine("id: $id")
                 appendLine("kind: Timeline")
-                appendYamlList("extends", parents)
-                appendLine("timecode:")
-                appendLine("  type: number")
+                parent?.let { appendLine("sameAxisAs: $it") }
                 appendLine("---")
                 appendLine()
                 appendLine("# $id")
@@ -233,7 +231,8 @@ internal data class DemoPlan(
                 appendLine("    - ${if (index % 2 == 0) "記録" else "record"}")
                 appendLine("    - benchmark")
                 appendLine("  observedAt:")
-                appendLine("    timecode: $observedAt")
+                appendLine("    timeline: ${timelineId(0)}")
+                appendLine("    value: $observedAt")
                 if (typeIndex > 0) {
                     appendLine(
                         "  detail_$typeIndex: \"" +
@@ -243,10 +242,8 @@ internal data class DemoPlan(
                 }
                 appendLine("validTime:")
                 appendLine("  - timeline: $documentTimeline")
-                appendLine("    from:")
-                appendLine("      timecode: $documentFrom")
-                appendLine("    to:")
-                appendLine("      timecode: $documentTo")
+                appendLine("    from: $documentFrom")
+                appendLine("    to: $documentTo")
                 appendLine("---")
                 appendLine()
                 appendLine("# $title")

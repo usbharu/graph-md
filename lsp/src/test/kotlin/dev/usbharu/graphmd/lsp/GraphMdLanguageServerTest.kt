@@ -847,7 +847,7 @@ class GraphMdLanguageServerTest {
                 "file:///workspace/types/Company.md" to "---\nid: Company\nkind: NodeType\n---",
                 "file:///workspace/types/knows.md" to "---\nid: knows\nkind: RelType\nfrom: [Person]\nto: [Person]\n---",
                 "file:///workspace/types/worksAt.md" to "---\nid: worksAt\nkind: RelType\nfrom: [Person]\nto: [Company]\n---",
-                "file:///workspace/timelines/CommonEra.md" to "---\nid: CommonEra\nkind: Timeline\ntimecode:\n  type: number\n---",
+                "file:///workspace/timelines/CommonEra.md" to "---\nid: CommonEra\nkind: Timeline\n---",
                 "file:///workspace/acme.md" to "---\nid: acme\nkind: Node\ntype: Company\n---",
                 nodeUri to """
                     ---
@@ -890,16 +890,12 @@ class GraphMdLanguageServerTest {
                         type: duration
                     ---
                 """.trimIndent(),
-                "file:///workspace/timelines/CommonEra.md" to "---\nid: CommonEra\nkind: Timeline\ntimecode:\n  type: number\n---",
+                "file:///workspace/timelines/CommonEra.md" to "---\nid: CommonEra\nkind: Timeline\n---",
                 "file:///workspace/timelines/Broken.md" to """
                     ---
                     id: Broken
                     kind: Timeline
-                    mappings:
-                      - kind: offset
-                        from: CommonEra
-                        to: CommonEra
-                        offset: nope
+                    mapsTo: MissingTimeline
                     ---
                 """.trimIndent(),
                 "file:///workspace/alice.md" to """
@@ -910,10 +906,8 @@ class GraphMdLanguageServerTest {
                     strange: true
                     validTime:
                       - timeline: CommonEra
-                        from:
-                          timecode: 5
-                        to:
-                          timecode: 1
+                        from: 5
+                        to: 1
                     props:
                       count: nope
                       period: {}
@@ -1228,7 +1222,7 @@ class GraphMdLanguageServerTest {
             kind: Node
             type: Person
             ---
-            @props{born={timeline=MissingEra,timecode=1},note="validTime=today timeline=Fake"}
+            @props{born={timeline=MissingEra,value=1},note="validTime=today timeline=Fake"}
         """.trimIndent()
         val quotedText = """
             ---
@@ -1236,7 +1230,7 @@ class GraphMdLanguageServerTest {
             kind: Node
             type: Person
             ---
-            😀 @props{born={timeline="CommonEra",timecode=1}}
+            😀 @props{born={timeline="CommonEra",value=1}}
         """.trimIndent()
         val fixture = serverFixture(
             mapOf(
@@ -1252,7 +1246,7 @@ class GraphMdLanguageServerTest {
                         type: string
                     ---
                 """.trimIndent(),
-                timelineUri to "---\nid: CommonEra\nkind: Timeline\ntimecode:\n  type: number\n---",
+                timelineUri to "---\nid: CommonEra\nkind: Timeline\n---",
                 missingUri to missingText,
                 quotedUri to quotedText,
             ),
@@ -1270,9 +1264,40 @@ class GraphMdLanguageServerTest {
         assertEquals("ModernEra", rename.changes.getValue(quotedUri).single().newText)
         assertEquals(Range(Position(5, 26), Position(5, 35)), rename.changes.getValue(quotedUri).single().range)
 
-        val unknown = fixture.diagnostics.getValue(missingUri).single { it.message == "Unknown Timeline: MissingEra" }
+        val unknown = fixture.diagnostics.getValue(missingUri)
+            .singleOrNull { it.message == "Unknown Timeline: MissingEra" }
+            ?: error(fixture.diagnostics.getValue(missingUri).joinToString { it.message })
         assertEquals(Range(Position(5, 22), Position(5, 32)), unknown.range)
         assertTrue(fixture.diagnostics.getValue(missingUri).none { "today" in it.message || "Fake" in it.message })
+    }
+
+    @Test
+    fun `new Timeline relationships support navigation rename and inferred hover`() {
+        val baseUri = "file:///workspace/timelines/Base.md"
+        val aliasUri = "file:///workspace/timelines/Alias.md"
+        val forkUri = "file:///workspace/timelines/Fork.md"
+        val recordingUri = "file:///workspace/timelines/Recording.md"
+        val baseText = "---\nid: Base\nkind: Timeline\n---"
+        val aliasText = "---\nid: Alias\nkind: Timeline\nsameAxisAs: Base\n---"
+        val forkText = "---\nid: Fork\nkind: Timeline\nderivedFrom:\n  timeline: Base\n  kind: fork\n---"
+        val recordingText = "---\nid: Recording\nkind: Timeline\nmapsTo:\n  timeline: Base\n  kind: alignment\n---"
+        val fixture = serverFixture(
+            mapOf(
+                baseUri to baseText,
+                aliasUri to aliasText,
+                forkUri to forkText,
+                recordingUri to recordingText,
+            ),
+        )
+
+        assertEquals(baseUri, fixture.definitions(aliasUri, aliasText.lastIndexOf("Base") + 1).single().uri)
+        assertEquals(baseUri, fixture.definitions(forkUri, forkText.indexOf("Base") + 1).single().uri)
+        assertEquals(baseUri, fixture.definitions(recordingUri, recordingText.indexOf("Base") + 1).single().uri)
+        val rename = assertNotNull(fixture.rename(baseUri, baseText.indexOf("Base") + 1, "Origin"))
+        assertEquals(setOf(baseUri, aliasUri, forkUri, recordingUri), rename.changes.keys)
+        val hover = fixture.hover(recordingUri, recordingText.indexOf("Recording") + 1)
+        assertTrue("- Domain: `domain:Recording`" in hover, hover)
+        assertTrue("- Mapping to `Base`:" in hover, hover)
     }
 
     @Test
@@ -2448,7 +2473,7 @@ class GraphMdLanguageServerTest {
         assertTrue(items.any { it.label == "birthDate" }, items.joinToString())
         assertEquals("name = \"\${1:value}\"", items.single { it.label == "name" }.insertText)
         assertEquals(
-            "birthDate = { timeline = \${1:CommonEra}, timecode = \${2:0} }",
+            "birthDate = { timeline = \${1:CommonEra}, value = \${2:0} }",
             items.single { it.label == "birthDate" }.insertText,
         )
         assertEquals(InsertTextFormat.Snippet, items.single { it.label == "birthDate" }.insertTextFormat)
@@ -2582,7 +2607,7 @@ class GraphMdLanguageServerTest {
         assertEquals("description: \"\${1:text}\"", items.getValue("description").insertText)
         assertEquals("score: 0", items.getValue("score").insertText)
         assertEquals(
-            "happenedAt: { timeline: \${1:CommonEra}, timecode: \${2:0} }",
+            "happenedAt: { timeline: \${1:CommonEra}, value: \${2:0} }",
             items.getValue("happenedAt").insertText,
         )
         assertEquals(
@@ -2847,7 +2872,11 @@ class GraphMdLanguageServerTest {
         }
         assertEquals(Range(Position(12, 8), Position(12, 23)), ambiguous.range)
         assertTrue(fixture.actions(schemaUri, ambiguous).isEmpty())
-        assertTrue(diagnostics.none { it.code?.left == "SchemaError" }, diagnostics.joinToString())
+        assertEquals(
+            2,
+            diagnostics.count { it.code?.left == "SchemaError" && "mapped selectors were removed" in it.message },
+            diagnostics.joinToString(),
+        )
     }
 
     @Test
@@ -2898,14 +2927,11 @@ class GraphMdLanguageServerTest {
             it.message == "Ambiguous Timeline reference: _Leading"
         }
         assertEquals(Range(Position(12, 12), Position(12, 20)), leading.range)
-        assertTrue(
-            diagnostics.none {
-                it.code?.left == "ReferenceError" &&
-                    (it.message.contains("MissingMapped") || it.message.contains("InvalidLegacy"))
-            },
+        assertEquals(
+            4,
+            diagnostics.count { it.code?.left == "SchemaError" && "mapped selectors were removed" in it.message },
             diagnostics.joinToString(),
         )
-        assertEquals(2, diagnostics.count { it.code?.left == "SchemaError" && "selector MUST" in it.message })
     }
 
     @Test
@@ -2962,14 +2988,11 @@ class GraphMdLanguageServerTest {
         }
         assertEquals(Range(Position(12, 6), Position(12, 24)), ambiguous.range)
         assertTrue(fixture.actions(schemaUri, ambiguous).isEmpty())
-        assertTrue(
-            diagnostics.none {
-                it.code?.left == "ReferenceError" &&
-                    (it.message.contains("DeepWrong") || it.message.contains("DeepLegacy"))
-            },
+        assertEquals(
+            4,
+            diagnostics.count { it.code?.left == "SchemaError" && "mapped selectors were removed" in it.message },
             diagnostics.joinToString(),
         )
-        assertEquals(2, diagnostics.count { it.code?.left == "SchemaError" && "selector MUST" in it.message })
     }
 
     @Test
@@ -3635,35 +3658,35 @@ class GraphMdLanguageServerTest {
             ---
             id: t
             kind: Timeline
-            tim
+            coo
             ---
         """.trimIndent()
         val topLevelItems = FrontMatterCompletionResolver(
             text = topLevelText,
-            offset = topLevelText.indexOf("tim") + 3,
+            offset = topLevelText.indexOf("coo") + 3,
             parsedDocument = null,
             nodeTypeIds = emptyList(),
             relTypeIds = emptyList(),
             timelineIds = listOf("CommonEra"),
         ).resolve()?.map { it.label }.orEmpty()
-        assertTrue("timecode" in topLevelItems)
+        assertTrue("coordinate" in topLevelItems)
 
         val timecodeTopLevelText = """
             ---
             id: t
             kind: Timeline
-            tim
+            maps
             ---
         """.trimIndent()
         val timecodeTopLevelItems = FrontMatterCompletionResolver(
             text = timecodeTopLevelText,
-            offset = timecodeTopLevelText.indexOf("tim") + 3,
+            offset = timecodeTopLevelText.indexOf("maps") + 4,
             parsedDocument = null,
             nodeTypeIds = emptyList(),
             relTypeIds = emptyList(),
             timelineIds = listOf("CommonEra"),
         ).resolve()?.map { it.label }.orEmpty()
-        assertTrue("timecode" in timecodeTopLevelItems)
+        assertTrue("mapsTo" in timecodeTopLevelItems)
 
         val timelineBlankTopLevelText = """
             ---
@@ -3686,8 +3709,7 @@ class GraphMdLanguageServerTest {
             ---
             id: t
             kind: Timeline
-            timecode:
-              type: nu
+            coordinate: nu
             ---
         """.trimIndent()
         val timecodeNestedItems = FrontMatterCompletionResolver(
@@ -3723,8 +3745,8 @@ class GraphMdLanguageServerTest {
             ---
             id: t
             kind: Timeline
-            mappings:
-              - kind: offset
+            mapsTo:
+              - kind: alignment
                 off
             ---
         """.trimIndent()
@@ -3739,6 +3761,26 @@ class GraphMdLanguageServerTest {
         assertTrue("offset" in mappingKeyItems)
         assertTrue("unit" !in mappingKeyItems)
         assertTrue("entries" !in mappingKeyItems)
+
+        val precisionText = """
+            ---
+            id: t
+            kind: Timeline
+            mapsTo:
+              - timeline: CommonEra
+                precision:
+                  kind: ap
+            ---
+        """.trimIndent()
+        val precisionItems = FrontMatterCompletionResolver(
+            text = precisionText,
+            offset = precisionText.lastIndexOf("ap") + 2,
+            parsedDocument = null,
+            nodeTypeIds = emptyList(),
+            relTypeIds = emptyList(),
+            timelineIds = listOf("CommonEra"),
+        ).resolve()?.map { it.label }.orEmpty()
+        assertTrue("approximate" in precisionItems)
 
         val propKeyText = """
             ---
@@ -4317,7 +4359,8 @@ class GraphMdLanguageServerTest {
         }
 
         fun actions(uri: String, message: String): List<CodeAction> {
-            val diagnostic = diagnostics.getValue(uri).first { it.message == message }
+            val diagnostic = diagnostics.getValue(uri).firstOrNull { it.message == message }
+                ?: error("Missing diagnostic '$message'; found: ${diagnostics.getValue(uri).joinToString { it.message }}")
             return actions(uri, diagnostic)
         }
 

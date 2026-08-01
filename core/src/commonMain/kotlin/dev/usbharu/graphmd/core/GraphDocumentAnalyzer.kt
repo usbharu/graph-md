@@ -191,6 +191,8 @@ class GraphDocumentAnalyzer {
             if (offset >= valueStart) {
                 return when (field) {
                     "type" -> ReferenceTargetKind.NodeType
+                    "sameAxisAs", "derivedFrom", "mapsTo" ->
+                        if (kind == DocumentKind.Timeline) ReferenceTargetKind.Timeline else null
                     "extends" -> when (kind) {
                         DocumentKind.RelType -> ReferenceTargetKind.RelType
                         DocumentKind.Timeline -> ReferenceTargetKind.Timeline
@@ -558,6 +560,7 @@ class GraphDocumentAnalyzer {
             collectRootField("type", ReferenceTargetKind.NodeType)
         }
         collectRootField("extends", listFieldKind("extends", document))
+        if (document is TimelineDocument) collectRootField("sameAxisAs", ReferenceTargetKind.Timeline)
         collectRootField("from", listFieldKind("from", document))
         collectRootField("to", listFieldKind("to", document))
 
@@ -571,16 +574,17 @@ class GraphDocumentAnalyzer {
         if (document !is TimelineDocument) return
         structure.scalars
             .filter {
-                it.path.size == 2 &&
-                    it.path.firstOrNull() == "mappings" &&
-                    it.path.lastOrNull() in setOf("from", "to")
+                it.path == listOf("derivedFrom") ||
+                    it.path == listOf("derivedFrom", "timeline") ||
+                    it.path == listOf("mapsTo") ||
+                    it.path == listOf("mapsTo", "timeline")
             }
             .forEach { scalar ->
                 if (references.none { it.kind == ReferenceTargetKind.Timeline && it.range.start == scalar.range.start }) {
                     references += SymbolReference(
                         scalar.value,
                         ReferenceTargetKind.Timeline,
-                        scalar.path.last(),
+                        scalar.path.first(),
                         scalar.range,
                     )
                 }
@@ -783,7 +787,8 @@ class GraphDocumentAnalyzer {
                         )
                 }
                 document is TimelineDocument ->
-                    path.firstOrNull() == "mappings" && candidate.key in setOf("from", "to")
+                    candidate.key == "sameAxisAs" ||
+                        candidate.key == "timeline" && path.firstOrNull() in setOf("derivedFrom", "mapsTo")
                 document is NodeDocument && path.firstOrNull() == "props" -> {
                     candidate.key == "timeline" && (
                             path.size == 2 && !candidate.id.matches(Regex("[A-Za-z_][A-Za-z0-9_.:-]*")) ||
@@ -1465,6 +1470,8 @@ class GraphDocumentAnalyzer {
     private fun listFieldKind(field: String, document: GraphDocument?): ReferenceTargetKind? {
         return when (field) {
             "timeline" -> ReferenceTargetKind.Timeline
+            "sameAxisAs", "derivedFrom", "mapsTo" ->
+                if (document is TimelineDocument) ReferenceTargetKind.Timeline else null
             "from", "to" -> if (document is RelTypeDocument) ReferenceTargetKind.NodeType else null
             "extends" -> when (document) {
             is RelTypeDocument -> ReferenceTargetKind.RelType

@@ -75,8 +75,8 @@ data class IntervalIndex(
                         val entryStart = entry.start
                         queryEnd == null ||
                             entryStart == null ||
-                            entryStart.value < queryEnd.value ||
-                            entryStart.value == queryEnd.value && entryStart.inclusive && queryEnd.inclusive
+                            entryStart.exactValue < queryEnd.exactValue ||
+                            entryStart.exactValue == queryEnd.exactValue && entryStart.inclusive && queryEnd.inclusive
                     }
                     .forEach { add(it.assertionId) }
             }

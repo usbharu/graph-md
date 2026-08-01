@@ -65,7 +65,7 @@ class SearchIndexBuilder {
         val sortedIntervals = intervals.mapValues { (_, entries) ->
             entries.sortedWith(
                 compareBy<IntervalEntry> { it.start != null }
-                    .thenBy { it.start?.value }
+                    .thenBy { it.start?.exactValue }
                     .thenByDescending { it.start?.inclusive }
                     .thenBy { it.assertionId.value },
             )
@@ -127,7 +127,7 @@ fun normalizedValueKey(value: NormalizedValue): String = when (value) {
     is ObjectValue -> "o:{" + value.members.entries.sortedBy { it.key }.joinToString(",") {
         "${escapeKey(it.key)}=${normalizedValueKey(it.value.value)}"
     } + "}"
-    is InstantValue -> "i:${escapeKey(value.timeline.orEmpty())}:${escapeKey(value.value.orEmpty())}:${value.timecode}"
+    is InstantValue -> "i:${escapeKey(value.timeline.orEmpty())}:${escapeKey(value.value.orEmpty())}:${value.coordinate}"
     is DurationValue -> "d:${escapeKey(value.timeline.orEmpty())}:${value.from}:${value.to}"
 }
 

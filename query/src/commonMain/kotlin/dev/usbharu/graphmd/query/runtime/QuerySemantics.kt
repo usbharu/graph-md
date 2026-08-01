@@ -126,10 +126,8 @@ internal class QuerySemantics(
             }
             val invalid = when (window) {
                 is TemporalWindow.At -> false
-                is TemporalWindow.Range ->
-                    window.start != null && window.endExclusive != null && window.start >= window.endExclusive
-                is TemporalWindow.ClosedRange ->
-                    window.start != null && window.endInclusive != null && window.start > window.endInclusive
+                is TemporalWindow.Range -> false
+                is TemporalWindow.ClosedRange -> false
             }
             if (invalid) {
                 add(

@@ -520,18 +520,16 @@ class GraphDocumentAnalyzerTest {
             props:
               happenedAt:
                 type: instant
-                timeline:
-                  id: CommonEra
-                  mapped: true
+                timeline: CommonEra
             ---
         """.trimIndent()
         val timelineText = """
             ---
             id: ProjectEra
             kind: Timeline
-            mappings:
-              - kind: offset
-                from: CommonEra
+            mapsTo:
+              - timeline: CommonEra
+                kind: alignment
                 offset: 1000
             props:
               label:
@@ -551,25 +549,22 @@ class GraphDocumentAnalyzerTest {
     }
 
     @Test
-    fun `indexes only direct endpoints of each timeline mapping entry`() {
+    fun `indexes only direct target of each temporal mapping entry`() {
         val text = """
             ---
             id: ProjectEra
             kind: Timeline
-            timecode:
-              type: number
-            mappings:
-              - kind: offset
-                from: CommonEra
+            mapsTo:
+              - kind: alignment
+                timeline: CommonEra
                 offset: 1
-              - kind: offset
-                to: Branch
+              - kind: alignment
+                timeline: Branch
                 offset: 2
-              - kind: offset
-                to: Other
+              - kind: alignment
+                timeline: Other
                 nested:
-                  from: display-only
-                  to: also-display-only
+                  timeline: display-only
                 offset: 3
             ---
         """.trimIndent()
@@ -586,25 +581,23 @@ class GraphDocumentAnalyzerTest {
             ---
             id: ProjectEra
             kind: Timeline
-            timecode:
-              type: number
-            mappings:
+            mapsTo:
               - nested:
-                from: display-indent-2
+                timeline: display-indent-2
               - nested:
-                  from: display-indent-4
-                kind: offset
-                to: DirectAfter4
+                  timeline: display-indent-4
+                kind: alignment
+                timeline: DirectAfter4
                 offset: 1
               - nested:
-                    from: display-indent-6
-                kind: offset
-                to: DirectAfter6
+                    timeline: display-indent-6
+                kind: alignment
+                timeline: DirectAfter6
                 offset: 2
-              - from: DirectBefore
+              - timeline: DirectBefore
                 nested:
-                  from: display-after-direct
-                kind: offset
+                  timeline: display-after-direct
+                kind: alignment
                 offset: 3
             ---
         """.trimIndent()
@@ -621,29 +614,26 @@ class GraphDocumentAnalyzerTest {
             ---
             id: ProjectEra
             kind: Timeline
-            timecode:
-              type: number
-            mappings:
+            mapsTo:
               - nested:
                 - display-only
                 - inner:
-                    from: display-deep
+                    timeline: display-deep
 
                 # comment before returning to direct mapping fields
-                kind: offset
-                to: CommonEra
+                kind: alignment
+                timeline: CommonEra
                 offset: 1
-              - from: DirectBefore
+              - timeline: DirectBefore
                 nested:
                   - inner:
-                      to: display-after-direct
-                kind: offset
+                      timeline: display-after-direct
+                kind: alignment
                 offset: 2
               - nested:
-                from: same-indent-map
-                to: same-indent-map-too
-              - kind: offset
-                to: Branch
+                timeline: same-indent-map
+              - kind: alignment
+                timeline: Branch
                 offset: 3
             ---
         """.trimIndent()
@@ -965,19 +955,19 @@ class GraphDocumentAnalyzerTest {
     }
 
     @Test
-    fun `timeline id and extends are Timeline symbols`() {
+    fun `timeline id and sameAxisAs are Timeline symbols`() {
         val text = """
             ---
             id: CommonEra
             kind: Timeline
-            extends: Other
+            sameAxisAs: Other
             ---
         """.trimIndent()
 
         val analysis = analyzer.analyze(text, "/tmp/timeline.md")
         assertEquals(ReferenceTargetKind.Timeline, analysis.definitions.single().kind)
-        assertEquals(ReferenceTargetKind.Timeline, analysis.references.single { it.field == "extends" }.kind)
-        assertEquals("Other", analysis.references.single { it.field == "extends" }.targetId)
+        assertEquals(ReferenceTargetKind.Timeline, analysis.references.single { it.field == "sameAxisAs" }.kind)
+        assertEquals("Other", analysis.references.single { it.field == "sameAxisAs" }.targetId)
     }
 
     @Test
@@ -1346,9 +1336,9 @@ class GraphDocumentAnalyzerTest {
             ---
             id: T
             kind: Timeline
-            mappings:
-              - kind: offset
-                to: "Base" # mapping target
+            mapsTo:
+              - kind: alignment
+                timeline: "Base" # mapping target
                 offset: 1
             props:
               from: note
@@ -1395,51 +1385,19 @@ class GraphDocumentAnalyzerTest {
               at:
                 type: instant
                 timeline: "Schema"
-              singularCanonical:
-                type: instant
-                timeline:
-                  id: Singular
-                  mapped: true
-              singularLegacy:
-                type: instant
-                timeline:
-                  Legacy.Single:
-                    mapped: false
-              overlappingLegacy:
-                type: instant
-                timeline:
-                  Nested:
-                    id: Spurious
-                    mapped: true
-              overlappingLegacyList:
-                type: instant
-                timeline:
-                  - Listed:
-                      id: AlsoSpurious
-                      mapped: false
-              canonicalExtra:
-                type: instant
-                timeline:
-                  id: Canonical
-                  mapped: true
-                  extra: ignored
-              canonicalListExtra:
-                type: instant
-                timeline:
-                  - id: CanonicalList
-                    mapped: false
-                    extra: ignored
               alternatives:
                 type: instant
                 timeline:
-                  - id: First
-                    mapped: false
-                  - Mapped:
-                      mapped: true
-                  - Third.Age:
-                      mapped: true
-                  - _Leading:
-                      mapped: false
+                  - Singular
+                  - Legacy.Single
+                  - Nested
+                  - Listed
+                  - Canonical
+                  - CanonicalList
+                  - First
+                  - Mapped
+                  - Third.Age
+                  - _Leading
               inline:
                 type: instant
                 timeline: [, Inline,, "QuotedInline",] # choices
