@@ -228,6 +228,38 @@ class TemporalModelTest {
     }
 
     @Test
+    fun `mapping validation normalizes coordinates and rejects errors on exact precision`() {
+        val result = compile(
+            timeline(
+                "CalendarSource",
+                """
+                coordinate: gregorian
+                mapsTo:
+                  - timeline: Target
+                    precision:
+                      kind: exact
+                      error: 1
+                  - timeline: Target
+                    segments:
+                      - source: { from: 2026-12-31, to: 2026-01-01 }
+                        target: { from: 0, to: 1 }
+                  - timeline: Target
+                    segments:
+                      - source: { from: 2026-01-01, to: 2026-06-30 }
+                        target: { from: 0, to: 1 }
+                      - source: { from: 2026-06-01, to: 2026-12-31 }
+                        target: { from: 2, to: 3 }
+                """.trimIndent(),
+            ),
+            timeline("Target"),
+        )
+
+        assertTrue(result.diagnostics.any { it.message == "exact mapsTo MUST NOT define an error" })
+        assertTrue(result.diagnostics.any { it.message == "mapsTo segment source.from MUST NOT be after source.to" })
+        assertTrue(result.diagnostics.any { it.message == "mapsTo segments overlap on the source axis" })
+    }
+
+    @Test
     fun `compare follows a one way mapping and reports overlap for uncertain ranges`() {
         val oneWay = compile(
             timeline(

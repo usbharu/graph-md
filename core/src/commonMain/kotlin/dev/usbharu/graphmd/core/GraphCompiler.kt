@@ -684,6 +684,7 @@ class GraphCompiler(
         docs.forEach { resolve(it.id) }
         val base = docs.mapNotNull { resolved[it.id] }
         val byId = base.associateBy { it.id }
+        val validationEngine = temporalEngine(base)
         val mappingsBySource = mutableMapOf<String, MutableList<TemporalMappingInstance>>()
         docs.forEach { doc ->
             val source = byId[doc.id] ?: return@forEach
@@ -699,7 +700,7 @@ class GraphCompiler(
                 val target = byId[spec.timeline] ?: return@forEachIndexed
                 val inferred = inferMappingTraits(spec)
                 val traits = applyTraitsOverride(inferred, spec.traits, doc, diagnostics)
-                validateMappingSpec(spec, source, target, doc, diagnostics)
+                validateMappingSpec(spec, source, target, validationEngine, doc, diagnostics)
                 mappingsBySource.getOrPut(doc.id) { mutableListOf() } += TemporalMappingInstance(
                     id = spec.id ?: "${doc.id}->${spec.timeline}#$index",
                     sourceTimelineId = doc.id,
@@ -855,6 +856,7 @@ class GraphCompiler(
         spec: TemporalMappingSpec,
         source: NormalizedTimeline,
         target: NormalizedTimeline,
+        engine: TemporalEngine,
         doc: TimelineDocument,
         diagnostics: MutableList<Diagnostic>,
     ) {
@@ -864,25 +866,56 @@ class GraphCompiler(
         if (spec.precision.error?.let { it < ExactRational.ZERO } == true) {
             diagnostics += schemaError("mapsTo precision error MUST NOT be negative", doc.sourcePath, doc.id)
         }
+        if (spec.precision.kind == TemporalPrecisionKind.Exact && spec.precision.error != null) {
+            diagnostics += schemaError("exact mapsTo MUST NOT define an error", doc.sourcePath, doc.id)
+        }
         if (spec.pairs.isNotEmpty() && (spec.segments.isNotEmpty() || spec.range != null)) {
             diagnostics += schemaError("mapsTo.pairs cannot be combined with range or segments", doc.sourcePath, doc.id)
         }
+
+        fun normalized(
+            timeline: NormalizedTimeline,
+            coordinate: TemporalCoordinate?,
+            field: String,
+        ): ExactRational? {
+            coordinate ?: return null
+            val result = runCatching { engine.normalizeToAxis(timeline.id, coordinate) }.getOrNull()
+            if (result == null) {
+                diagnostics += schemaError("$field is not valid for ${timeline.id}", doc.sourcePath, doc.id)
+            }
+            return result
+        }
+
+        val rangeFrom = normalized(source, spec.range?.from, "mapsTo.range.from")
+        val rangeTo = normalized(source, spec.range?.to, "mapsTo.range.to")
+        if (rangeFrom != null && rangeTo != null && rangeFrom > rangeTo) {
+            diagnostics += schemaError("mapsTo.range.from MUST NOT be after range.to", doc.sourcePath, doc.id)
+        }
+        spec.pairs.forEach { pair ->
+            normalized(source, pair.from, "mapsTo.pairs.from")
+            pair.to.forEach { normalized(target, it, "mapsTo.pairs.to") }
+        }
+
+        val normalizedSegments = mutableListOf<Pair<ExactRational, ExactRational>>()
         spec.segments.forEach { segment ->
             if (segment.pairs.isNotEmpty() && (segment.source != null || segment.target != null)) {
                 diagnostics += schemaError("segment.pairs cannot be combined with source or target ranges", doc.sourcePath, doc.id)
             }
-            val sourceFrom = (segment.source?.from as? TemporalCoordinate.Rational)?.value
-            val sourceTo = (segment.source?.to as? TemporalCoordinate.Rational)?.value
+            val sourceFrom = normalized(source, segment.source?.from, "mapsTo.segment.source.from")
+            val sourceTo = normalized(source, segment.source?.to, "mapsTo.segment.source.to")
+            normalized(target, segment.target?.from, "mapsTo.segment.target.from")
+            normalized(target, segment.target?.to, "mapsTo.segment.target.to")
+            segment.pairs.forEach { pair ->
+                normalized(source, pair.from, "mapsTo.segment.pairs.from")
+                pair.to.forEach { normalized(target, it, "mapsTo.segment.pairs.to") }
+            }
             if (sourceFrom != null && sourceTo != null && sourceFrom > sourceTo) {
                 diagnostics += schemaError("mapsTo segment source.from MUST NOT be after source.to", doc.sourcePath, doc.id)
+            } else if (sourceFrom != null && sourceTo != null) {
+                normalizedSegments += sourceFrom to sourceTo
             }
         }
-        val numericSegments = spec.segments.mapNotNull { segment ->
-            val from = (segment.source?.from as? TemporalCoordinate.Rational)?.value ?: return@mapNotNull null
-            val to = (segment.source.to as? TemporalCoordinate.Rational)?.value ?: return@mapNotNull null
-            Triple(from, to, segment)
-        }.sortedBy { it.first }
-        numericSegments.zipWithNext().forEach { (left, right) ->
+        normalizedSegments.sortedBy { it.first }.zipWithNext().forEach { (left, right) ->
             when {
                 left.second >= right.first -> diagnostics += schemaError(
                     "mapsTo segments overlap on the source axis",
