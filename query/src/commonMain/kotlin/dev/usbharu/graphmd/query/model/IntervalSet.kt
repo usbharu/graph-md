@@ -325,6 +325,14 @@ class TimelineCatalog private constructor(
         return engine.parse(timelineId.value, raw).coordinate
     }
 
+    internal fun normalizeCoordinate(
+        timelineId: TimelineId,
+        coordinate: TemporalCoordinate,
+    ): ExactRational? {
+        if (timelineId !in byId) return null
+        return runCatching { engine.normalizeToAxis(timelineId.value, coordinate) }.getOrNull()
+    }
+
     fun fromValidTimes(validTimes: List<ValidTime>): IntervalSet {
         if (validTimes.isEmpty()) return IntervalSet.universal()
         return IntervalSet.of(validTimes.mapNotNull { validTime ->

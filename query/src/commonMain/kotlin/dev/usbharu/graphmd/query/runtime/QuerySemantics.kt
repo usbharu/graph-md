@@ -126,8 +126,16 @@ internal class QuerySemantics(
             }
             val invalid = when (window) {
                 is TemporalWindow.At -> false
-                is TemporalWindow.Range -> false
-                is TemporalWindow.ClosedRange -> false
+                is TemporalWindow.Range -> compareWindowBounds(
+                    window.timelineId,
+                    window.startCoordinate,
+                    window.endExclusiveCoordinate,
+                )?.let { it >= 0 } == true
+                is TemporalWindow.ClosedRange -> compareWindowBounds(
+                    window.timelineId,
+                    window.startCoordinate,
+                    window.endInclusiveCoordinate,
+                )?.let { it > 0 } == true
             }
             if (invalid) {
                 add(
@@ -144,6 +152,18 @@ internal class QuerySemantics(
             }
         }
         validateExpression(query.expression, this)
+    }
+
+    private fun compareWindowBounds(
+        timelineId: TimelineId,
+        start: TemporalCoordinate?,
+        end: TemporalCoordinate?,
+    ): Int? {
+        start ?: return null
+        end ?: return null
+        val normalizedStart = graph.timelineCatalog.normalizeCoordinate(timelineId, start) ?: return null
+        val normalizedEnd = graph.timelineCatalog.normalizeCoordinate(timelineId, end) ?: return null
+        return normalizedStart.compareTo(normalizedEnd)
     }
 
     private fun validateExpression(

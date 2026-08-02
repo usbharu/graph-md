@@ -563,7 +563,7 @@ private class TemporalView(
     }
 
     private fun assertedAt(validTimes: List<ValidTime>): Boolean =
-        validTimes.isNotEmpty() && !(requestedIntervals(validTimes) intersect requestedWindow).isEmpty
+        !(requestedIntervals(validTimes) intersect requestedWindow).isEmpty
 
     private fun requestedIntervals(validTimes: List<ValidTime>): IntervalSet = catalog.fromValidTimes(validTimes)
 }

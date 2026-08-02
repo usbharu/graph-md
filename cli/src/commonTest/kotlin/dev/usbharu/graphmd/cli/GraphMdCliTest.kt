@@ -713,13 +713,64 @@ class GraphMdCliTest {
         assertTrue(listed.stdout.contains("\"id\":\"erin\""))
         assertFalse(listed.stdout.contains("\"id\":\"carol\""))
         assertTrue(listed.stdout.contains("\"id\":\"dave\""))
-        assertTrue(listed.stdout.contains("\"id\":\"bob\",\"visibility\":\"assertion-only\""))
+        assertTrue(listed.stdout.contains("\"id\":\"bob\",\"visibility\":\"full\""))
         assertTrue(listed.stdout.contains("\"id\":\"frank\",\"visibility\":\"assertion-only\""))
         assertTrue(props.stdout.contains("\"value\":\"old\""))
         assertTrue(props.stdout.contains("\"value\":\"new\""))
         assertTrue(links.stdout.contains("\"to\":\"erin\""))
         assertTrue(links.stdout.contains("\"to\":\"bob\""))
-        assertTrue(links.stdout.contains("\"toVisibility\":\"assertion-only\""))
+        assertFalse(links.stdout.contains("\"toVisibility\":\"assertion-only\""))
+    }
+
+    @Test
+    fun `valid time keeps timeless documents nested properties and links visible`() {
+        val fs = FakeFileSystem(
+            files = mapOf(
+                "/workspace/Timeline.md" to timeline("Timeline"),
+                "/workspace/Person.md" to """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    props:
+                      tags:
+                        type: array
+                        items:
+                          type: string
+                    ---
+                """.trimIndent(),
+                "/workspace/related.md" to """
+                    ---
+                    id: related
+                    kind: RelType
+                    ---
+                """.trimIndent(),
+                "/workspace/alice.md" to """
+                    ---
+                    id: alice
+                    kind: Node
+                    type: Person
+                    props:
+                      tags: [timeless]
+                    ---
+                    @link[Bob](bob related)
+                """.trimIndent(),
+                "/workspace/bob.md" to node("bob", "Person"),
+            ),
+        )
+        val cli = GraphMdCli(fs)
+        val validTime = listOf("--valid-time", "Timeline(from=10,to=20)", "--json")
+
+        val listed = cli.run(listOf("list", "/workspace") + validTime)
+        val props = cli.run(listOf("props", "alice", "/workspace") + validTime)
+        val links = cli.run(listOf("links", "alice", "/workspace") + validTime)
+
+        assertEquals(0, listed.exitCode, listed.stderr)
+        assertTrue(listed.stdout.contains("\"id\":\"alice\""))
+        assertFalse(listed.stdout.contains("\"id\":\"alice\",\"visibility\":\"assertion-only\""))
+        assertEquals(0, props.exitCode, props.stderr)
+        assertTrue(props.stdout.contains("\"value\":\"timeless\""))
+        assertEquals(0, links.exitCode, links.stderr)
+        assertTrue(links.stdout.contains("\"to\":\"bob\""))
     }
 
     @Test
@@ -745,7 +796,7 @@ class GraphMdCliTest {
     }
 
     @Test
-    fun `matching property exposes only assertions and id when document is outside valid time`() {
+    fun `matching property is assertion-only while a timeless linked target remains full`() {
         val cli = GraphMdCli(validTimeFixture())
 
         val shown = cli.run(
@@ -767,9 +818,9 @@ class GraphMdCliTest {
         assertTrue(props.stdout.contains("\"ownerId\":\"frank\""))
         assertTrue(props.stdout.contains("\"ownerVisibility\":\"assertion-only\""))
         assertEquals("", props.stderr)
-        assertTrue(linkedTarget.stdout.contains("\"visibility\":\"assertion-only\""))
+        assertTrue(linkedTarget.stdout.contains("\"visibility\":\"full\""))
         assertTrue(linkedTarget.stdout.contains("\"incomingLinks\""))
-        assertFalse(linkedTarget.stdout.contains("\"type\":\"Person\""))
+        assertTrue(linkedTarget.stdout.contains("\"type\":\"Person\""))
     }
 
     @Test
@@ -930,7 +981,7 @@ class GraphMdCliTest {
     }
 
     @Test
-    fun `lint with valid time only reports visible documents`() {
+    fun `lint with valid time includes timeless documents`() {
         val fs = FakeFileSystem(
             files = mapOf(
                 "/workspace/Timeline.md" to """
@@ -959,9 +1010,9 @@ class GraphMdCliTest {
             listOf("lint", "/workspace", "--valid-time", "CommonEra(from=1,to=2)", "--json"),
         )
 
-        assertEquals(0, result.exitCode)
+        assertEquals(1, result.exitCode)
         assertTrue(result.stdout.contains("Unknown property unexpected"))
-        assertFalse(result.stdout.contains("Unknown NodeType"))
+        assertTrue(result.stdout.contains("Unknown NodeType"))
     }
 
     @Test

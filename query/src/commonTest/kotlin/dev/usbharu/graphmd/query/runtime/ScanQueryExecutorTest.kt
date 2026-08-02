@@ -196,6 +196,27 @@ class ScanQueryExecutorTest {
         assertEquals(QueryDiagnosticCode.UNKNOWN_RELATION_TYPE, relation.diagnostics.single().code)
     }
 
+    @Test
+    fun `reversed numeric temporal windows are diagnostics`() {
+        val halfOpen = execute(
+            GraphQuery(temporalWindow = TemporalWindow.Range(TimelineId("TimelineA"), 200.0, 100.0)),
+        )
+        val emptyHalfOpen = execute(
+            GraphQuery(temporalWindow = TemporalWindow.Range(TimelineId("TimelineA"), 100.0, 100.0)),
+        )
+        val closed = execute(
+            GraphQuery(temporalWindow = TemporalWindow.ClosedRange(TimelineId("TimelineA"), 200.0, 100.0)),
+        )
+        val singlePoint = execute(
+            GraphQuery(temporalWindow = TemporalWindow.ClosedRange(TimelineId("TimelineA"), 100.0, 100.0)),
+        )
+
+        assertEquals(QueryDiagnosticCode.INVALID_TEMPORAL_WINDOW, halfOpen.diagnostics.single().code)
+        assertEquals(QueryDiagnosticCode.INVALID_TEMPORAL_WINDOW, emptyHalfOpen.diagnostics.single().code)
+        assertEquals(QueryDiagnosticCode.INVALID_TEMPORAL_WINDOW, closed.diagnostics.single().code)
+        assertTrue(singlePoint.diagnostics.isEmpty())
+    }
+
     private fun execute(query: GraphQuery) = runSuspend { executor.execute(graph, query) }
 
     private fun fixture(): List<SourceDocument> = listOf(
