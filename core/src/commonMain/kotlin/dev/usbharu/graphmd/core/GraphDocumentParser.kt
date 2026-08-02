@@ -607,9 +607,7 @@ private class MiniYamlParser(
 
     private fun looksLikeInlineMapEntry(content: String): Boolean {
         val colonIndex = findYamlMappingColon(content)
-        if (colonIndex <= 0) return false
-        val next = content.getOrNull(colonIndex + 1) ?: return true
-        return next == ' ' || next == '\t'
+        return colonIndex > 0
     }
 
     private fun skipIgnorable() {

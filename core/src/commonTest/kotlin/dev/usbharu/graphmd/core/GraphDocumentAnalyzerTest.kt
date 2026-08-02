@@ -1798,6 +1798,40 @@ class GraphDocumentAnalyzerTest {
     }
 
     @Test
+    fun `extracts yaml property keys containing colons with exact ranges`() {
+        val typeText = """
+            ---
+            id: Person
+            kind: NodeType
+            props:
+              lang:ja:
+                type: string
+            ---
+        """.trimIndent()
+        val typeAnalysis = analyzer.analyze(typeText, "/tmp/Person.md")
+
+        assertTrue(typeAnalysis.parsed.diagnostics.isEmpty(), typeAnalysis.parsed.diagnostics.joinToString("\n") { it.message })
+        val definition = typeAnalysis.propertyDefinitions.single()
+        assertEquals("lang:ja", definition.name)
+        assertEquals(definition.name, typeText.substring(definition.range.start, definition.range.end))
+
+        val nodeText = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            props:
+              lang:ja: あいうえお
+            ---
+        """.trimIndent()
+        val nodeAnalysis = analyzer.analyze(nodeText, "/tmp/alice.md")
+
+        val reference = nodeAnalysis.propertyReferences.single()
+        assertEquals("lang:ja", reference.name)
+        assertEquals(reference.name, nodeText.substring(reference.range.start, reference.range.end))
+    }
+
+    @Test
     fun `extracts top level props and relation keys from body`() {
         val text = """
             ---
