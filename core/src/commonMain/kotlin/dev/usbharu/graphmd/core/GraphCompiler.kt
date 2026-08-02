@@ -698,9 +698,9 @@ class GraphCompiler(
                     doc.id,
                 )
                 val target = byId[spec.timeline] ?: return@forEachIndexed
-                val inferred = inferMappingTraits(spec)
-                val traits = applyTraitsOverride(inferred, spec.traits, doc, diagnostics)
                 validateMappingSpec(spec, source, target, validationEngine, doc, diagnostics)
+                val inferred = inferMappingTraits(spec, source, target, validationEngine)
+                val traits = applyTraitsOverride(inferred, spec.traits, doc, diagnostics)
                 mappingsBySource.getOrPut(doc.id) { mutableListOf() } += TemporalMappingInstance(
                     id = spec.id ?: "${doc.id}->${spec.timeline}#$index",
                     sourceTimelineId = doc.id,
@@ -735,12 +735,17 @@ class GraphCompiler(
         is TemporalCoordinateSpec.Frame, is TemporalCoordinateSpec.Timecode -> unit == TemporalAxisUnit.Frame
     }
 
-    private fun inferMappingTraits(spec: TemporalMappingSpec): TemporalMappingTraits {
+    private fun inferMappingTraits(
+        spec: TemporalMappingSpec,
+        source: NormalizedTimeline,
+        target: NormalizedTimeline,
+        engine: TemporalEngine,
+    ): TemporalMappingTraits {
         val pairs = spec.pairs + spec.segments.flatMap { it.pairs }
         val segmentScales = if (spec.segments.isEmpty()) {
             listOf(spec.scale)
         } else {
-            spec.segments.map(::effectiveSegmentScale)
+            spec.segments.map { effectiveSegmentScale(it, source, target, engine) }
         }
         val sourceCounts = pairs.groupingBy { it.from }.eachCount()
         val targets = pairs.flatMap { pair -> pair.to.map { it to pair.from } }
@@ -761,11 +766,8 @@ class GraphCompiler(
         }
         val order = when {
             pairs.isNotEmpty() -> TemporalOrderBehavior.NonMonotonic
-            segmentScales.all { it > ExactRational.ZERO } -> TemporalOrderBehavior.StrictlyIncreasing
-            segmentScales.all { it < ExactRational.ZERO } -> TemporalOrderBehavior.StrictlyDecreasing
-            segmentScales.all { it >= ExactRational.ZERO } || segmentScales.all { it <= ExactRational.ZERO } ->
-                TemporalOrderBehavior.Monotonic
-            else -> TemporalOrderBehavior.NonMonotonic
+            spec.segments.isNotEmpty() -> inferSegmentOrder(spec.segments, source, target, engine)
+            else -> orderFromDeltas(segmentScales)
         }
         val invertibility = if (cardinality == TemporalCardinality.OneToOne && segmentScales.none { it == ExactRational.ZERO }) {
             TemporalInvertibility.Invertible
@@ -780,20 +782,74 @@ class GraphCompiler(
         return TemporalMappingTraits(cardinality, totality, order, invertibility, continuity)
     }
 
-    private fun effectiveSegmentScale(segment: TemporalMappingSegment): ExactRational {
-        val sourceFrom = (segment.source?.from as? TemporalCoordinate.Rational)?.value
-        val sourceTo = (segment.source?.to as? TemporalCoordinate.Rational)?.value
-        val targetFrom = (segment.target?.from as? TemporalCoordinate.Rational)?.value
-        val targetTo = (segment.target?.to as? TemporalCoordinate.Rational)?.value
+    private fun effectiveSegmentScale(
+        segment: TemporalMappingSegment,
+        source: NormalizedTimeline,
+        target: NormalizedTimeline,
+        engine: TemporalEngine,
+    ): ExactRational = effectiveSegmentTransform(segment, source, target, engine).first
+
+    private fun effectiveSegmentTransform(
+        segment: TemporalMappingSegment,
+        source: NormalizedTimeline,
+        target: NormalizedTimeline,
+        engine: TemporalEngine,
+    ): Pair<ExactRational, ExactRational> {
+        val sourceFrom = segment.source?.from?.let { engine.normalizeForTraits(source.id, it) }
+        val sourceTo = segment.source?.to?.let { engine.normalizeForTraits(source.id, it) }
+        val targetFrom = segment.target?.from?.let { engine.normalizeForTraits(target.id, it) }
+        val targetTo = segment.target?.to?.let { engine.normalizeForTraits(target.id, it) }
         return if (
             sourceFrom != null && sourceTo != null && sourceFrom != sourceTo &&
             targetFrom != null && targetTo != null
         ) {
-            (targetTo - targetFrom) / (sourceTo - sourceFrom)
+            val scale = (targetTo - targetFrom) / (sourceTo - sourceFrom)
+            scale to (targetFrom - sourceFrom * scale)
         } else {
-            segment.scale
+            segment.scale to segment.offset
         }
     }
+
+    private fun inferSegmentOrder(
+        segments: List<TemporalMappingSegment>,
+        source: NormalizedTimeline,
+        target: NormalizedTimeline,
+        engine: TemporalEngine,
+    ): TemporalOrderBehavior {
+        val points = segments.flatMap { segment ->
+            val sourceFrom = segment.source?.from?.let { engine.normalizeForTraits(source.id, it) }
+                ?: return@flatMap emptyList()
+            val sourceTo = segment.source.to?.let { engine.normalizeForTraits(source.id, it) }
+                ?: return@flatMap emptyList()
+            val (scale, offset) = effectiveSegmentTransform(segment, source, target, engine)
+            val targetFrom = sourceFrom * scale + offset
+            val targetTo = sourceTo * scale + offset
+            listOf(sourceFrom to targetFrom, sourceTo to targetTo)
+        }
+        if (points.size != segments.size * 2) {
+            return if (segments.size == 1) {
+                orderFromDeltas(listOf(effectiveSegmentScale(segments.single(), source, target, engine)))
+            } else {
+                TemporalOrderBehavior.NonMonotonic
+            }
+        }
+        val targetDeltas = points.sortedBy { it.first }
+            .zipWithNext { left, right -> right.second - left.second }
+        return orderFromDeltas(targetDeltas)
+    }
+
+    private fun orderFromDeltas(deltas: List<ExactRational>): TemporalOrderBehavior = when {
+        deltas.isNotEmpty() && deltas.all { it > ExactRational.ZERO } -> TemporalOrderBehavior.StrictlyIncreasing
+        deltas.isNotEmpty() && deltas.all { it < ExactRational.ZERO } -> TemporalOrderBehavior.StrictlyDecreasing
+        deltas.all { it >= ExactRational.ZERO } || deltas.all { it <= ExactRational.ZERO } ->
+            TemporalOrderBehavior.Monotonic
+        else -> TemporalOrderBehavior.NonMonotonic
+    }
+
+    private fun TemporalEngine.normalizeForTraits(
+        timeline: String,
+        coordinate: TemporalCoordinate,
+    ): ExactRational? = runCatching { normalizeToAxis(timeline, coordinate) }.getOrNull()
 
     private fun applyTraitsOverride(
         inferred: TemporalMappingTraits,

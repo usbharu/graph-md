@@ -4,6 +4,7 @@ import dev.usbharu.graphmd.core.model.*
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class TemporalModelTest {
@@ -200,6 +201,35 @@ class TemporalModelTest {
         )
         assertIs<TemporalConversionResult.Alternatives>(
             engine.convert(TemporalValue("Edit", TemporalCoordinate.Rational(ExactRational.of(200))), "Source"),
+        )
+    }
+
+    @Test
+    fun `segment order inference includes ordering between segments`() {
+        val result = compile(
+            timeline(
+                "Source",
+                """
+                mapsTo:
+                  timeline: Target
+                  segments:
+                    - source: { from: 0, to: 10 }
+                      target: { from: 100, to: 110 }
+                    - source: { from: 20, to: 30 }
+                      target: { from: 50, to: 60 }
+                """.trimIndent(),
+            ),
+            timeline("Target"),
+        )
+        val mapping = result.timelines.single { it.id == "Source" }.temporalMappings.single()
+        val engine = TemporalEngine(result.temporalModel)
+
+        assertEquals(TemporalOrderBehavior.NonMonotonic, mapping.traits.orderBehavior)
+        assertNull(
+            engine.convertForSearch(
+                TemporalValue("Source", TemporalCoordinate.Rational(ExactRational.of(5))),
+                "Target",
+            ),
         )
     }
 
