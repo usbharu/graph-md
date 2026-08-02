@@ -90,7 +90,7 @@ data class ExactRational private constructor(
             return ExactRational(normalizedNumerator / divisor, normalizedDenominator / divisor)
         }
 
-        /** Parses integers, finite decimal literals, and `numerator/denominator`. */
+        /** Parses integers, finite decimal/scientific literals, and `numerator/denominator`. */
         fun parse(raw: String): ExactRational {
             val value = raw.trim()
             require(value.isNotEmpty()) { "temporal rational must not be empty" }
@@ -102,6 +102,22 @@ data class ExactRational private constructor(
                     value.substring(slash + 1).trim().toLong(),
                 )
             }
+
+            val exponentMarkers = value.count { it == 'e' || it == 'E' }
+            require(exponentMarkers <= 1) { "invalid temporal decimal: $raw" }
+            val exponentIndex = value.indexOfFirst { it == 'e' || it == 'E' }
+            val decimal = if (exponentIndex < 0) value else value.substring(0, exponentIndex)
+            val parsed = parseDecimal(decimal, raw)
+            if (exponentIndex < 0) return parsed
+
+            val exponentRaw = value.substring(exponentIndex + 1)
+            require(exponentRaw.matches(Regex("[+-]?[0-9]+"))) { "invalid temporal decimal: $raw" }
+            if (parsed == ZERO) return ZERO
+            val exponent = exponentRaw.toIntOrNull() ?: error("temporal rational overflow")
+            return parsed.scaleByPowerOfTen(exponent)
+        }
+
+        private fun parseDecimal(value: String, raw: String): ExactRational {
             val dot = value.indexOf('.')
             if (dot < 0) return of(value.toLong())
             require(dot == value.lastIndexOf('.')) { "invalid temporal decimal: $raw" }
@@ -124,6 +140,44 @@ data class ExactRational private constructor(
                 absoluteNumerator
             }
             return of(numerator, denominator)
+        }
+
+        private fun ExactRational.scaleByPowerOfTen(exponent: Int): ExactRational {
+            // With Long-backed numerator and denominator, any representable
+            // non-zero result overflows well before 64 decimal shifts. Bounding
+            // the loop also keeps untrusted exponent strings from causing work
+            // proportional to an arbitrarily large exponent.
+            require(exponent in -64..64) { "temporal rational overflow" }
+            var scaledNumerator = numerator
+            var scaledDenominator = denominator
+            if (exponent > 0) {
+                repeat(exponent) {
+                    if (scaledDenominator % 2L == 0L) {
+                        scaledDenominator /= 2L
+                    } else {
+                        scaledNumerator = checkedMultiply(scaledNumerator, 2L)
+                    }
+                    if (scaledDenominator % 5L == 0L) {
+                        scaledDenominator /= 5L
+                    } else {
+                        scaledNumerator = checkedMultiply(scaledNumerator, 5L)
+                    }
+                }
+            } else {
+                repeat(-exponent) {
+                    if (scaledNumerator % 2L == 0L) {
+                        scaledNumerator /= 2L
+                    } else {
+                        scaledDenominator = checkedMultiply(scaledDenominator, 2L)
+                    }
+                    if (scaledNumerator % 5L == 0L) {
+                        scaledNumerator /= 5L
+                    } else {
+                        scaledDenominator = checkedMultiply(scaledDenominator, 5L)
+                    }
+                }
+            }
+            return of(scaledNumerator, scaledDenominator)
         }
 
         fun fromDouble(value: Double): ExactRational {

@@ -768,7 +768,11 @@ class GraphDocumentParser {
             else -> null
         }
         if (raw == null) {
-            diagnostics += schemaError("$field MUST be an integer, decimal, or fraction", sourcePath, documentId)
+            diagnostics += schemaError(
+                "$field MUST be an integer, decimal, scientific notation, or fraction",
+                sourcePath,
+                documentId,
+            )
             return null
         }
         return runCatching { ExactRational.parse(raw) }.getOrElse {
@@ -1177,7 +1181,8 @@ private class MiniYamlParser(
             value == "true" -> YamlBoolean(true)
             value == "false" -> YamlBoolean(false)
             value.matches(Regex("[-+]?[0-9]+")) -> YamlInteger(value.toLong())
-            value.matches(Regex("[-+]?[0-9]+\\.[0-9]+")) -> YamlNumber(value.toDouble(), value)
+            value.matches(Regex("[-+]?[0-9]+(?:\\.[0-9]+)?(?:[eE][-+]?[0-9]+)?")) ->
+                YamlNumber(value.toDouble(), value)
             else -> YamlString(value)
         }
     }

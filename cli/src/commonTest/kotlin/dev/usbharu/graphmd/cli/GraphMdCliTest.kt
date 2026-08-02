@@ -893,12 +893,22 @@ class GraphMdCliTest {
         val invalid = cli.run(
             listOf("list", "/workspace", "--valid-time", "CommonEra(from=20,to=10)", "--json"),
         )
+        val scientific = cli.run(
+            listOf("list", "/workspace", "--valid-time", "CommonEra(from=1e1,to=2E1)", "--json"),
+        )
+        val reversedScientific = cli.run(
+            listOf("list", "/workspace", "--valid-time", "CommonEra(from=2e1,to=1E1)", "--json"),
+        )
         val unknown = cli.run(
             listOf("list", "/workspace", "--valid-time", "Missing(from=1)", "--json"),
         )
 
         assertEquals(2, invalid.exitCode)
         assertTrue(invalid.stderr.contains("from must not exceed to"))
+        assertEquals(0, scientific.exitCode, scientific.stderr)
+        assertTrue(scientific.stdout.contains("\"id\":\"alice\""))
+        assertEquals(2, reversedScientific.exitCode)
+        assertTrue(reversedScientific.stderr.contains("from must not exceed to"))
         assertEquals(1, unknown.exitCode)
         assertTrue(unknown.stderr.contains("Unknown Timeline"))
     }

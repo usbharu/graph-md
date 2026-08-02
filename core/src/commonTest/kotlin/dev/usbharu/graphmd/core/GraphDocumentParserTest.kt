@@ -204,6 +204,51 @@ class GraphDocumentParserTest {
     }
 
     @Test
+    fun `parses scientific notation in temporal yaml fields`() {
+        val timeline = compiler.parseDocument(
+            """
+                ---
+                id: TinyScale
+                kind: Timeline
+                sameAxisAs: Base
+                scale: 1e-6
+                offset: -2.5E3
+                mapsTo:
+                  timeline: Other
+                  scale: 1.25e2
+                ---
+            """.trimIndent(),
+            "/tmp/tiny-scale.md",
+        ).document as TimelineDocument
+        val node = compiler.parseDocument(
+            """
+                ---
+                id: event
+                kind: Node
+                type: Event
+                validTime:
+                  - timeline: TinyScale
+                    from: 1e-6
+                    to: 2E-6
+                ---
+            """.trimIndent(),
+            "/tmp/event.md",
+        ).document as NodeDocument
+
+        assertEquals(ExactRational.of(1, 1_000_000), timeline.scale)
+        assertEquals(ExactRational.of(-2_500), timeline.offset)
+        assertEquals(ExactRational.of(125), timeline.mapsTo.single().scale)
+        assertEquals(
+            TemporalCoordinate.Rational(ExactRational.of(1, 1_000_000)),
+            node.validTime.single().from?.coordinate,
+        )
+        assertEquals(
+            TemporalCoordinate.Rational(ExactRational.of(1, 500_000)),
+            node.validTime.single().to?.coordinate,
+        )
+    }
+
+    @Test
     fun `reports removed mapped selectors and retains their Timeline ids for recovery`() {
         val nodeType = compiler.parseDocument(
             """

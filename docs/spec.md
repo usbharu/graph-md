@@ -552,7 +552,7 @@ kind: Timeline
 
 コンパイラは各Timeline文書を完全なTemporalCoordinateSystemへ正規化する。正規化後のTimelineは少なくともDomain ID、Axis ID、Axis上の単位、CoordinateSystem、任意のLineage、およびそのTimelineをsourceとするMappingを持つ。
 
-時間座標の整数、小数、`a/b`形式は`ExactRational`へ変換し、常に正の分母を持つ既約分数として保持する。たとえば`1.5`は`3/2`、`30/90`は`1/3`になる。通常のProperty `number`は従来どおりDoubleであり、ExactRationalを使用するのは時間座標だけである。JSONへ出力するときは`{"numerator": 1, "denominator": 3}`の形を使用する。
+時間座標の整数、小数、指数表記、`a/b`形式は`ExactRational`へ変換し、常に正の分母を持つ既約分数として保持する。たとえば`1.5`は`3/2`、`1e-6`は`1/1000000`、`30/90`は`1/3`になる。通常のProperty `number`は従来どおりDoubleであり、ExactRationalを使用するのは時間座標だけである。JSONへ出力するときは`{"numerator": 1, "denominator": 3}`の形を使用する。
 
 利用者が記述した値は、まずTimelineのCoordinateSystemで解釈し、Axisの標準座標へ正規化する。比較、Mapping、検索はこの標準座標に対して行い、結果を表示するときに対象Timelineの座標表現へ戻す。
 

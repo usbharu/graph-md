@@ -9,6 +9,18 @@ import kotlin.test.assertTrue
 
 class TemporalModelTest {
     @Test
+    fun `exact rational parses scientific notation without losing precision`() {
+        assertEquals(ExactRational.of(1, 1_000_000), ExactRational.parse("1e-6"))
+        assertEquals(ExactRational.of(1_250), ExactRational.parse("1.25E3"))
+        assertEquals(ExactRational.of(-1, 400), ExactRational.parse("-2.5e-3"))
+        assertEquals(ExactRational.of(1, 1_000_000), ExactRational.fromDouble(1e-6))
+        assertEquals(
+            ExactRational.of(1, 2_000_000_000_000_000_000),
+            ExactRational.parse("5e-19"),
+        )
+    }
+
+    @Test
     fun `bare Timeline creates an independent exact number axis`() {
         val result = compile(
             timeline("Story"),

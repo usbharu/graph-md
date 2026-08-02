@@ -3,10 +3,21 @@ package dev.usbharu.graphmd.query.model
 import dev.usbharu.graphmd.core.GraphCompiler
 import dev.usbharu.graphmd.core.model.*
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class TemporalQueryTest {
+    @Test
+    fun `double temporal constructors accept scientific notation`() {
+        val window = TemporalWindow.At(TimelineId("Story"), 1e-6)
+
+        assertEquals(
+            TemporalCoordinate.Rational(ExactRational.of(1, 1_000_000)),
+            window.coordinate,
+        )
+    }
+
     @Test
     fun `same axis representation matches after exact normalization`() {
         val result = compile(

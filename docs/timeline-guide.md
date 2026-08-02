@@ -30,7 +30,7 @@ kind: Timeline
 ---
 ```
 
-これは内部的に、Story専用のDomain、Axis、`number` CoordinateSystemへ展開されます。座標には整数、小数、分数を使用できます。
+これは内部的に、Story専用のDomain、Axis、`number` CoordinateSystemへ展開されます。座標には整数、小数、`1e-6`のような指数表記、分数を使用できます。
 
 ```yaml
 validTime:
