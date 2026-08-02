@@ -52,7 +52,7 @@ Markdownのみではナレッジグラフとして使いにくいため、マル
 |----------|------------------------------------------------------------|
 | Node     | 一つのMarkdown文章。ナレッジグラフで一つの単位 NodeTypeを持つ                    |
 | NodeType | NodeType Nodeが持つべきPropertyを定義する 継承関係をもてる                   |
-| Timeline | 時系列 継承関係をもてる                                               |
+| Timeline | 利用者が記述する時間座標表現。コンパイラがDomain、Axis、CoordinateSystemへ正規化する       |
 | Property | Node・Linkに属する属性  どの時系列のどの期間有効かを宣言できる                       |
 | Link     | Node間の関係を表現する RelTypeを持つ どの時系列のどの期間有効かを宣言できる Propertyをもてる |
 | RelType  | Node間の関係を定義する Linkが持つべきPropertyを定義する 継承関係をもてる               |
@@ -514,9 +514,26 @@ RelTypeで定義されたリンク
 
 ### 時間モデル
 
-利用者が定義する文書は`kind: Timeline`だけであり、Domain、Axis、CoordinateSystem、Lineage、Mappingはコンパイラが内部モデルへ展開する。Timelineのトップレベルで使用できるフィールドは`id`、`kind`、`sameAxisAs`、`scale`、`offset`、`coordinate`、`domain`、`derivedFrom`、`mapsTo`、`aliases`、`props`に限る。
+利用者はMarkdown上で`kind: Timeline`の文書だけを定義する。TemporalDomain、TemporalAxis、TemporalCoordinateSystem、AxisLineage、Mappingは個別のMarkdown文書として定義せず、コンパイラがTimeline文書から正規化モデルとして生成する。
 
-最小のTimelineは`id`と`kind`だけを持ち、文書区切りを含む3フィールドで記述できる。内部的にはそのID専用のDomainと、既約な有理数を標準座標とする独立Axisを生成する。
+#### Timeline文書
+
+Timelineのトップレベルで使用できるフィールドは次のものに限る。
+
+| フィールド | 必須 | 意味 |
+| --- | --- | --- |
+| `id` | 必須 | Timelineを参照する一意なID |
+| `kind` | 必須 | 常に`Timeline` |
+| `sameAxisAs` | 任意 | 別Timelineと同じDomain・Axisを使用する |
+| `scale`、`offset` | 任意 | `sameAxisAs`間の数値座標変換 |
+| `coordinate` | 任意 | 利用者が記述する座標表現 |
+| `domain` | 任意 | Domainの明示的な上書き |
+| `derivedFrom` | 任意 | Axisの由来をLineageとして記録する |
+| `mapsTo` | 任意 | 異なるAxis間の明示的な変換を定義する |
+| `aliases` | 任意 | 表示・検索用の別名 |
+| `props` | 任意 | Timeline自体のメタデータ |
+
+最小のTimelineは`id`と`kind`だけでよい。
 
 ```yaml
 ---
@@ -525,9 +542,245 @@ kind: Timeline
 ---
 ```
 
-同じAxisの別表記には`sameAxisAs`、由来の記録には`derivedFrom`、異なるAxis間の変換には`mapsTo`を使用する。`sameAxisAs`と`derivedFrom`は同時指定できない。`derivedFrom`は変換可能性を与えない。
+設定のないTimelineは、そのID専用のDomainとAxisを生成し、`number`座標を使用する。他の独立Timelineとは自動的に比較・変換されない。`sameAxisAs`と`derivedFrom`は同時指定できない。
 
-旧Timelineフィールドの`extends`、`timecode`、`mappings`と、Property Schemaの`mapped: true`は廃止する。コンパイラはそれぞれ`sameAxisAs`または`derivedFrom`、`coordinate`、`mapsTo`への置換を示すSchemaErrorを返す。完全な構文と正規化規則は「サンプル / Timeline」に示す。
+`aliases`は表示とテキスト検索のためのmetadataである。ID参照の解決、期間付き名称解決、Axis共有、変換経路には使用しない。
+
+#### 正規化モデルと時間数値
+
+コンパイラは各Timeline文書を完全なTemporalCoordinateSystemへ正規化する。正規化後のTimelineは少なくともDomain ID、Axis ID、Axis上の単位、CoordinateSystem、任意のLineage、およびそのTimelineをsourceとするMappingを持つ。
+
+時間座標の整数、小数、`a/b`形式は`ExactRational`へ変換し、常に正の分母を持つ既約分数として保持する。たとえば`1.5`は`3/2`、`30/90`は`1/3`になる。通常のProperty `number`は従来どおりDoubleであり、ExactRationalを使用するのは時間座標だけである。JSONへ出力するときは`{"numerator": 1, "denominator": 3}`の形を使用する。
+
+利用者が記述した値は、まずTimelineのCoordinateSystemで解釈し、Axisの標準座標へ正規化する。比較、Mapping、検索はこの標準座標に対して行い、結果を表示するときに対象Timelineの座標表現へ戻す。
+
+#### 同じAxisの別表記
+
+`sameAxisAs`は参照先と同じDomainおよびAxisを使用しつつ、別の座標表現を提供する。数値座標では参照先の値を`x`、現在のTimelineの値を`y`として、次の変換を使用する。
+
+```text
+y = x * scale + offset
+```
+
+`scale`の既定値は1、`offset`の既定値は0である。`scale`は0にできず、`scale`と`offset`は`sameAxisAs`を指定した`number`座標でのみ使用できる。`coordinate`、`scale`、`offset`をすべて省略した場合は、参照先と同じ座標表現を持つAlias相当のTimelineになる。
+
+```yaml
+---
+id: ProjectEra
+kind: Timeline
+sameAxisAs: Story
+offset: 1000
+---
+```
+
+`sameAxisAs`の参照は循環してはならない。明示した`domain`が参照先のDomainと異なる場合、またはCoordinateが参照先Axisの単位と互換でない場合はSchemaErrorとする。同じAxisに属するTimelineはvalidTime検索とProperty Schemaのtimeline制約で同一の時間軸として扱う。
+
+#### CoordinateSystem
+
+`coordinate`を省略した独立Timelineは`number`になる。一般的なCoordinateSystemは次のpresetで指定できる。
+
+| preset | 正規化されるCoordinateSystem | Axis単位 |
+| --- | --- | --- |
+| `number` | 既約な有理数 | tick |
+| `gregorian` | Gregorian暦、common-era年番号 | day |
+| `julian` | Julian暦、common-era年番号 | day |
+| `frame` | 0始まりのFrameIndex | frame |
+
+詳細設定が必要な場合はobject形式を使用する。
+
+`calendar`は`calendar`に`gregorian`または`julian`を指定する。`numbering`は`common-era`、`astronomical`、または`offset`を使用できる。`offset`では表示年から差し引く値と、0年を許可するかを指定する。
+
+```yaml
+coordinate:
+  kind: calendar
+  calendar: gregorian
+  numbering:
+    kind: offset
+    offset: 660
+    yearZero: false
+```
+
+calendar値は`YYYY-MM-DD`形式で記述し、存在しない月日や、0年を持たないnumberingでの0年はエラーとする。GregorianとJulianは`sameAxisAs`を使い、同じday Axis上の異なる表記として使用できる。
+
+`frame`は整数のFrameIndexを表し、`start`で表示上の開始番号を変更できる。
+
+```yaml
+coordinate:
+  kind: frame
+  start: 1
+```
+
+`timecode`はSMPTE形式を表す。`actualFps`は有理数、`nominalFps`は正の整数である。`dropFrame: true`はnominal FPSが30または60の場合だけ使用できる。`wrapHours`を指定すると表示時の時をその値で折り返す。
+
+```yaml
+coordinate:
+  kind: timecode
+  actualFps: 30000/1001
+  nominalFps: 30
+  dropFrame: true
+  wrapHours: 24
+```
+
+timecode値は`HH:MM:SS:FF`または`HH:MM:SS;FF`形式で記述する。frame番号は0以上かつ`nominalFps`未満でなければならず、drop-frameでスキップされるラベルは使用できない。YAMLや本文でコロンを含む値を書く場合は文字列としてquoteする。
+
+`era`は期間名をcalendar上の日付へ変換するCoordinateSystemであり、calendar Timelineを`sameAxisAs`で指定しなければならない。各periodは`name`、開始日`since`を必須とし、任意の`aliases`と`firstYear`を持つ。期間の開始前または次のperiodの開始以後の日付を、そのperiodの値として使用してはならない。
+
+```yaml
+---
+id: JapaneseEra
+kind: Timeline
+sameAxisAs: CommonEra
+coordinate:
+  kind: era
+  periods:
+    - name: Reiwa
+      aliases: [令和, R]
+      since: 2019-05-01
+      firstYear: 1
+---
+```
+
+Era値は`Reiwa 1-05-01`や`令和 1-05-01`のように、period名またはそのalias、年、月、日を組み合わせて記述する。
+
+標準機能の範囲はGregorian/Julian、common-era/astronomical/offset年番号、Era、FrameIndex、SMPTE drop/non-dropとする。タイムゾーン、UTC/TAI、うるう秒、不確実な歴史改暦、汎用変換式DSLは扱わない。
+
+#### DomainとLineage
+
+Domainは複数のAxisが属する世界・記録集合を表し、Axisはその中で順序付け可能な時間軸を表す。通常はDomainを記述する必要はない。コンパイラは次の規則でDomainとAxisを決定する。
+
+| Timelineの形 | Domain | Axis |
+| --- | --- | --- |
+| 独立Timeline | Timeline専用の新Domain | 新Axis |
+| `sameAxisAs` | 参照先Domain | 参照先Axis |
+| `derivedFrom`の`fork`、`simulation` | 既定では新Domain | 新Axis |
+| `derivedFrom`の`recording`、`edit`、`resample`、`copy` | 既定では参照先Domain | 新Axis |
+| `domain`を明示（`sameAxisAs`以外） | 指定Domain | 上記規則によるAxis |
+
+単純な由来は`derivedFrom: Reality`と書ける。この場合のkindは`derived`である。由来の種類や接続位置が必要な場合はobject形式を使用する。
+
+```yaml
+derivedFrom:
+  timeline: Reality
+  kind: fork
+  sourceAt: 2026-01-01
+  origin: 0
+```
+
+`derivedFrom`のkindは`fork`、`simulation`、`recording`、`edit`、`resample`、`copy`、`derived`のいずれかである。`sourceAt`は参照元の分岐・取得位置、`origin`は派生Axis側の原点を記録する。これらはLineage metadataであり、それ自体からMappingを生成しない。したがって、由来が分かっていても`mapsTo`がなければ異なるAxis間を比較・変換できない。
+
+#### Mapping
+
+`mapsTo`は現在のTimelineのAxisをsource、指定したTimelineのAxisをtargetとする、明示的な変換グラフを作る。完全なexact identity mappingはTimeline IDだけで記述できる。
+
+```yaml
+mapsTo: Reality
+```
+
+複数または詳細なMappingではobjectまたはlist形式を使用する。
+
+| フィールド | 意味 |
+| --- | --- |
+| `id` | 任意のMapping ID。省略時はsource、target、記述順から生成する |
+| `timeline` | target Timeline ID |
+| `kind` | `coercion`、`isomorphism`、`embedding`、`projection`、`alignment`、`correspondence` |
+| `precision` | `exact`、`approximate`、`uncertain`。誤差を持つ場合はobjectの`error`で指定する |
+| `scale`、`offset` | `target = source * scale + offset`となる線形変換 |
+| `range` | Mappingが定義されるsource範囲 |
+| `segments` | 区分ごとのsource/target対応 |
+| `pairs` | 離散的な1対1、1対多、多対多対応 |
+| `traits` | 推論されたMapping性質を弱める明示的な上書き |
+| `requiredContext` | Mappingの適用に必要なcontextキー |
+| `provenance` | Mappingの出典metadata |
+
+```yaml
+mapsTo:
+  - timeline: Reality
+    kind: alignment
+    precision: exact
+    scale: 1/30
+    offset: 100
+    range: { from: 0, to: 3000 }
+```
+
+`segments`はsource範囲とtarget範囲から区分ごとの線形変換を推論する。source範囲の重複はエラー、gapは警告とする。targetの開始値が終了値より大きいsegmentは逆順編集を表現できる。
+
+```yaml
+mapsTo:
+  - timeline: SourceVideo
+    kind: correspondence
+    segments:
+      - source: { from: 0, to: 100 }
+        target: { from: 500, to: 600 }
+      - source: { from: 101, to: 200 }
+        target: { from: 900, to: 800 }
+```
+
+`pairs`は離散的な対応を表す。`to`をlistにすると1つのsourceに複数のtargetを対応させられる。
+
+```yaml
+mapsTo:
+  - timeline: EventLog
+    kind: correspondence
+    pairs:
+      - from: 10
+        to: [20, 21]
+```
+
+top-levelの`pairs`は`range`または`segments`と併用できない。segment内の`pairs`は、そのsegmentの`source`または`target`範囲と併用できない。`requiredContext`に指定したキーが変換時のcontextに存在しない場合、そのMappingは適用できない。
+
+コンパイラはrule、range、segments、pairsから次の性質を推論する。
+
+| trait | 値 |
+| --- | --- |
+| cardinality | `one-to-one`、`one-to-many`、`many-to-one`、`many-to-many` |
+| totality | `total`、`partial` |
+| order | `strictly-increasing`、`strictly-decreasing`、`monotonic`、`non-monotonic` |
+| invertibility | `invertible`、`conditionally-invertible`、`non-invertible` |
+| continuity | `continuous`、`piecewise`、`discrete` |
+
+`traits`で上書きできるのは、推論結果を保守的に弱める場合だけである。たとえば1対多のMappingを`one-to-one`または`invertible`と宣言することはできない。
+
+`precision: exact`は誤差のない変換を表す。`approximate`は`precision: { kind: approximate, error: 1/10 }`のように非負の`error`を必須とする。`uncertain`は単一値に確定できない変換を表し、`error`があれば下限と上限を持つRangeとして返せる。
+
+Mapping経路は精度、情報損失、hop数の順に評価する。同順位の経路が異なる結果を返す場合は、単一の結果を選ばずambiguousまたはalternativesとして返す。Type、Lineage、AliasはMapping経路として使用しない。
+
+#### 変換、比較、検索
+
+`TemporalEngine.convert`の結果は次のいずれかである。
+
+| 結果 | 意味 |
+| --- | --- |
+| `Exact` | 一意で誤差のない値 |
+| `Alternatives` | 同順位の経路または1対多対応による複数候補 |
+| `Range` | 不確実性による下限・上限 |
+| `Approximate` | 代表値と任意の誤差 |
+| `Unmappable` | 経路、範囲、context、または座標表現の制約により変換できない |
+
+`TemporalEngine.compare`は、同一AxisまたはMappingで変換可能な値を比較する。確定した順序は`Ordered(Before|Equal|After)`、不確実な範囲と交差する場合は`Overlapping`、候補によって順序が変わる場合は`Ambiguous`、近似結果は`Approximate`、Mappingはあるが適用できない場合は`Unmappable`を返す。Lineageだけが存在しMappingがないAxis同士は`Unrelated`になる。
+
+通常のvalidTime検索では、同じAxisに属するTimelineを同じ主張スコープとして扱う。異なるAxisへ検索範囲を展開するのは、結果が一意で、precisionがexact、contextが不要、かつ順序保存であるMapping経路だけである。approximate、uncertain、ambiguous、non-monotonicなMappingは変換APIでは利用できるが、通常検索の一致判定には使わない。
+
+Property Schemaの`timeline`は特定のTimeline個体ではなく、そのTimelineが属するAxisを制約する。`sameAxisAs`で追加した別表記は許容するが、`mapsTo`でのみ接続された別Axisは許容しない。
+
+#### 時間値
+
+`validTime`はTimeline IDと任意の`from`、`to`を持つ。境界値は冗長なobjectで包まず、TimelineのCoordinateSystemで解釈できる数値、日付、Era、またはquoted timecodeを直接記述する。
+
+```yaml
+validTime:
+  - timeline: Story
+    from: 10
+    to: 20
+  - timeline: CommonEra
+    from: 2020-01-01
+    to: 2026-12-31
+```
+
+`from`だけを持つ期間はその値以後、`to`だけを持つ期間はその値以前、両方を省略した期間はそのTimeline全体を表す。instantは`timeline + value`、durationは`timeline + from/to`として正規化する。本文では`validTime=Story(from=1/30,to=2/30)`、`validTime=CommonEra(from="2020-01-01")`、`validTime=Video(from="01:00:00;00")`のように記述する。
+
+#### 廃止された構文
+
+旧Timelineフィールドの`extends`、`timecode`、`mappings`と、Property Schemaの`mapped: true`は廃止する。コンパイラはそれぞれ`sameAxisAs`または`derivedFrom`、`coordinate`、`mapsTo`への置換を示すSchemaErrorを返す。本節の規則を新しい正規形とする。
 
 ### Markdown拡張記法
 
@@ -919,7 +1172,9 @@ Personの説明です
 
 ### Timeline
 
-Markdownでは`kind: Timeline`だけを定義する。Domain、Axis、CoordinateSystem、Lineage、Mappingはコンパイラが正規化モデルとして生成する。最小のTimelineは次の3フィールドだけでよい。
+以下は「仕様 / 時間モデル」で定義した構文の代表的な組み合わせである。
+
+最小の独立Timeline:
 
 ```yaml
 ---
@@ -928,11 +1183,7 @@ kind: Timeline
 ---
 ```
 
-設定のないTimelineは、そのID専用のDomainとAxisを持つ独立した`number`座標である。時間数値は整数、小数、`a/b`を既約な有理数として正確に保持する。他の独立Timelineとは自動比較しない。
-
-Timelineのトップレベルでは、`id`、`kind`、`sameAxisAs`、`scale`、`offset`、`coordinate`、`domain`、`derivedFrom`、`mapsTo`、`aliases`、`props`だけを使用できる。旧`extends`、`timecode`、`mappings`はエラーとする。
-
-#### 同じAxisの別表記
+同じAxisを使う別表記:
 
 ```yaml
 ---
@@ -943,11 +1194,7 @@ offset: 1000
 ---
 ```
 
-参照先の数値を`x`、現在のTimelineの値を`y`として`y = x * scale + offset`とする。`scale`は既定1、`offset`は既定0で、scale 0は禁止する。`coordinate`、`scale`、`offset`をすべて省略した場合は同じ座標表現の別名になる。`sameAxisAs`で結ばれたTimelineは同じDomain・Axisを持ち、validTime検索とProperty SchemaのAxis制約で同一に扱う。
-
-#### Coordinate
-
-通常は`coordinate`を省略する。短いpresetとして`number`、`gregorian`、`julian`、`frame`を使用できる。
+Gregorian暦とEra表記:
 
 ```yaml
 ---
@@ -956,29 +1203,6 @@ kind: Timeline
 coordinate: gregorian
 ---
 ```
-
-必要な場合だけobject形式へ展開する。
-
-```yaml
-coordinate:
-  kind: calendar
-  calendar: gregorian
-  numbering:
-    kind: offset
-    offset: 660
-    yearZero: false
-```
-
-```yaml
-coordinate:
-  kind: timecode
-  actualFps: 30000/1001
-  nominalFps: 30
-  dropFrame: true
-  wrapHours: 24
-```
-
-Eraはcalendar Timelineと同じAxisを使用する。
 
 ```yaml
 ---
@@ -995,11 +1219,7 @@ coordinate:
 ---
 ```
 
-標準機能はGregorian/Julian、common-era/astronomical/offset年番号、Era、FrameIndex、SMPTE drop/non-dropとする。タイムゾーン、UTC/TAI、うるう秒、歴史的な改暦の不確実性、汎用変換式DSLは扱わない。
-
-#### DomainとLineage
-
-通常はDomainを記述しない。独立Timelineは新Domain・新Axis、`sameAxisAs`は参照先のDomain・Axis、`derivedFrom`は新AxisとLineageを作る。`fork`と`simulation`は既定で新Domain、`recording`、`edit`、`resample`、`copy`は参照先Domainを使用する。必要な場合だけ`domain: Reality`で上書きする。
+Mappingを持たないIF世界のLineage:
 
 ```yaml
 ---
@@ -1013,11 +1233,7 @@ derivedFrom:
 ---
 ```
 
-短い由来は`derivedFrom: Reality`と書ける。Lineageは由来の記録であり、変換可能性を与えない。`sameAxisAs`と`derivedFrom`は同時指定できない。
-
-#### Mapping
-
-完全なidentity mappingは`mapsTo: Reality`と1行で書ける。複数・部分・非線形の対応だけobject/list形式へ展開する。
+部分Mappingを持つ録画Timeline:
 
 ```yaml
 ---
@@ -1037,37 +1253,7 @@ mapsTo:
 ---
 ```
 
-区分対応は`segments`、離散的な1対多・多対多対応は`pairs`を使用する。Mapping IDは省略でき、省略時はsource、target、記述順から生成する。cardinality、totality、order、invertibility、continuityはruleとsegmentから推論する。`traits`は推論結果を弱める上書きだけを許可し、非可逆なruleを可逆と宣言するなどの矛盾はエラーとする。
-
-```yaml
-mapsTo:
-  - timeline: SourceVideo
-    kind: correspondence
-    segments:
-      - source: { from: 0, to: 100 }
-        target: { from: 500, to: 600 }
-      - source: { from: 101, to: 200 }
-        target: { from: 900, to: 800 }
-  - timeline: EventLog
-    kind: correspondence
-    pairs:
-      - from: 10
-        to: [20, 21]
-```
-
-誤差を持つ変換では、precisionをobjectへ展開する。
-
-```yaml
-precision:
-  kind: approximate
-  error: 1/10
-```
-
-`TemporalEngine.convert`はexact、alternatives、range、approximate、unmappableを返し、`compare`はordered、overlapping、ambiguous、unrelated等を返す。Type、Lineage、Aliasは変換経路として使わない。通常検索が異なるAxisを横断するのは、一意・exact・順序保存のMapping経路だけである。
-
-#### 時間値
-
-validTimeの境界は冗長な`timecode` objectを使わず直接記述する。
+直接境界値を使うvalidTime:
 
 ```yaml
 validTime:
@@ -1078,8 +1264,6 @@ validTime:
     from: 2020-01-01
     to: 2026-12-31
 ```
-
-instantは`timeline + value`、durationは`timeline + from/to`へ正規化する。本文では`validTime=Story(from=1/30,to=2/30)`、`validTime=CommonEra(from="2020-01-01")`、`validTime=Video(from="01:00:00;00")`のように書ける。
 
 ### Node
 
