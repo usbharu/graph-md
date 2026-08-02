@@ -80,7 +80,11 @@ class TemporalEngine(
      * search: exact, context-free, single-valued, and order-preserving.
      * Richer paths remain available through [convert].
      */
-    fun convertForSearch(value: TemporalValue, targetTimeline: String): TemporalValue? {
+    fun convertForSearch(
+        value: TemporalValue,
+        targetTimeline: String,
+        requireTotalContinuousPath: Boolean = false,
+    ): TemporalValue? {
         val sourceSystem = coordinateSystems[value.timeline] ?: return null
         val targetSystem = coordinateSystems[targetTimeline] ?: return null
         val sourceAxisValue = normalizeToAxis(value.timeline, value.coordinate) ?: return null
@@ -95,6 +99,7 @@ class TemporalEngine(
             initial = sourceAxisValue,
             context = emptyMap(),
             searchOnly = true,
+            requireTotalContinuousPath = requireTotalContinuousPath,
         ).distinctBy { it.value }
         if (outcomes.size != 1 || outcomes.single().precision.kind != TemporalPrecisionKind.Exact) return null
         return denormalizeFromAxis(targetTimeline, outcomes.single().value)?.let {
@@ -318,6 +323,7 @@ class TemporalEngine(
         initial: ExactRational,
         context: Map<String, NormalizedValue>,
         searchOnly: Boolean = false,
+        requireTotalContinuousPath: Boolean = false,
     ): List<PathOutcome> {
         data class State(val axis: String, val outcomes: List<PathOutcome>, val visited: Set<String>)
         var frontier = listOf(State(sourceAxis, listOf(PathOutcome(initial, TemporalPrecision())), setOf(sourceAxis)))
@@ -327,7 +333,9 @@ class TemporalEngine(
             completed += frontier.filter { it.axis == targetAxis }.flatMap { it.outcomes }
             frontier = frontier.filter { it.axis != targetAxis }.flatMap { state ->
                 mappingsByAxis[state.axis].orEmpty().flatMap { edge ->
-                    if (searchOnly && !edge.isSearchSafe) return@flatMap emptyList()
+                    if (searchOnly && !edge.isSearchSafe(requireTotalContinuousPath)) {
+                        return@flatMap emptyList()
+                    }
                     val nextAxis = edge.toAxis
                     if (nextAxis in state.visited) return@flatMap emptyList()
                     val next = state.outcomes.flatMap { applyMapping(edge, it, context) }
@@ -480,28 +488,34 @@ class TemporalEngine(
     private data class MappingEdge(val mapping: TemporalMappingInstance, val inverse: Boolean) {
         val toAxis: String get() = if (inverse) mapping.sourceAxisId else mapping.targetAxisId
 
-        val isSearchSafe: Boolean
-            get() {
-                if (mapping.precision.kind != TemporalPrecisionKind.Exact || mapping.requiredContext.isNotEmpty()) {
-                    return false
-                }
-                if (mapping.traits.orderBehavior !in setOf(
-                        TemporalOrderBehavior.StrictlyIncreasing,
-                        TemporalOrderBehavior.Monotonic,
-                    )
-                ) return false
-                return if (inverse) {
-                    mapping.traits.cardinality in setOf(
-                        TemporalCardinality.OneToOne,
-                        TemporalCardinality.OneToMany,
-                    )
-                } else {
-                    mapping.traits.cardinality in setOf(
-                        TemporalCardinality.OneToOne,
-                        TemporalCardinality.ManyToOne,
-                    )
-                }
+        fun isSearchSafe(requireTotalContinuousPath: Boolean): Boolean {
+            if (
+                requireTotalContinuousPath &&
+                (mapping.traits.totality != TemporalTotality.Total ||
+                    mapping.traits.continuity != TemporalContinuity.Continuous)
+            ) {
+                return false
             }
+            if (mapping.precision.kind != TemporalPrecisionKind.Exact || mapping.requiredContext.isNotEmpty()) {
+                return false
+            }
+            if (mapping.traits.orderBehavior !in setOf(
+                    TemporalOrderBehavior.StrictlyIncreasing,
+                    TemporalOrderBehavior.Monotonic,
+                )
+            ) return false
+            return if (inverse) {
+                mapping.traits.cardinality in setOf(
+                    TemporalCardinality.OneToOne,
+                    TemporalCardinality.OneToMany,
+                )
+            } else {
+                mapping.traits.cardinality in setOf(
+                    TemporalCardinality.OneToOne,
+                    TemporalCardinality.ManyToOne,
+                )
+            }
+        }
 
         val informationLoss: Int
             get() = buildList {

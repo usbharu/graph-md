@@ -292,6 +292,16 @@ class TimelineCatalog private constructor(
         if (start == null && end == null) {
             return IntervalSet.of(TemporalInterval(source.assertionScopeId))
         }
+        val normalizedStart = start?.let { engine.normalizeToAxis(timelineId.value, it.first) }
+        val normalizedEnd = end?.let { engine.normalizeToAxis(timelineId.value, it.first) }
+        val isPoint = normalizedStart != null &&
+            normalizedStart == normalizedEnd &&
+            start.second &&
+            end.second
+        // Endpoint conversion is only sufficient for a full, continuous path.
+        // Partial or piecewise paths need interval splitting; excluding them here
+        // prevents an unmapped gap from becoming a searchable continuous range.
+        val requireTotalContinuousPath = !isPoint
         val targetByAxis = timelines.distinctBy { it.axisId }
         val intervals = targetByAxis.mapNotNull { target ->
             fun convert(boundary: Pair<TemporalCoordinate, Boolean>?): IntervalBoundary? {
@@ -302,6 +312,7 @@ class TimelineCatalog private constructor(
                     engine.convertForSearch(
                         TemporalValue(timelineId.value, boundary.first),
                         target.id.value,
+                        requireTotalContinuousPath = requireTotalContinuousPath,
                     ) ?: return null
                 }
                 val exact = engine.normalizeToAxis(converted.timeline, converted.coordinate) ?: return null

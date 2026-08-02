@@ -58,6 +58,40 @@ class TemporalQueryTest {
         assertFalse((exactAssertion intersect exactQuery).isEmpty)
     }
 
+    @Test
+    fun `range search does not fill gaps between mapping segments`() {
+        val result = compile(
+            timeline("Source"),
+            timeline(
+                "Target",
+                """
+                mapsTo:
+                  timeline: Source
+                  kind: correspondence
+                  segments:
+                    - source: { from: 100, to: 110 }
+                      target: { from: 0, to: 10 }
+                    - source: { from: 120, to: 130 }
+                      target: { from: 20, to: 30 }
+                """.trimIndent(),
+            ),
+        )
+        val catalog = TimelineCatalog.from(result.timelines)
+        val gapAssertion = catalog.fromValidTimes(
+            listOf(ValidTime("Target", TimePoint(115.0), TimePoint(115.0))),
+        )
+        val rangeQuery = TemporalWindow.ClosedRange(TimelineId("Source"), 0.0, 30.0)
+            .toIntervalSet(catalog)
+
+        assertTrue((gapAssertion intersect rangeQuery).isEmpty)
+
+        val mappedAssertion = catalog.fromValidTimes(
+            listOf(ValidTime("Target", TimePoint(105.0), TimePoint(105.0))),
+        )
+        val pointQuery = TemporalWindow.At(TimelineId("Source"), 5.0).toIntervalSet(catalog)
+        assertFalse((mappedAssertion intersect pointQuery).isEmpty)
+    }
+
     private fun compile(vararg sources: SourceDocument) = GraphCompiler().compileSources(sources.toList())
 
     private fun timeline(id: String, fields: String = "") = SourceDocument(
