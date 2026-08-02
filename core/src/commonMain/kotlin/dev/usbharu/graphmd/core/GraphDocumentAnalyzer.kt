@@ -693,8 +693,8 @@ class GraphDocumentAnalyzer {
             val listItemId = listItems.lastOrNull()?.id
             val content = listContent ?: rawContent
             val contentOffset = indent + if (listContent != null) 2 else 0
-            val mapping = Regex("""^([A-Za-z_][A-Za-z0-9_.-]*)\s*:(.*)$""").matchEntire(content)
-            if (mapping == null) {
+            val colonIndex = findYamlMappingColon(content)
+            if (colonIndex <= 0) {
                 if (listContent != null && path.lastOrNull() == "timeline") {
                     scalar(
                         content,
@@ -706,8 +706,9 @@ class GraphDocumentAnalyzer {
                 }
                 continue
             }
-            val key = mapping.groupValues[1]
-            val rawValue = mapping.groupValues[2]
+            val key = stripYamlScalar(content.substring(0, colonIndex).trim())
+            if (key.isEmpty()) continue
+            val rawValue = content.substring(colonIndex + 1)
             keysByPath.getOrPut(path) { mutableSetOf() } += key
             val selectorContext = SelectorContext(listItemId, path)
             keysBySelectorContext.getOrPut(selectorContext) { mutableSetOf() } += key
@@ -724,7 +725,7 @@ class GraphDocumentAnalyzer {
             ) {
                 numericKeysByPath.getOrPut(path) { mutableSetOf() } += key
             }
-            val colonOffset = content.indexOf(':') + 1
+            val colonOffset = colonIndex + 1
             if (rawValue.isBlank()) {
                 containerKeysByPath.getOrPut(path) { mutableSetOf() } += key
                 if (
@@ -1024,7 +1025,7 @@ class GraphDocumentAnalyzer {
     private fun yamlMappingKey(line: String): String? {
         val content = line.drop(line.indentWidth())
         if (content.startsWith("-")) return null
-        val colon = findYamlColon(content)
+        val colon = findYamlMappingColon(content)
         if (colon <= 0) return null
         return stripYamlScalar(content.substring(0, colon).trim())
     }
@@ -1047,7 +1048,7 @@ class GraphDocumentAnalyzer {
     }
 
     private fun yamlMappingEntry(content: String, absoluteStart: Int): YamlMappingEntry? {
-        val colon = findYamlColon(content)
+        val colon = findYamlMappingColon(content)
         if (colon <= 0) return null
         val rawKey = content.substring(0, colon).trim()
         val valuePart = content.substring(colon + 1)
@@ -1081,21 +1082,6 @@ class GraphDocumentAnalyzer {
             }
         }
         return value
-    }
-
-    private fun findYamlColon(value: String): Int {
-        var quote: Char? = null
-        var escaped = false
-        value.forEachIndexed { index, char ->
-            when {
-                escaped -> escaped = false
-                quote == '"' && char == '\\' -> escaped = true
-                quote != null && char == quote -> quote = null
-                quote == null && (char == '"' || char == '\'') -> quote = char
-                quote == null && char == ':' -> return index
-            }
-        }
-        return -1
     }
 
     private fun String.indentWidth(): Int =

@@ -114,6 +114,32 @@ class GraphDocumentParserTest {
     }
 
     @Test
+    fun `parses unquoted yaml keys containing colons`() {
+        val parsed = compiler.parseDocument(
+            """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            props:
+              name:
+                default: abcd
+                lang:ja: あいうえお
+            ---
+            """.trimIndent(),
+            "/tmp/alice.md",
+        )
+
+        assertTrue(parsed.diagnostics.isEmpty(), parsed.diagnostics.joinToString("\n") { it.message })
+        val document = parsed.document as? NodeDocument
+        assertNotNull(document)
+        val name = document.props.getValue("name") as RawObject
+        assertEquals("abcd", (name.values.getValue("default") as RawString).value)
+        assertEquals("あいうえお", (name.values.getValue("lang:ja") as RawString).value)
+        assertTrue("lang" !in name.values)
+    }
+
+    @Test
     fun `flow lists ignore blank items consistently with the previous parser`() {
         val variants = listOf(
             "[A,]",
