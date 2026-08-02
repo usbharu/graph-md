@@ -5,6 +5,7 @@ import dev.usbharu.graphmd.query.index.SearchIndexBuilder
 import dev.usbharu.graphmd.query.indexedFixtureGraph
 import dev.usbharu.graphmd.query.ir.AssertionOwner
 import dev.usbharu.graphmd.query.ir.PropertyAssertion
+import dev.usbharu.graphmd.query.ir.QueryNodeTypeSchema
 import dev.usbharu.graphmd.query.model.*
 import dev.usbharu.graphmd.query.runtime.IndexedQueryExecutor
 import kotlin.coroutines.Continuation
@@ -30,6 +31,39 @@ class StaticSearchIndexCodecTest {
         assertEquals(3, manifest.shards.getValue("nodes").size)
         assertTrue(manifest.shards.getValue("properties").size > 1)
         assertEquals(index, decoded)
+    }
+
+    @Test
+    fun `round trips raw enum values in schema metadata`() {
+        val schema = ResolvedPropSchema(
+            type = PropType.array,
+            enumValues = listOf(
+                RawString("text"),
+                RawInteger(1),
+                RawNumber(2.5),
+                RawBoolean(true),
+                RawNull,
+                RawArray(listOf(RawString("nested"))),
+                RawObject(mapOf("key" to RawString("value"))),
+            ),
+        )
+        val graph = indexedFixtureGraph().copy(
+            nodeTypeSchemas = mapOf(
+                NodeTypeId("Person") to QueryNodeTypeSchema(
+                    id = NodeTypeId("Person"),
+                    properties = mapOf("choices" to schema),
+                    ancestorTypeIds = emptySet(),
+                ),
+            ),
+        )
+
+        val bundle = StaticSearchIndexCodec.encode(SearchIndexBuilder().build(graph))
+        val decoded = StaticSearchIndexCodec.decode(bundle)
+
+        assertEquals(
+            schema,
+            decoded.graph.nodeTypeSchemas.getValue(NodeTypeId("Person")).properties.getValue("choices"),
+        )
     }
 
     @Test

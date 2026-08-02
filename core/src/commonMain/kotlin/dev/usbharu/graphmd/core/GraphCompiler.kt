@@ -606,7 +606,7 @@ class GraphCompiler(
                     parentConstraintBatches += resolvedPropConstraints[parent.id].orEmpty()
                     parent.props.forEach { (name, schema) ->
                         val existing = props[name]
-                        props[name] = existing?.copy(required = existing.required && schema.required) ?: schema
+                        props[name] = existing?.let { mergeInheritedPropSchema(it, schema) } ?: schema
                     }
                 }
             }
@@ -626,7 +626,11 @@ class GraphCompiler(
                 if (!validRefinement) {
                     diagnostics += schemaError("Invalid refinement for prop $name", doc.sourcePath, id)
                 }
-                props[name] = parent?.copy(required = parent.required && resolvedSchema.required) ?: resolvedSchema
+                props[name] = when {
+                    parent == null -> resolvedSchema
+                    validRefinement -> mergeInheritedPropSchema(parent, resolvedSchema)
+                    else -> parent.copy(required = parent.required && resolvedSchema.required)
+                }
                 if (validRefinement) {
                     val constraints = propConstraints.getOrPut(name) { mutableListOf() }
                     if (constraints.none { areEquivalentSchemas(it, resolvedPair.compatibility, timelineById) }) {
@@ -692,7 +696,7 @@ class GraphCompiler(
                     parentConstraintBatches += resolvedPropConstraints[parent.id].orEmpty()
                     parent.props.forEach { (name, schema) ->
                         val existing = inheritedProps[name]
-                        inheritedProps[name] = existing?.copy(required = existing.required && schema.required) ?: schema
+                        inheritedProps[name] = existing?.let { mergeInheritedPropSchema(it, schema) } ?: schema
                     }
                     val previousFrom = inheritedFrom
                     val previousTo = inheritedTo
@@ -744,7 +748,11 @@ class GraphCompiler(
                 if (!validRefinement) {
                     diagnostics += schemaError("Invalid refinement for prop $name", doc.sourcePath, id)
                 }
-                inheritedProps[name] = parent?.copy(required = parent.required && resolvedSchema.required) ?: resolvedSchema
+                inheritedProps[name] = when {
+                    parent == null -> resolvedSchema
+                    validRefinement -> mergeInheritedPropSchema(parent, resolvedSchema)
+                    else -> parent.copy(required = parent.required && resolvedSchema.required)
+                }
                 if (validRefinement) {
                     val constraints = propConstraints.getOrPut(name) { mutableListOf() }
                     if (constraints.none { areEquivalentSchemas(it, resolvedPair.compatibility, timelineById) }) {
@@ -827,6 +835,33 @@ class GraphCompiler(
             result[name] = schemas
         }
         return result
+    }
+
+    private fun mergeInheritedPropSchema(
+        existing: ResolvedPropSchema,
+        incoming: ResolvedPropSchema,
+    ): ResolvedPropSchema {
+        val mergedItems = when {
+            existing.items != null && incoming.items != null ->
+                mergeInheritedPropSchema(existing.items, incoming.items)
+            existing.items != null -> existing.items
+            incoming.items?.enumValues != null -> incoming.items
+            else -> null
+        }
+        return existing.copy(
+            required = existing.required && incoming.required,
+            items = mergedItems,
+            enumValues = intersectEnumValues(existing.enumValues, incoming.enumValues),
+        )
+    }
+
+    private fun intersectEnumValues(
+        left: List<RawValue>?,
+        right: List<RawValue>?,
+    ): List<RawValue>? = when {
+        left == null -> right
+        right == null -> left
+        else -> left.filter { value -> right.any { rawValuesEqual(it, value) } }
     }
 
     private fun narrowConstraint(current: List<String>?, next: List<String>?): List<String>? {
@@ -942,6 +977,7 @@ class GraphCompiler(
             timeline = resolvedTimeline,
             timelines = resolvedTimelines,
             items = resolvedItems?.normalized?.takeIf { schema.type == PropType.array },
+            enumValues = schema.enumValues,
         )
         val compatibility = ResolvedPropSchema(
             type = schema.type,
@@ -949,6 +985,7 @@ class GraphCompiler(
             timeline = schema.timeline,
             timelines = schema.timelines,
             items = resolvedItems?.compatibility?.takeIf { schema.type == PropType.array },
+            enumValues = schema.enumValues,
         )
         return ResolvedSchemaPair(normalized, compatibility)
     }
@@ -958,11 +995,23 @@ class GraphCompiler(
         child: ResolvedPropSchema,
         timelineById: Map<String, NormalizedTimeline>,
     ): Boolean {
-        if (parent.type != child.type || !timelineSelectorsCompatible(parent, child, timelineById)) return false
+        if (parent.type != child.type ||
+            !timelineSelectorsCompatible(parent, child, timelineById) ||
+            !enumValuesCompatible(parent.enumValues, child.enumValues)
+        ) return false
         if (parent.type != PropType.array) return true
         val parentItems = parent.items ?: return true
         val childItems = child.items ?: return false
         return isCompatibleRefinement(parentItems, childItems, timelineById)
+    }
+
+    private fun enumValuesCompatible(
+        parent: List<RawValue>?,
+        child: List<RawValue>?,
+    ): Boolean = when {
+        parent == null -> true
+        child == null -> false
+        else -> child.all { childValue -> parent.any { rawValuesEqual(it, childValue) } }
     }
 
     private fun areInheritedSchemasCompatible(
@@ -1246,6 +1295,28 @@ class GraphCompiler(
         return TimePoint(timecode, (obj.values["value"] as? RawString)?.value)
     }
 
+    private fun enumComparableValue(rawValue: RawValue): RawValue {
+        val objectValue = rawValue as? RawObject ?: return rawValue
+        val isTimedEntry = "value" in objectValue.values &&
+            objectValue.values.keys.all { it in setOf("value", "validTime") }
+        return if (isTimedEntry) objectValue.values.getValue("value") else rawValue
+    }
+
+    private fun validateEnumValue(
+        rawValue: RawValue,
+        enumValues: List<RawValue>?,
+        propName: String,
+        sourcePath: String,
+        documentId: String,
+        diagnostics: MutableList<Diagnostic>,
+    ) {
+        if (enumValues == null || enumValues.any { rawValuesEqual(it, rawValue) }) return
+        diagnostics += constraintError(
+            "$propName value is not in enum",
+            SourceInfo(sourcePath, documentId),
+        )
+    }
+
     private fun normalizeValue(
         rawValue: RawValue,
         schema: ResolvedPropSchema,
@@ -1263,10 +1334,15 @@ class GraphCompiler(
             return null
         }
 
+        if (schema.type != PropType.array && schema.type != PropType.text) {
+            validateEnumValue(rawValue, schema.enumValues, propName, sourcePath, documentId, diagnostics)
+        }
+
         return when (schema.type) {
             PropType.string -> (rawValue as? RawString)?.let { StringValue(it.value) } ?: fail("$propName must be string")
             PropType.text -> when (rawValue) {
                 is RawString -> {
+                    validateEnumValue(rawValue, schema.enumValues, propName, sourcePath, documentId, diagnostics)
                     validatePropertyTimelineSelector(
                         inheritedValidTime,
                         schema,
@@ -1283,6 +1359,14 @@ class GraphCompiler(
                 is RawObject -> {
                     val textMap = rawValue.values.mapValues { (key, value) ->
                         val memberPath = "$propName.$key"
+                        validateEnumValue(
+                            enumComparableValue(value),
+                            schema.enumValues,
+                            memberPath,
+                            sourcePath,
+                            documentId,
+                            diagnostics,
+                        )
                         normalizeSchemalessEntry(
                             value,
                             inheritedValidTime,
@@ -1322,6 +1406,14 @@ class GraphCompiler(
                             parseRawValidTimes(it, "$propName[].validTime", sourcePath, documentId, diagnostics)
                         } ?: inheritedValidTime
                     } else inheritedValidTime
+                    validateEnumValue(
+                        enumComparableValue(rawElement),
+                        schema.enumValues,
+                        "$propName[]",
+                        sourcePath,
+                        documentId,
+                        diagnostics,
+                    )
                     val normalized = if (schema.items != null) {
                         if (schema.items.type != PropType.text) {
                             validatePropertyTimelineSelector(

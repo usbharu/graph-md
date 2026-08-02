@@ -88,6 +88,16 @@ private fun TemporalPoint.toJson(): JsonValue = jsonObject(
     "timeline" to jsonNullableString(timeline),
 )
 
+internal fun RawValue.toJson(): JsonValue = when (this) {
+    is RawString -> jsonString(value)
+    is RawInteger -> jsonNumber(value)
+    is RawNumber -> jsonNumber(value)
+    is RawBoolean -> jsonBoolean(value)
+    RawNull -> JsonValue.Null
+    is RawArray -> jsonArray(values.map(RawValue::toJson))
+    is RawObject -> JsonValue.Object(values.sortedByKey().mapValues { (_, value) -> value.toJson() })
+}
+
 internal fun NormalizedValue.toJson(): JsonValue = when (this) {
     is StringValue -> jsonString(value)
     is IntegerValue -> jsonNumber(value)
@@ -149,6 +159,7 @@ internal fun ResolvedPropSchema.toJson(): JsonValue = jsonObject(
     "timeline" to (timeline?.toJson() ?: JsonValue.Null),
     "timelines" to (timelines?.let { jsonArray(it.map(TimelineSelector::toJson)) } ?: JsonValue.Null),
     "items" to (items?.toJson() ?: JsonValue.Null),
+    "enum" to (enumValues?.let { jsonArray(it.map(RawValue::toJson)) } ?: JsonValue.Null),
 )
 
 private fun TimelineSelector.toJson(): JsonValue = when (this) {

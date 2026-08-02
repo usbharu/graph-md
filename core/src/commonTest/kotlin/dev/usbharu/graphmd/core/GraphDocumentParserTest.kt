@@ -706,6 +706,90 @@ class GraphDocumentParserTest {
     }
 
     @Test
+    fun `parses raw enum values in property schemas`() {
+        val parsed = compiler.parseDocument(
+            """
+                ---
+                id: Choice
+                kind: NodeType
+                props:
+                  value:
+                    type: string
+                    enum:
+                      - alpha
+                      - 1
+                      - true
+                      - null
+                      - [nested]
+                ---
+            """.trimIndent(),
+            "/tmp/choice.md",
+        )
+
+        val schema = (parsed.document as NodeTypeDocument).props.getValue("value")
+        assertEquals(
+            listOf<RawValue>(
+                RawString("alpha"),
+                RawInteger(1),
+                RawBoolean(true),
+                RawNull,
+                RawArray(listOf(RawString("nested"))),
+            ),
+            schema.enumValues,
+        )
+        assertTrue(parsed.diagnostics.none { "Unknown property schema field" in it.message })
+    }
+
+    @Test
+    fun `validates property enum shape and duplicate values`() {
+        val scalar = compiler.parseDocument(
+            """
+                ---
+                id: Scalar
+                kind: NodeType
+                props:
+                  value:
+                    type: string
+                    enum: alpha
+                ---
+            """.trimIndent(),
+            "/tmp/scalar-enum.md",
+        )
+        val empty = compiler.parseDocument(
+            """
+                ---
+                id: Empty
+                kind: NodeType
+                props:
+                  value:
+                    type: string
+                    enum: []
+                ---
+            """.trimIndent(),
+            "/tmp/empty-enum.md",
+        )
+        val duplicate = compiler.parseDocument(
+            """
+                ---
+                id: Duplicate
+                kind: NodeType
+                props:
+                  value:
+                    type: string
+                    enum:
+                      - 1
+                      - 1.0
+                ---
+            """.trimIndent(),
+            "/tmp/duplicate-enum.md",
+        )
+
+        assertTrue(scalar.diagnostics.any { "props.value.enum MUST be a non-empty list" in it.message })
+        assertTrue(empty.diagnostics.any { "props.value.enum MUST be a non-empty list" in it.message })
+        assertTrue(duplicate.diagnostics.any { "props.value.enum values MUST be unique" in it.message })
+    }
+
+    @Test
     fun `reports invalid timecode schema shapes`() {
         val notMapping = compiler.parseDocument(
             """
