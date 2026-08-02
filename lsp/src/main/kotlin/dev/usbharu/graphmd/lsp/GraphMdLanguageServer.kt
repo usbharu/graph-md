@@ -1925,6 +1925,9 @@ internal class GraphMdWorkspaceIndex(
             }
             if (sourceRange != null) return document.analysisRangeOf(sourceRange)
         }
+        Regex("""^(.+) value is not in enum$""").matchEntire(diagnostic.message)?.let {
+            document.enumPropertyValueRange(it.groupValues[1])?.let { range -> return range }
+        }
         unknownFieldName(diagnostic.message)?.let { field -> document.yamlFieldKeyRange(field)?.let { return it } }
         Regex("""Unknown document kind: (.+)""").matchEntire(diagnostic.message)?.let {
             return document.yamlScalarRange("kind", it.groupValues[1])
@@ -2035,6 +2038,92 @@ private fun CompletionEntry.toCompletionItem(replacementRange: Range? = null): C
     }
 }
 
+private fun enumCompletionEntries(
+    values: List<RawValue>?,
+    prefix: String,
+    inline: Boolean,
+    quoted: Boolean = false,
+): List<CompletionEntry>? {
+    values ?: return null
+    val normalizedPrefix = prefix.trimStart().let { value ->
+        when {
+            value.startsWith("\"") || value.startsWith("'") -> value.substring(1)
+            else -> value
+        }
+    }
+    return values
+        .map { value ->
+            val label = rawValueCompletionLabel(value)
+            val insertText = rawValueCompletionText(value, inline, quoted)
+            CompletionEntry(label, CompletionItemKind.EnumMember, insertText, "enum")
+        }
+        .distinctBy { it.label to it.insertText }
+        .filter { it.label.startsWith(normalizedPrefix) }
+}
+
+private fun arrayElementEnumValues(schema: ResolvedPropSchema): List<RawValue>? =
+    schema.enumValues
+        ?: schema.items?.enumValues
+        ?: schema.items?.takeIf { it.type == PropType.array }?.let(::arrayElementEnumValues)
+
+private fun rawValueCompletionLabel(value: RawValue): String = when (value) {
+    is RawString -> value.value
+    else -> rawValueCompletionText(value, inline = false)
+}
+
+private fun rawValueCompletionText(value: RawValue, inline: Boolean, quoted: Boolean = false): String = when (value) {
+    is RawString -> if (quoted) {
+        quotedStringContent(value.value) + '"'
+    } else {
+        sourceStringLiteral(value.value)
+    }
+    is RawInteger -> value.value.toString()
+    is RawNumber -> value.value.toString()
+    is RawBoolean -> value.value.toString()
+    RawNull -> "null"
+    is RawArray -> value.values.joinToString(prefix = "[", postfix = "]", separator = ", ") {
+        rawValueCompletionText(it, inline)
+    }
+    is RawObject -> value.values.entries.joinToString(prefix = "{ ", postfix = " }", separator = ", ") { (key, child) ->
+        val renderedKey = if (inline && GRAPH_MD_ID_REGEX.matches(key)) key else quotedStringLiteral(key)
+        val separator = if (inline) " = " else ": "
+        "$renderedKey$separator${rawValueCompletionText(child, inline)}"
+    }
+}
+
+private fun sourceStringLiteral(value: String): String =
+    if (GRAPH_MD_ID_REGEX.matches(value) && value !in setOf("true", "false", "null")) value
+    else quotedStringLiteral(value)
+
+private fun quotedStringLiteral(value: String): String = "\"${quotedStringContent(value)}\""
+
+private fun quotedStringContent(value: String): String = buildString(value.length) {
+    value.forEach { character ->
+        when (character) {
+            '"' -> append("\\\"")
+            '\\' -> append("\\\\")
+            '\b' -> append("\\b")
+            '\u000c' -> append("\\f")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            else -> if (character.code < 0x20) {
+                append("\\u").append(character.code.toString(16).padStart(4, '0'))
+            } else {
+                append(character)
+            }
+        }
+    }
+}
+
+private fun arrayElementCompletionPrefix(prefix: String): Pair<String, Boolean> {
+    var current = prefix.substringAfterLast(',').trimStart()
+    while (current.startsWith("[")) current = current.substring(1).trimStart()
+    val quoted = current.startsWith("\"") || current.startsWith("'")
+    if (quoted) current = current.substring(1)
+    return current to quoted
+}
+
 private fun propValueSnippet(
     schema: ResolvedPropSchema,
     separator: String,
@@ -2142,7 +2231,9 @@ internal class FrontMatterCompletionResolver(
         }
 
         val path = contextPath(lines, lineIndex, indent, hasColon)
-        val valuePrefix = if (hasColon) scalarPrefix(beforeCursor.substringAfter(':', "")) else ""
+        val rawValuePrefix = if (hasColon) beforeCursor.substringAfter(':', "") else ""
+        val valuePrefix = scalarPrefix(rawValuePrefix)
+        val quotedValue = rawValuePrefix.trimStart().firstOrNull() in setOf('"', '\'')
         nodePropsYamlCompletions(
             lines,
             lineIndex,
@@ -2152,6 +2243,7 @@ internal class FrontMatterCompletionResolver(
             currentKeyPrefix,
             valuePrefix,
             documentKind,
+            quotedValue,
         )?.let { return it }
         return when {
             indent == 0 && keyCandidate.isNotEmpty() && !hasColon ->
@@ -2215,6 +2307,7 @@ internal class FrontMatterCompletionResolver(
         keyPrefix: String,
         valuePrefix: String,
         documentKind: DocumentKind?,
+        quotedValue: Boolean,
     ): List<CompletionEntry>? {
         if (documentKind !in setOf(DocumentKind.Node, DocumentKind.Media)) return null
         if (nodePropsSchema.isEmpty()) return null
@@ -2242,7 +2335,7 @@ internal class FrontMatterCompletionResolver(
         val parentContainer = nodePropsContainer(rawPath.dropLast(1)) ?: return null
         val schema = parentContainer.properties[currentKey]
         return when {
-            schema != null -> typedValueCompletions(schema, valuePrefix, yaml = true)
+            schema != null -> typedValueCompletions(schema, valuePrefix, yaml = true, quoted = quotedValue)
             currentKey == "timeline" && currentKey in parentContainer.specialKeys ->
                 idCompletions(valuePrefix, allowedTimelineIds(parentContainer.ownerSchema), "Timeline")
             else -> null
@@ -2348,9 +2441,26 @@ internal class FrontMatterCompletionResolver(
         return entries
     }
 
-    private fun typedValueCompletions(schema: ResolvedPropSchema, prefix: String, yaml: Boolean): List<CompletionEntry>? {
-        if (prefix.isNotEmpty()) return null
+    private fun typedValueCompletions(
+        schema: ResolvedPropSchema,
+        prefix: String,
+        yaml: Boolean,
+        quoted: Boolean = false,
+    ): List<CompletionEntry>? {
         val separator = if (yaml) ": " else " = "
+        if (schema.type == PropType.array && prefix.trimStart().startsWith("[")) {
+            val (elementPrefix, elementQuoted) = arrayElementCompletionPrefix(prefix)
+            return enumCompletionEntries(
+                arrayElementEnumValues(schema),
+                elementPrefix,
+                inline = !yaml,
+                quoted = quoted || elementQuoted,
+            )
+        }
+        if (schema.type != PropType.array && schema.enumValues != null) {
+            return enumCompletionEntries(schema.enumValues, prefix, inline = !yaml, quoted = quoted)
+        }
+        if (prefix.isNotEmpty()) return null
         val entries = when (schema.type) {
             PropType.string -> listOf(CompletionEntry("string", CompletionItemKind.Value, "\"\${1:value}\"", "string", InsertTextFormat.Snippet))
             PropType.text -> listOf(
@@ -2402,6 +2512,15 @@ internal class FrontMatterCompletionResolver(
         val afterDash = beforeCursor.substringAfter('-', "")
         val hasSpaceAfterDash = afterDash.firstOrNull()?.isWhitespace() == true
         val prefix = afterDash.trimStart()
+        val propPath = contextPath(lines, lineIndex, indentOf(lines[lineIndex]), includeCurrentLine = false)
+        val propSchema = nodePropSchemaAt(propPath, documentKind)
+        if (propSchema?.type == PropType.array && arrayElementEnumValues(propSchema) != null) {
+            return enumCompletionEntries(
+                arrayElementEnumValues(propSchema),
+                prefix,
+                inline = false,
+            )
+        }
         return when (parentKey) {
             "extends" -> when (documentKind) {
                 DocumentKind.NodeType -> idCompletions(prefix, nodeTypeIds, "NodeType")
@@ -2556,6 +2675,17 @@ internal class FrontMatterCompletionResolver(
             path.size >= 2 &&
             path.first() == "props" &&
             path.drop(2).all { it == "items" }
+
+    private fun nodePropSchemaAt(path: List<String>, documentKind: DocumentKind?): ResolvedPropSchema? {
+        if (documentKind !in setOf(DocumentKind.Node, DocumentKind.Media)) return null
+        if (path.firstOrNull() != "props") return null
+        var schema = nodePropsSchema[path.getOrNull(1)] ?: return null
+        path.drop(2).forEach { segment ->
+            if (segment != "items") return null
+            schema = schema.items ?: return null
+        }
+        return schema
+    }
 
     private fun inferredDocumentKind(lines: List<String>, endLine: Int): DocumentKind? {
         val raw = lines
@@ -2805,14 +2935,28 @@ internal class PropsPrefixScanner(
         }
         if (char == '"') {
             val end = readQuoted(prefix, index)
-            if (end < 0) return ValueParseResult(prefix.length, null)
+            if (end < 0) {
+                val entries = currentSchema
+                    ?.let {
+                        val values = if (it.type == PropType.array) arrayElementEnumValues(it) else it.enumValues
+                        enumCompletionEntries(values, prefix.substring(index + 1), inline = true, quoted = true)
+                    }
+                    ?.let(::PropsCompletionResult)
+                return ValueParseResult(prefix.length, entries)
+            }
             expectingValue = false
             expectingDelimiter = true
             return ValueParseResult(end, null)
         }
         if (char == '[') {
             val end = prefix.indexOf(']', index).let { if (it < 0) prefix.length else it + 1 }
-            if (end >= prefix.length) return ValueParseResult(end, null)
+            if (end >= prefix.length) {
+                val (elementPrefix, elementQuoted) = arrayElementCompletionPrefix(prefix.substring(index))
+                val entries = currentSchema
+                    ?.let { enumCompletionEntries(arrayElementEnumValues(it), elementPrefix, inline = true, quoted = elementQuoted) }
+                    ?.let(::PropsCompletionResult)
+                return ValueParseResult(end, entries)
+            }
             expectingValue = false
             expectingDelimiter = true
             return ValueParseResult(end, null)
@@ -2872,6 +3016,9 @@ internal class PropsPrefixScanner(
     private fun nestedProperties(schema: ResolvedPropSchema?): Map<String, ResolvedPropSchema> = emptyMap()
 
     private fun typedValueCompletions(schema: ResolvedPropSchema, prefix: String): List<CompletionEntry> {
+        if (schema.type != PropType.array && schema.enumValues != null) {
+            return enumCompletionEntries(schema.enumValues, prefix, inline = true).orEmpty()
+        }
         if (prefix.isNotEmpty() && schema.type !in setOf(PropType.number, PropType.instant)) return emptyList()
         return when (schema.type) {
             PropType.string -> listOf(CompletionEntry("string", CompletionItemKind.Value, "\"\${1:value}\"", "string", InsertTextFormat.Snippet))
@@ -3372,6 +3519,128 @@ private data class IndexedDocument(
         val start = inline.range.last + 1
         return rangeOf(SourceRange(start, inlineValueEnd(start)))
     }
+
+    fun enumPropertyValueRange(path: String): Range? {
+        if ('[' !in path) {
+            yamlValueRangeAtPath(listOf(path), arrayElement = false)?.let { return it }
+            inlinePropertyValueRange(path)?.let(::rangeOf)?.let { return it }
+        }
+        val segments = path.split('.').filter(String::isNotEmpty)
+        if (segments.isEmpty()) return null
+        val arrayElement = segments.any { "[" in it }
+        val keys = segments.map { it.substringBefore('[') }.filter(String::isNotEmpty)
+        yamlValueRangeAtPath(keys, arrayElement)?.let { return it }
+        return inlinePropertyValueRange(keys.first())?.let(::rangeOf)
+    }
+
+    private fun inlinePropertyValueRange(key: String): SourceRange? {
+        val match = Regex("""\b${Regex.escape(key)}(?:\s*\([^)]*\))?\s*=\s*""").find(text) ?: return null
+        var start = match.range.last + 1
+        while (start < text.length && text[start].isWhitespace()) start++
+        return SourceRange(start, inlineValueEnd(start))
+    }
+
+    private fun yamlValueRangeAtPath(keys: List<String>, arrayElement: Boolean): Range? {
+        if (keys.isEmpty()) return null
+        val lines = sourceLines()
+        val propsIndex = lines.indexOfFirst { it.content.matches(Regex("""\s*props\s*:.*""")) }
+        if (propsIndex < 0) return null
+        var parentIndent = lines[propsIndex].content.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
+        var searchIndex = propsIndex + 1
+        keys.forEachIndexed { keyIndex, key ->
+            val keyPattern = Regex("""^(\s*)${Regex.escape(key)}\s*:\s*(.*)$""")
+            var found: Pair<SourceLine, MatchResult>? = null
+            var index = searchIndex
+            while (index < lines.size) {
+                val line = lines[index]
+                if (line.content.trim() in setOf("---", "...")) break
+                if (line.content.isNotBlank()) {
+                    val indent = line.content.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
+                    if (indent <= parentIndent) break
+                    keyPattern.matchEntire(line.content)?.let { found = line to it; break }
+                }
+                index++
+            }
+            val (line, match) = found ?: return null
+            val valueGroup = match.groups[2] ?: return null
+            val rawValue = valueGroup.value.substringBefore('#').trimEnd()
+            if (rawValue.isNotBlank()) {
+                val leading = valueGroup.value.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
+                val start = line.start + valueGroup.range.first + leading
+                val trimmedValue = rawValue.trim()
+                val valueRange = if (
+                    trimmedValue.length >= 2 &&
+                    ((trimmedValue.first() == '"' && trimmedValue.last() == '"') ||
+                        (trimmedValue.first() == '\'' && trimmedValue.last() == '\''))
+                ) {
+                    SourceRange(start + 1, start + trimmedValue.length - 1)
+                } else {
+                    SourceRange(start, start + trimmedValue.length)
+                }
+                return rangeOf(valueRange)
+            }
+            if (keyIndex == keys.lastIndex && arrayElement) {
+                val itemIndent = line.content.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
+                var itemIndex = lineIndexAfter(lines, line)
+                while (itemIndex < lines.size) {
+                    val item = lines[itemIndex]
+                    if (item.content.trim() in setOf("---", "...")) break
+                    if (item.content.isNotBlank()) {
+                        val indent = item.content.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
+                        if (indent <= itemIndent) break
+                        val itemMatch = Regex("""^\s*-\s*(\S.*)$""").matchEntire(item.content)
+                        if (itemMatch != null) {
+                            val itemGroup = itemMatch.groups[1] ?: return null
+                            val value = itemGroup.value.substringBefore('#').trimEnd()
+                            val start = item.start + itemGroup.range.first
+                            val timedValue = Regex("""^value\s*:\s*(\S.*)$""").matchEntire(value.trim())
+                            if (timedValue != null) {
+                                val timedGroup = timedValue.groups[1] ?: return null
+                                val timedStart = start + value.indexOf(timedGroup.value)
+                                return rangeOf(SourceRange(timedStart, timedStart + timedGroup.value.length))
+                            }
+                            val trimmedValue = value.trim()
+                            val valueRange = if (
+                                trimmedValue.length >= 2 &&
+                                ((trimmedValue.first() == '"' && trimmedValue.last() == '"') ||
+                                    (trimmedValue.first() == '\'' && trimmedValue.last() == '\''))
+                            ) {
+                                SourceRange(start + 1, start + trimmedValue.length - 1)
+                            } else {
+                                SourceRange(start, start + trimmedValue.length)
+                            }
+                            return rangeOf(valueRange)
+                        }
+                    }
+                    itemIndex++
+                }
+            } else if (keyIndex == keys.lastIndex) {
+                val parentLineIndent = line.content.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
+                var childIndex = lineIndexAfter(lines, line)
+                while (childIndex < lines.size) {
+                    val child = lines[childIndex]
+                    if (child.content.trim() in setOf("---", "...")) break
+                    if (child.content.isNotBlank()) {
+                        val childIndent = child.content.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
+                        if (childIndent <= parentLineIndent) break
+                        val childMatch = Regex("""^\s*value\s*:\s*(\S.*)$""").matchEntire(child.content)
+                        if (childMatch != null) {
+                            val childGroup = childMatch.groups[1] ?: return null
+                            val childStart = child.start + childGroup.range.first
+                            return rangeOf(SourceRange(childStart, childStart + childGroup.value.length))
+                        }
+                    }
+                    childIndex++
+                }
+            }
+            parentIndent = line.content.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
+            searchIndex = lineIndexAfter(lines, line)
+        }
+        return null
+    }
+
+    private fun lineIndexAfter(lines: List<SourceLine>, line: SourceLine): Int =
+        lines.indexOfFirst { it.start == line.start }.let { if (it < 0) lines.size else it + 1 }
 
     fun linkWhitespaceRange(): Range? {
         val match = Regex("""@link(?:\([^)]*\))?(?:\{[^}]*\})?(\s+)(?=\[)""").findAll(text).lastOrNull()
