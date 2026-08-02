@@ -516,6 +516,8 @@ RelTypeで定義されたリンク
 
 利用者はMarkdown上で`kind: Timeline`の文書だけを定義する。TemporalDomain、TemporalAxis、TemporalCoordinateSystem、AxisLineage、Mappingは個別のMarkdown文書として定義せず、コンパイラがTimeline文書から正規化モデルとして生成する。
 
+段階的な使い方と検索結果まで含む具体例は[Timelineガイド](timeline-guide.md)に示す。本節は構文と意味の規範を定義する。
+
 #### Timeline文書
 
 Timelineのトップレベルで使用できるフィールドは次のものに限る。

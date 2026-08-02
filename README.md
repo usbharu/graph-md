@@ -18,6 +18,12 @@ This is the suggested way to use Gradle in production projects.
 
 The Gradle build consists of the `core`, `query`, `lsp`, and `cli` subprojects.
 
+## Documentation
+
+- [Timeline guide](docs/timeline-guide.md) explains the temporal model with practical GraphMD examples.
+- [GraphMD specification](docs/spec.md) defines the normative syntax and semantics.
+- [Query module guide](query/README.md) covers search, GMQL, and static indexes.
+
 ## Graph search engine
 
 The `query` Kotlin Multiplatform module turns `GraphCompilationResult` into an
