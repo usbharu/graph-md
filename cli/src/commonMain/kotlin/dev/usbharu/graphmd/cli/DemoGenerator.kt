@@ -9,6 +9,32 @@ internal data class DemoDocument(
     val kind: CliKind,
 )
 
+private enum class DemoTimelineFeature {
+    BaseNumber,
+    SameAxisAlias,
+    NumberAffine,
+    Gregorian,
+    Julian,
+    OffsetCalendar,
+    AstronomicalCalendar,
+    Era,
+    Frame,
+    NonDropTimecode,
+    DropTimecode,
+    Fork,
+    Simulation,
+    RecordingWithMappings,
+    Edit,
+    Resample,
+    Copy,
+    Derived,
+}
+
+private data class DemoTemporalRange(
+    val from: String,
+    val to: String,
+)
+
 internal data class DemoPlan(
     val requestedCount: Int,
     val seed: Int,
@@ -18,6 +44,12 @@ internal data class DemoPlan(
     val nodeCount: Int,
     val mediaCount: Int,
 ) {
+    private val coreTimelineFeatures: List<DemoTimelineFeature> =
+        listOf(DemoTimelineFeature.BaseNumber) +
+            DemoTimelineFeature.entries
+                .filterNot { it == DemoTimelineFeature.BaseNumber }
+                .shuffled(Random(seed xor 0x51ED270B))
+
     val generatedCount: Int =
         timelineCount + nodeTypeCount + relTypeCount + nodeCount + mediaCount
 
@@ -63,7 +95,7 @@ internal data class DemoPlan(
 
     private fun timelineDocument(index: Int, random: Random): DemoDocument {
         val id = timelineId(index)
-        val parent = randomParentIndices(index, random).firstOrNull()?.let(::timelineId)
+        val feature = timelineFeature(index)
         val language = if (index % 2 == 0) {
             "この時系列は出来事を整理するための基準です。"
         } else {
@@ -76,14 +108,204 @@ internal data class DemoPlan(
                 appendLine("---")
                 appendLine("id: $id")
                 appendLine("kind: Timeline")
-                parent?.let { appendLine("sameAxisAs: $it") }
+                when (feature) {
+                    DemoTimelineFeature.BaseNumber -> Unit
+                    DemoTimelineFeature.SameAxisAlias -> {
+                        appendLine("sameAxisAs: ${timelineIdFor(DemoTimelineFeature.BaseNumber)}")
+                        appendLine("aliases:")
+                        appendLine("  - DemoClock_${random.nextInt(100, 1_000)}")
+                        appendLine("props:")
+                        appendLine("  label:")
+                        appendLine("    default: Demo timeline $index")
+                        appendLine("    ja: デモ時系列 $index")
+                        appendLine("  note: Generated alias coordinate system")
+                    }
+                    DemoTimelineFeature.NumberAffine -> {
+                        appendLine("sameAxisAs: ${timelineIdFor(DemoTimelineFeature.BaseNumber)}")
+                        appendLine("scale: ${listOf("1/2", "2", "3/2").random(random)}")
+                        appendLine("offset: ${random.nextInt(100, 2_000)}")
+                    }
+                    DemoTimelineFeature.Gregorian -> appendLine("coordinate: gregorian")
+                    DemoTimelineFeature.Julian -> {
+                        appendLine("sameAxisAs: ${timelineIdFor(DemoTimelineFeature.Gregorian)}")
+                        appendLine("coordinate: julian")
+                    }
+                    DemoTimelineFeature.OffsetCalendar -> {
+                        appendLine("sameAxisAs: ${timelineIdFor(DemoTimelineFeature.Gregorian)}")
+                        appendLine("coordinate:")
+                        appendLine("  kind: calendar")
+                        appendLine("  calendar: gregorian")
+                        appendLine("  numbering:")
+                        appendLine("    kind: offset")
+                        appendLine("    offset: ${listOf(543, 660).random(random)}")
+                        appendLine("    yearZero: ${random.nextBoolean()}")
+                    }
+                    DemoTimelineFeature.AstronomicalCalendar -> {
+                        appendLine("sameAxisAs: ${timelineIdFor(DemoTimelineFeature.Gregorian)}")
+                        appendLine("coordinate:")
+                        appendLine("  kind: calendar")
+                        appendLine("  calendar: gregorian")
+                        appendLine("  numbering: astronomical")
+                    }
+                    DemoTimelineFeature.Era -> {
+                        appendLine("sameAxisAs: ${timelineIdFor(DemoTimelineFeature.Gregorian)}")
+                        appendLine("coordinate:")
+                        appendLine("  kind: era")
+                        appendLine("  periods:")
+                        appendLine("    - name: Heisei")
+                        appendLine("      aliases: [平成, H]")
+                        appendLine("      since: 1989-01-08")
+                        appendLine("      firstYear: 1")
+                        appendLine("    - name: Reiwa")
+                        appendLine("      aliases: [令和, R]")
+                        appendLine("      since: 2019-05-01")
+                        appendLine("      firstYear: 1")
+                    }
+                    DemoTimelineFeature.Frame -> {
+                        appendLine("coordinate:")
+                        appendLine("  kind: frame")
+                        appendLine("  start: ${random.nextInt(0, 101)}")
+                    }
+                    DemoTimelineFeature.NonDropTimecode -> {
+                        appendLine("sameAxisAs: ${timelineIdFor(DemoTimelineFeature.Frame)}")
+                        appendLine("coordinate:")
+                        appendLine("  kind: timecode")
+                        appendLine("  actualFps: 24")
+                        appendLine("  nominalFps: 24")
+                        appendLine("  dropFrame: false")
+                    }
+                    DemoTimelineFeature.DropTimecode -> {
+                        appendLine("sameAxisAs: ${timelineIdFor(DemoTimelineFeature.Frame)}")
+                        appendLine("coordinate:")
+                        appendLine("  kind: timecode")
+                        appendLine("  actualFps: 30000/1001")
+                        appendLine("  nominalFps: 30")
+                        appendLine("  dropFrame: true")
+                        appendLine("  wrapHours: 24")
+                    }
+                    DemoTimelineFeature.Fork -> {
+                        val baseTimeline = timelineIdFor(DemoTimelineFeature.BaseNumber)
+                        appendDerivedFrom(baseTimeline, "fork", random)
+                        appendLine("mapsTo: $baseTimeline")
+                    }
+                    DemoTimelineFeature.Simulation -> appendDerivedFrom(
+                        timelineIdFor(DemoTimelineFeature.BaseNumber),
+                        "simulation",
+                        random,
+                    )
+                    DemoTimelineFeature.RecordingWithMappings -> {
+                        appendLine("coordinate: frame")
+                        appendDerivedFrom(timelineIdFor(DemoTimelineFeature.BaseNumber), "recording", random)
+                        appendDemoMappings(timelineIdFor(DemoTimelineFeature.BaseNumber), random)
+                    }
+                    DemoTimelineFeature.Edit -> {
+                        appendLine("coordinate: frame")
+                        appendDerivedFrom(timelineIdFor(DemoTimelineFeature.RecordingWithMappings), "edit", random)
+                    }
+                    DemoTimelineFeature.Resample -> {
+                        appendLine("coordinate: frame")
+                        appendDerivedFrom(timelineIdFor(DemoTimelineFeature.RecordingWithMappings), "resample", random)
+                    }
+                    DemoTimelineFeature.Copy -> {
+                        appendLine("coordinate: number")
+                        appendLine("domain: DemoArchive_${random.nextInt(10, 100)}")
+                        appendDerivedFrom(timelineIdFor(DemoTimelineFeature.BaseNumber), "copy", random)
+                    }
+                    DemoTimelineFeature.Derived ->
+                        appendLine("derivedFrom: ${timelineIdFor(DemoTimelineFeature.BaseNumber)}")
+                }
                 appendLine("---")
                 appendLine()
                 appendLine("# $id")
                 appendLine()
-                appendLine(language)
+                appendLine("$language Demo feature: ${feature.name}.")
             },
         )
+    }
+
+    private fun timelineFeature(index: Int): DemoTimelineFeature {
+        if (index < coreTimelineFeatures.size) return coreTimelineFeatures[index]
+        val extraFeatures = DemoTimelineFeature.entries.filterNot {
+            it == DemoTimelineFeature.RecordingWithMappings
+        }
+        val mixed = seed.toUInt() * 1_664_525u + index.toUInt() * 1_013_904_223u
+        return extraFeatures[(mixed % extraFeatures.size.toUInt()).toInt()]
+    }
+
+    private fun timelineIdFor(feature: DemoTimelineFeature): String =
+        timelineId(coreTimelineFeatures.indexOf(feature))
+
+    private fun StringBuilder.appendDerivedFrom(
+        sourceTimeline: String,
+        kind: String,
+        random: Random,
+    ) {
+        appendLine("derivedFrom:")
+        appendLine("  timeline: $sourceTimeline")
+        appendLine("  kind: $kind")
+        appendLine("  sourceAt: ${random.nextInt(0, 10_000)}")
+        appendLine("  origin: ${random.nextInt(0, 100)}")
+        appendLine("  metadata:")
+        appendLine("    generator: graphmd-demo")
+        appendLine("    sample: ${random.nextInt(1, 1_000)}")
+    }
+
+    private fun StringBuilder.appendDemoMappings(targetTimeline: String, random: Random) {
+        val offset = random.nextInt(50, 500)
+        val rangeEnd = random.nextInt(1_000, 5_000)
+        val segmentEnd = random.nextInt(50, 250)
+        val segmentTarget = random.nextInt(500, 1_000)
+        val pairSource = random.nextInt(10, 100)
+        val pairTarget = random.nextInt(200, 500)
+        val mappingId = "DemoMap_${random.nextInt(1_000, 10_000)}"
+        appendLine("mapsTo:")
+        appendLine("  - $targetTimeline")
+        appendLine("  - timeline: $targetTimeline")
+        appendLine("    id: $mappingId")
+        appendLine("    kind: isomorphism")
+        appendLine("  - timeline: $targetTimeline")
+        appendLine("    kind: alignment")
+        appendLine("    precision: exact")
+        appendLine("    scale: 1/30")
+        appendLine("    offset: $offset")
+        appendLine("    range: { from: 0, to: $rangeEnd }")
+        appendLine("  - timeline: $targetTimeline")
+        appendLine("    kind: correspondence")
+        appendLine("    segments:")
+        appendLine("      - source: { from: 0, to: $segmentEnd }")
+        appendLine("        target: { from: ${segmentTarget + segmentEnd}, to: $segmentTarget }")
+        appendLine("  - timeline: $targetTimeline")
+        appendLine("    kind: correspondence")
+        appendLine("    pairs:")
+        appendLine("      - from: $pairSource")
+        appendLine("        to: [$pairTarget, ${pairTarget + random.nextInt(1, 20)}]")
+        appendLine("      - from: ${pairSource + 1}")
+        appendLine("        to: $pairTarget")
+        appendLine("  - timeline: $targetTimeline")
+        appendLine("    kind: projection")
+        appendLine("    precision:")
+        appendLine("      kind: approximate")
+        appendLine("      error: 1/10")
+        appendLine("    scale: 1/24")
+        appendLine("  - timeline: $targetTimeline")
+        appendLine("    kind: embedding")
+        appendLine("    precision:")
+        appendLine("      kind: uncertain")
+        appendLine("      error: 1/2")
+        appendLine("    scale: 1/25")
+        appendLine("  - timeline: $targetTimeline")
+        appendLine("    kind: coercion")
+        appendLine("    requiredContext:")
+        appendLine("      - project")
+        appendLine("    provenance:")
+        appendLine("      generator: graphmd-demo")
+        appendLine("      seed: $seed")
+        appendLine("    traits:")
+        appendLine("      cardinality: many-to-many")
+        appendLine("      totality: partial")
+        appendLine("      order: non-monotonic")
+        appendLine("      invertibility: non-invertible")
+        appendLine("      continuity: discrete")
     }
 
     private fun nodeTypeDocument(index: Int, random: Random): DemoDocument {
@@ -115,7 +337,6 @@ internal data class DemoPlan(
                     appendLine("  observedAt:")
                     appendLine("    type: instant")
                     appendLine("    required: true")
-                    appendLine("    timeline: ${timelineId(0)}")
                 } else {
                     appendLine("  detail_$index:")
                     appendLine("    type: string")
@@ -158,7 +379,6 @@ internal data class DemoPlan(
                     appendLine("  recordedAt:")
                     appendLine("    type: instant")
                     appendLine("    required: true")
-                    appendLine("    timeline: ${timelineId(0)}")
                 }
                 appendLine("---")
                 appendLine()
@@ -186,33 +406,34 @@ internal data class DemoPlan(
         }
         val score = random.nextInt(10, 100)
         val observedAt = random.nextInt(1, 10_000)
-        val documentTimeline = timelineId(random.nextInt(timelineCount))
-        val documentFrom = random.nextInt(0, 9_000)
-        val documentTo = documentFrom + random.nextInt(10, 1_000)
+        val documentTimelineIndex = random.nextInt(timelineCount)
+        val documentTimeline = timelineId(documentTimelineIndex)
+        val documentRange = randomTemporalRange(documentTimelineIndex, random)
         val entityCount = nodeCount + mediaCount
         val linkCount = minOf(3, entityCount - 1)
         val targetIndices = randomTargetIndices(index, entityCount, random)
             .take(random.nextInt(1, linkCount + 1))
         val links = targetIndices.joinToString("\n") { targetIndex ->
             val relType = relTypeId(random.nextInt(relTypeCount))
-            val timeline = timelineId(random.nextInt(timelineCount))
-            val from = random.nextInt(0, 9_000)
-            val to = from + random.nextInt(10, 1_000)
+            val timelineIndex = random.nextInt(timelineCount)
+            val timeline = timelineId(timelineIndex)
+            val range = randomTemporalRange(timelineIndex, random)
             val weight = random.nextInt(10, 100).toDouble() / 100
             val recordedAt = random.nextInt(1, 10_000)
             val target = entityId(targetIndex)
-            "@link(validTime=$timeline(from=$from,to=$to)){weight=$weight,recordedAt=$recordedAt}" +
+            "@link(validTime=$timeline(from=${range.from},to=${range.to}))" +
+                "{weight=$weight,recordedAt=$recordedAt}" +
                 "[${displayName(target)}]($target $relType)"
         }
         val prose = if (index % 2 == 0) {
             """
                 $title は${japanesePlaces.random(random)}で記録されました。複数の資料を比較し、背景と変化を短くまとめています。
-                概要は @props{summary(validTime=$documentTimeline(from=$documentFrom,to=$documentTo)) = "継続的に更新される記録"} として整理されています。
+                概要は @props{summary(validTime=$documentTimeline(from=${documentRange.from},to=${documentRange.to})) = "継続的に更新される記録"} として整理されています。
             """.trimIndent()
         } else {
             """
                 $title was recorded near ${englishPlaces.random(random)}. It summarizes the context and recent changes in a few concise observations.
-                Its summary is @props{summary(validTime=$documentTimeline(from=$documentFrom,to=$documentTo)) = "A record updated over time"}.
+                Its summary is @props{summary(validTime=$documentTimeline(from=${documentRange.from},to=${documentRange.to})) = "A record updated over time"}.
             """.trimIndent()
         }
         return DemoDocument(
@@ -231,7 +452,7 @@ internal data class DemoPlan(
                 appendLine("    - ${if (index % 2 == 0) "記録" else "record"}")
                 appendLine("    - benchmark")
                 appendLine("  observedAt:")
-                appendLine("    timeline: ${timelineId(0)}")
+                appendLine("    timeline: ${timelineIdFor(DemoTimelineFeature.BaseNumber)}")
                 appendLine("    value: $observedAt")
                 if (typeIndex > 0) {
                     appendLine(
@@ -242,8 +463,8 @@ internal data class DemoPlan(
                 }
                 appendLine("validTime:")
                 appendLine("  - timeline: $documentTimeline")
-                appendLine("    from: $documentFrom")
-                appendLine("    to: $documentTo")
+                appendLine("    from: ${documentRange.from}")
+                appendLine("    to: ${documentRange.to}")
                 appendLine("---")
                 appendLine()
                 appendLine("# $title")
@@ -254,6 +475,62 @@ internal data class DemoPlan(
             },
         )
     }
+
+    private fun randomTemporalRange(timelineIndex: Int, random: Random): DemoTemporalRange =
+        when (timelineFeature(timelineIndex)) {
+            DemoTimelineFeature.Gregorian,
+            DemoTimelineFeature.Julian,
+            DemoTimelineFeature.AstronomicalCalendar,
+            -> {
+                val year = random.nextInt(2020, 2031)
+                val month = random.nextInt(1, 13)
+                val fromDay = random.nextInt(1, 20)
+                val toDay = fromDay + random.nextInt(1, 8)
+                DemoTemporalRange(
+                    quotedDate(year, month, fromDay),
+                    quotedDate(year, month, toDay),
+                )
+            }
+            DemoTimelineFeature.OffsetCalendar -> {
+                val year = random.nextInt(2_700, 2_801)
+                val month = random.nextInt(1, 13)
+                val fromDay = random.nextInt(1, 20)
+                val toDay = fromDay + random.nextInt(1, 8)
+                DemoTemporalRange(
+                    quotedDate(year, month, fromDay),
+                    quotedDate(year, month, toDay),
+                )
+            }
+            DemoTimelineFeature.Era -> {
+                val year = random.nextInt(2, 10)
+                val month = random.nextInt(1, 13)
+                val fromDay = random.nextInt(1, 20)
+                val toDay = fromDay + random.nextInt(1, 8)
+                DemoTemporalRange(
+                    "\"令和 $year-${month.twoDigits()}-${fromDay.twoDigits()}\"",
+                    "\"令和 $year-${month.twoDigits()}-${toDay.twoDigits()}\"",
+                )
+            }
+            DemoTimelineFeature.NonDropTimecode,
+            DemoTimelineFeature.DropTimecode,
+            -> {
+                val dropFrame = timelineFeature(timelineIndex) == DemoTimelineFeature.DropTimecode
+                val nominalFps = if (dropFrame) 30 else 24
+                val hour = random.nextInt(0, 23)
+                val minute = random.nextInt(0, 60)
+                val fromSecond = random.nextInt(5, 45)
+                val toSecond = fromSecond + random.nextInt(1, 10)
+                val frame = random.nextInt(0, nominalFps)
+                val separator = if (dropFrame) ";" else ":"
+                fun timecode(second: Int): String =
+                    "\"${hour.twoDigits()}:${minute.twoDigits()}:${second.twoDigits()}$separator${frame.twoDigits()}\""
+                DemoTemporalRange(timecode(fromSecond), timecode(toSecond))
+            }
+            else -> {
+                val from = random.nextInt(0, 9_000)
+                DemoTemporalRange(from.toString(), (from + random.nextInt(10, 1_000)).toString())
+            }
+        }
 
     private fun randomParentIndices(index: Int, random: Random): List<Int> {
         if (index == 0) return emptyList()
@@ -284,8 +561,8 @@ internal data class DemoPlan(
 
 internal object DemoGenerator {
     fun plan(requestedCount: Int, requestedSeed: Int?): DemoPlan {
-        val total = max(requestedCount, 8)
-        val timelineCount = max(2, total / 50)
+        val total = max(requestedCount, minimumDemoDocumentCount)
+        val timelineCount = max(DemoTimelineFeature.entries.size, total / 50)
         val nodeTypeCount = max(2, total / 40)
         val relTypeCount = max(2, total / 50)
         val entityCount = total - timelineCount - nodeTypeCount - relTypeCount
@@ -302,6 +579,8 @@ internal object DemoGenerator {
     }
 }
 
+private val minimumDemoDocumentCount: Int = DemoTimelineFeature.entries.size + 6
+
 private fun timelineId(index: Int): String = "Timeline_${index.padded()}"
 private fun nodeTypeId(index: Int): String = "NodeType_${index.padded()}"
 private fun relTypeId(index: Int): String = "rel_${index.padded()}"
@@ -313,6 +592,9 @@ private fun entityFileName(index: Int, media: Boolean): String =
     "${if (media) "media" else "node"}-${index.padded(9)}.md"
 
 private fun Int.padded(width: Int = 6): String = toString().padStart(width, '0')
+private fun Int.twoDigits(): String = toString().padStart(2, '0')
+private fun quotedDate(year: Int, month: Int, day: Int): String =
+    "\"$year-${month.twoDigits()}-${day.twoDigits()}\""
 private fun displayName(id: String): String = id.replace('_', ' ')
 private fun yamlEscape(value: String): String = value.replace("\\", "\\\\").replace("\"", "\\\"")
 

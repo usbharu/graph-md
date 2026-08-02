@@ -18,17 +18,56 @@ class GraphMdCliTest {
 
         assertEquals(0, result.exitCode, result.stderr)
         assertTrue(result.stdout.contains("\"requestedCount\":3"))
-        assertTrue(result.stdout.contains("\"generatedCount\":8"))
+        assertTrue(result.stdout.contains("\"generatedCount\":24"))
         assertTrue(result.stdout.contains("\"seed\":42"))
-        assertEquals(8, fs.contentsUnder("/demo").size)
+        assertEquals(24, fs.contentsUnder("/demo").size)
         val generated = fs.contentsUnder("/demo").values
-        assertTrue(generated.count { "kind: Timeline" in it } >= 2)
+        assertEquals(18, generated.count { "kind: Timeline" in it })
         assertTrue(generated.count { "kind: NodeType" in it } >= 2)
         assertTrue(generated.count { "kind: RelType" in it } >= 2)
         assertTrue(generated.any { "kind: Media" in it })
         assertTrue(generated.any { "@link(" in it })
         assertTrue(generated.any { "この" in it })
         assertTrue(generated.any { "This " in it })
+    }
+
+    @Test
+    fun `demo timelines cover the complete temporal authoring surface`() {
+        val plan = DemoGenerator.plan(requestedCount = 24, requestedSeed = 42)
+        val timelines = plan.documents().filter { it.kind == CliKind.Timeline }.map { it.text }.toList()
+        val generated = timelines.joinToString("\n")
+
+        assertEquals(18, timelines.size)
+        listOf("sameAxisAs:", "scale:", "offset:", "aliases:", "props:", "domain:").forEach {
+            assertTrue(it in generated, "Missing Timeline field: $it")
+        }
+        listOf("gregorian", "julian", "kind: era", "kind: frame", "kind: timecode").forEach {
+            assertTrue(it in generated, "Missing coordinate feature: $it")
+        }
+        listOf("fork", "simulation", "recording", "edit", "resample", "copy", "derived").forEach {
+            val present = if (it == "derived") {
+                Regex("derivedFrom: Timeline_[0-9]+").containsMatchIn(generated)
+            } else {
+                "kind: $it" in generated
+            }
+            assertTrue(present, "Missing lineage kind: $it")
+        }
+        listOf("isomorphism", "alignment", "correspondence", "projection", "embedding", "coercion").forEach {
+            assertTrue("kind: $it" in generated, "Missing Mapping kind: $it")
+        }
+        listOf(
+            "mapsTo: Timeline_",
+            "    id: DemoMap_",
+            "segments:",
+            "pairs:",
+            "approximate",
+            "uncertain",
+            "traits:",
+            "requiredContext:",
+            "provenance:",
+        ).forEach {
+            assertTrue(it in generated, "Missing Mapping feature: $it")
+        }
     }
 
     @Test

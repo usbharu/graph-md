@@ -100,9 +100,11 @@ stderr while still reporting validation errors; `stats` retains the warning
 count as an aggregate.
 
 `demo DIR --count N` generates a compact, randomized GraphMD dataset containing
-Nodes, Media, links, properties, NodeType and RelType hierarchies, and compact
-Timeline aliases. The output directory must be new or empty. Counts below eight are
-expanded to the minimum complete eight-document dataset. Omit `--seed` for a
+Nodes, Media, links, properties, NodeType and RelType hierarchies, and a
+feature-complete set of Timeline coordinates, lineages, and mappings. The 18 core
+Timeline roles are shuffled and their parameters are varied by the seed; additional
+Timelines draw from the same feature set. The output directory must be new or empty.
+Counts below 24 are expanded to the minimum complete 24-document dataset. Omit `--seed` for a
 new dataset on each run, or provide an integer seed to reproduce the exact same
 files and relationships. The seed used is always included in command output.
 Documents are generated and written one at a time, so memory use does not grow
