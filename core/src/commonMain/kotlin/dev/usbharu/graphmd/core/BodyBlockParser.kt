@@ -6,6 +6,7 @@ internal data class ParsedBodyBlockHeader(
     val names: List<String>,
     val validTime: List<ValidTime>,
     val timelineReferences: List<InlineTimelineReference>,
+    val embed: EmbedDirective? = null,
 )
 
 internal data class BodyBlockParsing(
@@ -23,6 +24,7 @@ internal object BodyBlockHeaderParser {
     private val validTimeAssignment = Regex("""(?:^|[ \t])validTime[ \t]*=[ \t]*""")
 
     fun parse(header: String): ParsedBodyBlockHeader {
+        if (header.trimStart().startsWith("embed:")) return parseEmbedHeader(header)
         val names = mutableListOf<String>()
         var validTime = emptyList<ValidTime>()
         var timelineReferences = emptyList<InlineTimelineReference>()
@@ -85,6 +87,80 @@ internal object BodyBlockHeaderParser {
             skipHorizontal()
         }
         return ParsedBodyBlockHeader(names, validTime, timelineReferences)
+    }
+
+    private fun parseEmbedHeader(header: String): ParsedBodyBlockHeader {
+        var index = 0
+        var embed: EmbedDirective? = null
+
+        fun skipHorizontal() {
+            while (header.getOrNull(index) == ' ' || header.getOrNull(index) == '\t') index++
+        }
+
+        fun consume(text: String) {
+            if (!header.startsWith(text, index)) throw InlinePropsParseException("Expected $text")
+            index += text.length
+        }
+
+        fun quotedQuery(): String {
+            if (header.getOrNull(index) != '"') throw InlinePropsParseException("embed:query requires a quoted string")
+            index++
+            val result = StringBuilder()
+            while (index < header.length) {
+                when (val char = header[index++]) {
+                    '"' -> return result.toString()
+                    '\\' -> {
+                        val escaped = header.getOrNull(index++)
+                            ?: throw InlinePropsParseException("Unclosed embed:query string")
+                        result.append(
+                            when (escaped) {
+                                '"' -> '"'
+                                '\\' -> '\\'
+                                'n' -> '\n'
+                                'r' -> '\r'
+                                't' -> '\t'
+                                else -> throw InlinePropsParseException("Unsupported escape in embed:query: \\$escaped")
+                            },
+                        )
+                    }
+                    else -> result.append(char)
+                }
+            }
+            throw InlinePropsParseException("Unclosed embed:query string")
+        }
+
+        skipHorizontal()
+        while (index < header.length) {
+            consume("embed:")
+            embed = when {
+                header.startsWith("query=", index) -> {
+                    index += "query=".length
+                    EmbedDirective.Query(quotedQuery())
+                }
+                header.startsWith("back-link=", index) -> {
+                    index += "back-link=".length
+                    val start = index
+                    val first = header.getOrNull(index)
+                    if (first == null || !(first.isAsciiLetter() || first == '_')) {
+                        throw InlinePropsParseException("embed:back-link requires a RelType id")
+                    }
+                    index++
+                    while (header.getOrNull(index)?.let { it.isAsciiLetter() || it in '0'..'9' || it in setOf('_', '.', ':', '-') } == true) {
+                        index++
+                    }
+                    EmbedDirective.BackLink(header.substring(start, index))
+                }
+                else -> throw InlinePropsParseException("Unknown embed attribute")
+            }
+            if (index < header.length && header[index] != ' ' && header[index] != '\t') {
+                throw InlinePropsParseException("Embed attributes must be separated by spaces")
+            }
+            skipHorizontal()
+            if (index < header.length && !header.startsWith("embed:", index)) {
+                throw InlinePropsParseException("Embed blocks only accept embed attributes")
+            }
+        }
+        return ParsedBodyBlockHeader(emptyList(), emptyList(), emptyList(), embed)
     }
 
     fun isTimelineCompletionPosition(header: String, offset: Int): Boolean {
@@ -248,6 +324,7 @@ internal object BodyBlockParser {
         val validTime: List<ValidTime>,
         val lineStart: Int,
         val contentStart: Int,
+        val embed: EmbedDirective?,
         val completedDescendants: MutableList<ExtractedBodyBlock> = mutableListOf(),
     )
 
@@ -298,6 +375,7 @@ internal object BodyBlockParser {
                                 validTime = open.validTime,
                                 range = SourceRange(open.lineStart, nextLine),
                                 contentRange = SourceRange(open.contentStart, lineStart),
+                                embed = open.embed,
                             )
                             val completedSubtree = open.completedDescendants + completed
                             val parent = stack.lastOrNull()
@@ -332,12 +410,22 @@ internal object BodyBlockParser {
                                 contentEnd,
                             )
                         } else {
+                            if (parsed.embed != null && stack.any { it.embed != null }) {
+                                diagnostics += syntaxDiagnostic(
+                                    "Embed blocks must not be nested inside another embed block",
+                                    sourcePath,
+                                    documentId,
+                                    lineStart,
+                                    contentEnd,
+                                )
+                            }
                             stack += OpenBlock(
                                 names = parsed.names,
                                 fenceLength = marker.fenceLength,
                                 validTime = parsed.validTime,
                                 lineStart = lineStart,
                                 contentStart = nextLine,
+                                embed = parsed.embed,
                             )
                         }
                     }

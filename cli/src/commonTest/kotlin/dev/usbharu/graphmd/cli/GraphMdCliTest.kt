@@ -11,6 +11,89 @@ import kotlin.test.assertTrue
 
 class GraphMdCliTest {
     @Test
+    fun `embed materializes query and backlink tables idempotently`() {
+        val fs = FakeFileSystem(
+            mapOf(
+                "/workspace/Person.md" to nodeType("Person"),
+                "/workspace/friendOf.md" to """
+                    ---
+                    id: friendOf
+                    kind: RelType
+                    from: [Person]
+                    to: [Person]
+                    ---
+                """.trimIndent(),
+                "/workspace/alice.md" to node(
+                    "alice",
+                    "Person",
+                    """
+                    @link[Bob](bob friendOf)
+                    ::: embed:query="MATCH (n:Person) RETURN ID(n) AS id ORDER BY id LIMIT 100"
+                    stale
+                    :::
+                    """.trimIndent(),
+                ),
+                "/workspace/bob.md" to node(
+                    "bob",
+                    "Person",
+                    """
+                    ::: embed:back-link=friendOf
+                    old
+                    :::
+                    """.trimIndent(),
+                ),
+            ),
+        )
+        val cli = GraphMdCli(fs)
+
+        val first = cli.run(listOf("embed", "/workspace"))
+        val afterFirst = fs.contentsUnder("/workspace")
+        val second = cli.run(listOf("embed", "/workspace", "--json"))
+
+        assertEquals(0, first.exitCode, first.stderr)
+        assertEquals(0, second.exitCode, second.stderr)
+        assertEquals(afterFirst, fs.contentsUnder("/workspace"))
+        assertTrue(afterFirst.getValue("/workspace/alice.md").contains("| id |"))
+        assertTrue(afterFirst.getValue("/workspace/bob.md").contains("| [alice](alice.md) | Person | Anytime |"))
+        assertTrue(second.stdout.contains("\"updatedBlocks\":2"))
+    }
+
+    @Test
+    fun `embed skips only a file whose query fails`() {
+        val bad = node(
+            "bad",
+            "Person",
+            """
+            ::: embed:query="NOT GMQL"
+            keep me
+            :::
+            """.trimIndent(),
+        )
+        val fs = FakeFileSystem(
+            mapOf(
+                "/workspace/Person.md" to nodeType("Person"),
+                "/workspace/bad.md" to bad,
+                "/workspace/good.md" to node(
+                    "good",
+                    "Person",
+                    """
+                    ::: embed:query="MATCH (n:Person) RETURN ID(n) AS id LIMIT 100"
+                    replace me
+                    :::
+                    """.trimIndent(),
+                ),
+            ),
+        )
+
+        val result = GraphMdCli(fs).run(listOf("embed", "/workspace"))
+
+        assertEquals(1, result.exitCode)
+        assertEquals(bad, fs.contentsUnder("/workspace").getValue("/workspace/bad.md"))
+        assertFalse(fs.contentsUnder("/workspace").getValue("/workspace/good.md").contains("replace me"))
+        assertTrue(result.stderr.contains("Skipped /workspace/bad.md"))
+    }
+
+    @Test
     fun `demo generates a valid minimum dataset and reports its seed`() {
         val fs = FakeFileSystem(emptyMap())
 
@@ -1201,6 +1284,8 @@ class GraphMdCliTest {
         type: $type
         ---
     """.trimIndent()
+
+    private fun node(id: String, type: String, body: String): String = node(id, type) + "\n" + body
 }
 
 private class FakeFileSystem(
@@ -1273,6 +1358,9 @@ private class FakeFileSystem(
 
     fun contentsUnder(path: String): Map<String, String> {
         val prefix = canonical(path).let { if (it == "/") "/" else "$it/" }
-        return mutableFiles.filterKeys { it.startsWith(prefix) }.toSortedMap()
+        return mutableFiles.entries
+            .filter { it.key.startsWith(prefix) }
+            .sortedBy { it.key }
+            .associateTo(linkedMapOf()) { it.key to it.value }
     }
 }

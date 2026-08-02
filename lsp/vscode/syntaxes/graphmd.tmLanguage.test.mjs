@@ -34,6 +34,8 @@ for (const source of [
   "::: history validTime=CommonEra",
   "::::: spoiler annotation validTime=Branch",
   "   :::::::: repeated repeated",
+  '::: embed:query="MATCH (n) RETURN n"',
+  "::: embed:back-link=friendOf",
 ]) {
   test(`highlights a body block opening fence in ${source}`, () => {
     assert.equal(bodyBlockBegin.test(source), true);

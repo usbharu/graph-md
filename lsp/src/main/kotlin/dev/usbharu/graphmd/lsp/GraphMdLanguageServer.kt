@@ -4,6 +4,8 @@ import dev.usbharu.graphmd.core.*
 import dev.usbharu.graphmd.core.model.Diagnostic
 import dev.usbharu.graphmd.core.model.*
 import dev.usbharu.graphmd.query.GraphSearchEngine
+import dev.usbharu.graphmd.query.embed.EmbedEngine
+import dev.usbharu.graphmd.query.embed.EmbedDiagnostic
 import dev.usbharu.graphmd.query.gmql.GmqlExecutionOptions
 import dev.usbharu.graphmd.query.gmql.GmqlExecutionProfile
 import dev.usbharu.graphmd.query.gmql.GmqlValue
@@ -95,6 +97,9 @@ class GraphMdLanguageServer : LanguageServer, LanguageClientAware, GraphMdSearch
 
     override fun searchMetadata(): CompletableFuture<GraphMdSearchMetadata> =
         CompletableFuture.supplyAsync { workspaceIndex.searchMetadata() }
+
+    override fun renderEmbed(params: GraphMdEmbedParams): CompletableFuture<GraphMdEmbedResponse> =
+        CompletableFuture.supplyAsync { workspaceIndex.renderEmbed(params) }
 
     @Synchronized
     fun publishDiagnostics() {
@@ -1636,6 +1641,34 @@ internal class GraphMdWorkspaceIndex(
         return GraphMdSearchResponse(columns, rows, diagnostics)
     }
 
+    fun renderEmbed(params: GraphMdEmbedParams): GraphMdEmbedResponse {
+        val document = synchronized(this) { documents[normalizeUri(params.uri)] }
+            ?: return embedError("GRAPHMD_EMBED_DOCUMENT", "Document is not indexed.")
+        val parsed = GraphCompiler().parseDocument(document.text, document.path.toString())
+        val node = parsed.document as? NodeDocument
+            ?: return embedError("GRAPHMD_EMBED_DOCUMENT", "Embed blocks are only supported in Node and Media documents.")
+        val directive = when (params.kind) {
+            "query" -> EmbedDirective.Query(params.value)
+            "back-link" -> EmbedDirective.BackLink(params.value)
+            else -> return embedError("GRAPHMD_EMBED_KIND", "Unknown embed kind '${params.kind}'.")
+        }
+        val (workspace, engine) = stableSearchWorkspace()
+        if (workspace.generation != synchronized(this) { workspaceGeneration }) {
+            return embedError("GRAPHMD_EMBED_STALE", "The workspace changed while rendering the embed.")
+        }
+        val result = runSearchSuspend { EmbedEngine(engine).render(directive, node.id) }
+        return GraphMdEmbedResponse(
+            columns = result.table?.columns.orEmpty().map { GraphMdEmbedColumn(it.name, it.type) },
+            rows = result.table?.rows.orEmpty().map { row ->
+                GraphMdEmbedRow(row.cells.map { GraphMdEmbedCell(it.text, it.targetId) })
+            },
+            diagnostics = result.diagnostics.map(EmbedDiagnostic::toSearchDiagnostic),
+        )
+    }
+
+    private fun embedError(code: String, message: String): GraphMdEmbedResponse =
+        GraphMdEmbedResponse(diagnostics = listOf(GraphMdSearchDiagnostic(code, "embed", message)))
+
     fun searchMetadata(): GraphMdSearchMetadata {
         val compiled = compiledWorkspace()
         return GraphMdSearchMetadata(
@@ -2011,6 +2044,9 @@ internal class GraphMdWorkspaceIndex(
         else -> error("Unknown reference target kind: $name")
     }
 }
+
+private fun EmbedDiagnostic.toSearchDiagnostic(): GraphMdSearchDiagnostic =
+    GraphMdSearchDiagnostic(code, "embed", message)
 
 internal data class CompletionEntry(
     val label: String,

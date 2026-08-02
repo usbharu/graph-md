@@ -1,4 +1,14 @@
-import { isValidBlockHeader } from "./core-bindings";
+import { isValidBlockHeader, parseEmbedHeader, type EmbedParts } from "./core-bindings";
+
+export interface EmbedColumn { name: string; type: string }
+export interface EmbedCell { text: string; targetId?: string | null }
+export interface EmbedRow { cells: EmbedCell[] }
+export interface EmbedTable { columns: EmbedColumn[]; rows: EmbedRow[] }
+export type EmbedResolution =
+  | { status: "pending" }
+  | { status: "ready"; table: EmbedTable }
+  | { status: "error"; message: string };
+export type EmbedResolver = (directive: EmbedParts, env?: unknown) => EmbedResolution;
 
 const COLON = 0x3a;
 const SPACE = 0x20;
@@ -40,16 +50,26 @@ export function bodyBlockRule(state: any, startLine: number, endLine: number, si
   if (silent) return true;
 
   const { opening, closeLine } = block;
+  const embed = parseEmbedHeader(opening.header);
+  const resolution = embed === null
+    ? undefined
+    : (state.md.__graphmdEmbedResolver as EmbedResolver | undefined)?.(embed, state.env);
   const openToken = state.push("graphmd_body_block_open", "", 1);
   openToken.block = true;
   openToken.map = [startLine, closeLine + 1];
   openToken.markup = ":".repeat(opening.fenceLength);
-  openToken.meta = { header: opening.header, fenceLength: opening.fenceLength };
+  openToken.meta = { header: opening.header, fenceLength: opening.fenceLength, embed, resolution };
 
   const previousParent = state.parentType;
   state.parentType = "graphmd_block";
   try {
-    state.md.block.tokenize(state, startLine + 1, closeLine);
+    if (resolution?.status === "ready") {
+      const table = state.push("graphmd_embed_table", "", 0);
+      table.block = true;
+      table.meta = { directive: embed, table: resolution.table };
+    } else {
+      state.md.block.tokenize(state, startLine + 1, closeLine);
+    }
   } finally {
     state.parentType = previousParent;
   }
@@ -61,8 +81,32 @@ export function bodyBlockRule(state: any, startLine: number, endLine: number, si
   return true;
 }
 
-export function renderBodyBlockBoundary(): string {
-  return "";
+export function renderBodyBlockBoundary(tokens?: any[], idx?: number): string {
+  const resolution = tokens?.[idx ?? 0]?.meta?.resolution as EmbedResolution | undefined;
+  if (resolution?.status !== "error") return "";
+  return `<div class="graphmd-embed-error" role="alert">${escapeHtml(resolution.message)}</div>`;
+}
+
+export function renderEmbedTable(
+  tokens: any[],
+  idx: number,
+  hrefTransform?: (target: string, relType: string, env?: unknown) => string | null,
+  env?: unknown,
+): string {
+  const meta = tokens[idx].meta as { directive: EmbedParts; table: EmbedTable };
+  const head = meta.table.columns.map((column) =>
+    `<th title="${escapeHtml(column.type)}">${escapeHtml(column.name)}</th>`).join("");
+  const body = meta.table.rows.map((row) => `<tr>${row.cells.map((cell) => {
+    const text = escapeHtml(cell.text).replace(/\r\n|\r|\n/g, "<br>");
+    const href = cell.targetId == null ? null : hrefTransform?.(cell.targetId, "", env);
+    return `<td>${href == null ? text : `<a href="${escapeHtml(href)}">${text}</a>`}</td>`;
+  }).join("")}</tr>`).join("");
+  return `<table class="graphmd-embed" data-embed-kind="${escapeHtml(meta.directive.kind)}"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>\n`;
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 function validBodyBlocks(state: any): Map<number, ValidBodyBlock> {

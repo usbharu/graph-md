@@ -1,8 +1,10 @@
 package dev.usbharu.graphmd.cli
 
 import dev.usbharu.graphmd.core.GraphCompiler
+import dev.usbharu.graphmd.core.BodySyntaxExtractor
 import dev.usbharu.graphmd.core.model.*
 import dev.usbharu.graphmd.query.GraphSearchEngine
+import dev.usbharu.graphmd.query.embed.*
 import dev.usbharu.graphmd.query.gmql.*
 import dev.usbharu.graphmd.query.model.IntervalBoundary
 import dev.usbharu.graphmd.query.model.IntervalSet
@@ -32,9 +34,15 @@ class GraphMdCli internal constructor(
             is ParseResult.Run -> try {
                 execute(parsed)
             } catch (exception: CliIoException) {
-                usageError(exception.message ?: "I/O error", if (parsed.command is CliCommand.Demo) 1 else 2)
+                usageError(
+                    exception.message ?: "I/O error",
+                    if (parsed.command is CliCommand.Demo || parsed.command is CliCommand.Embed) 1 else 2,
+                )
             } catch (exception: Throwable) {
-                usageError(exception.message ?: "Unexpected error", if (parsed.command is CliCommand.Demo) 1 else 2)
+                usageError(
+                    exception.message ?: "Unexpected error",
+                    if (parsed.command is CliCommand.Demo || parsed.command is CliCommand.Embed) 1 else 2,
+                )
             }
         }
     }
@@ -57,8 +65,102 @@ class GraphMdCli internal constructor(
             is CliCommand.Lint -> lint(compilation, command, invocation.json)
             is CliCommand.Stats -> stats(compilation, command, invocation.json)
             is CliCommand.Search -> search(compilation, sources, command, invocation.json)
+            is CliCommand.Embed -> embed(compilation, sources, invocation.json)
             is CliCommand.Demo -> error("demo is executed before workspace loading")
         }
+    }
+
+    private fun embed(
+        compilation: GraphCompilationResult,
+        sources: List<SourceDocument>,
+        json: Boolean,
+    ): CliResult {
+        val engine = EmbedEngine(GraphSearchEngine.build(compilation, sources))
+        val targetPaths = compilation.nodes.associate { it.id to it.source.path }
+        val updated = mutableListOf<Pair<String, Int>>()
+        val skipped = mutableListOf<Pair<String, List<String>>>()
+
+        sources.forEach { source ->
+            val crlf = "\r\n" in source.text
+            val normalized = source.text.replace("\r\n", "\n").replace('\r', '\n')
+            val parsed = GraphCompiler().parseDocument(normalized, source.sourcePath)
+            val document = parsed.document as? NodeDocument ?: return@forEach
+            val extraction = BodySyntaxExtractor().extract(document.body, source.sourcePath, document.id)
+            val blocks = extraction.blocks.filter { it.embed != null }
+            if (blocks.isEmpty()) return@forEach
+            val errors = extraction.diagnostics
+                .filter { it.severity == Severity.Error }
+                .map { it.message }
+                .toMutableList()
+            val replacements = mutableListOf<Pair<SourceRange, String>>()
+            val bodyStart = markdownBodyStart(normalized)
+
+            blocks.forEach { block ->
+                val directive = checkNotNull(block.embed)
+                val rendered = if (errors.isEmpty()) {
+                    runCliSuspend { engine.render(directive, document.id) }
+                } else {
+                    null
+                }
+                if (rendered != null && rendered.isSuccess) {
+                    val markdown = checkNotNull(rendered.table).toMarkdown { targetId ->
+                        targetPaths[targetId]?.let { target -> relativeMarkdownPath(source.sourcePath, target) }
+                    }
+                    replacements += SourceRange(
+                        bodyStart + block.contentRange.start,
+                        bodyStart + block.contentRange.end,
+                    ) to markdown
+                } else if (rendered != null) {
+                    errors += rendered.diagnostics.map { "${it.code}: ${it.message}" }
+                }
+            }
+
+            if (errors.isNotEmpty()) {
+                skipped += source.sourcePath to errors.distinct()
+                return@forEach
+            }
+            var next = normalized
+            replacements.sortedByDescending { it.first.start }.forEach { (range, markdown) ->
+                next = next.replaceRange(range.start, range.end, markdown)
+            }
+            val output = if (crlf) next.replace("\n", "\r\n") else next
+            try {
+                fileSystem.writeText(source.sourcePath, output)
+                updated += source.sourcePath to blocks.size
+            } catch (exception: Throwable) {
+                skipped += source.sourcePath to listOf("Cannot write ${source.sourcePath}: ${exception.message ?: "I/O error"}")
+            }
+        }
+
+        val compileErrors = compilation.diagnostics.filter { it.severity == Severity.Error }
+        val hasErrors = skipped.isNotEmpty() || compileErrors.isNotEmpty()
+        if (json) {
+            val output = jsonObject(
+                "updatedFiles" to jsonArray(updated.map { (path, blocks) ->
+                    jsonObject("path" to jsonString(path), "blocks" to jsonNumber(blocks))
+                }),
+                "skippedFiles" to jsonArray(skipped.map { (path, messages) ->
+                    jsonObject(
+                        "path" to jsonString(path),
+                        "diagnostics" to jsonArray(messages.map(::jsonString)),
+                    )
+                }),
+                "updatedBlocks" to jsonNumber(updated.sumOf { it.second }),
+                "diagnostics" to jsonArray(compileErrors.map(Diagnostic::toJson)),
+            ).encode() + "\n"
+            return CliResult(stdout = output, exitCode = if (hasErrors) 1 else 0)
+        }
+        val stdout = buildString {
+            updated.forEach { (path, blocks) -> append("Updated ").append(path).append(" (").append(blocks).append(" blocks)\n") }
+        }
+        val stderr = buildString {
+            skipped.forEach { (path, messages) ->
+                append("Skipped ").append(path).append('\n')
+                messages.forEach { append("  ").append(it).append('\n') }
+            }
+            compileErrors.forEach { append(renderDiagnostic(it)) }
+        }
+        return CliResult(stdout, stderr, if (hasErrors) 1 else 0)
     }
 
     private fun demo(command: CliCommand.Demo, json: Boolean): CliResult {
@@ -821,7 +923,7 @@ private fun renderSearchResult(result: GmqlQueryResult): String {
 private fun renderSearchValue(value: GmqlValue): String = when (value) {
     is GmqlValue.StringValue -> value.value.replace("\t", "\\t").replace("\n", "\\n")
     is GmqlValue.IntegerValue -> value.value.toString()
-    is GmqlValue.DecimalValue -> value.value.toString()
+    is GmqlValue.DecimalValue -> stableNumberText(value.value)
     is GmqlValue.BooleanValue -> value.value.toString()
     GmqlValue.NullValue -> "null"
     is GmqlValue.NodeValue -> value.id.value
@@ -847,6 +949,35 @@ private fun <T> runCliSuspend(block: suspend () -> T): T {
         },
     )
     return checkNotNull(outcome) { "CLI query execution suspended unexpectedly" }.getOrThrow()
+}
+
+private fun markdownBodyStart(source: String): Int {
+    if (!source.startsWith("---")) return 0
+    var offset = source.indexOf('\n').takeIf { it >= 0 }?.plus(1) ?: return 0
+    while (offset < source.length) {
+        val lineEnd = source.indexOf('\n', offset).let { if (it < 0) source.length else it }
+        if (source.substring(offset, lineEnd).trim() in setOf("---", "...")) {
+            return (lineEnd + 1).coerceAtMost(source.length)
+        }
+        offset = (lineEnd + 1).coerceAtMost(source.length)
+    }
+    return 0
+}
+
+private fun relativeMarkdownPath(fromFile: String, targetFile: String): String? {
+    fun normalized(path: String): Pair<String?, List<String>> {
+        val unix = path.replace('\\', '/')
+        val drive = unix.takeIf { it.length >= 2 && it[1] == ':' }?.substring(0, 2)?.lowercase()
+        return drive to unix.substringAfter(':', unix).split('/').filter { it.isNotEmpty() && it != "." }
+    }
+    val (fromDrive, fromParts) = normalized(fromFile)
+    val (targetDrive, targetParts) = normalized(targetFile)
+    if (fromDrive != targetDrive || fromParts.isEmpty() || targetParts.isEmpty()) return null
+    val fromDirectory = fromParts.dropLast(1)
+    var common = 0
+    while (common < fromDirectory.size && common < targetParts.size && fromDirectory[common] == targetParts[common]) common++
+    return (List(fromDirectory.size - common) { ".." } + targetParts.drop(common)).joinToString("/")
+        .ifEmpty { targetParts.last() }
 }
 
 private val INTEGER_PARAMETER = Regex("""[-+]?[0-9]+""")
@@ -993,7 +1124,7 @@ private fun renderProperties(
 private fun renderPropertyValue(value: NormalizedValue): String = when (value) {
     is StringValue -> renderTabularText(value.value)
     is IntegerValue -> value.value.toString()
-    is dev.usbharu.graphmd.core.model.NumberValue -> value.value.toString()
+    is dev.usbharu.graphmd.core.model.NumberValue -> stableNumberText(value.value)
     is BooleanValue -> value.value.toString()
     NullValue -> "null"
     is TextValue -> renderNestedEntries("text", value.memberEntries)
@@ -1074,7 +1205,7 @@ private fun renderField(name: String, value: String, indent: String): String {
 private fun renderNullableText(value: String?): String = value?.let(::renderTabularText) ?: "null"
 
 private fun renderTimecode(value: TimecodeValue): String = when (value) {
-    is NumberTimecode -> value.value.toString()
+    is NumberTimecode -> stableNumberText(value.value)
 }
 
 private fun renderTemporalPoint(value: TemporalPoint): String = renderFields(
@@ -1082,7 +1213,7 @@ private fun renderTemporalPoint(value: TemporalPoint): String = renderFields(
     listOf(
         "timeline" to renderNullableText(value.timeline),
         "value" to renderNullableText(value.value),
-        "timecode" to value.timecode.toString(),
+        "timecode" to stableNumberText(value.timecode),
     ),
 )
 
@@ -1103,7 +1234,8 @@ private fun renderValidTimes(validTimes: List<ValidTime>): String =
     }
 
 private fun renderValidTimePoint(value: TimePoint): String =
-    value.value?.let { "${renderTabularText(it)} (${value.timecode})" } ?: value.timecode.toString()
+    value.value?.let { "${renderTabularText(it)} (${stableNumberText(value.timecode)})" }
+        ?: stableNumberText(value.timecode)
 
 private fun renderRelations(relations: List<NormalizedRelation>, view: TemporalView? = null): String = buildString {
     append("TYPE\tFROM\tFROM_VISIBILITY\tTO\tTO_VISIBILITY\tLABEL\tVALID_TIME\tSOURCE\n")

@@ -16,7 +16,25 @@ interface GraphMdSearchService {
 
     @JsonRequest("graphmd/searchMetadata")
     fun searchMetadata(): CompletableFuture<GraphMdSearchMetadata>
+
+    @JsonRequest("graphmd/renderEmbed")
+    fun renderEmbed(params: GraphMdEmbedParams): CompletableFuture<GraphMdEmbedResponse>
 }
+
+data class GraphMdEmbedParams(
+    val uri: String = "",
+    val kind: String = "",
+    val value: String = "",
+)
+
+data class GraphMdEmbedColumn(val name: String = "", val type: String = "")
+data class GraphMdEmbedCell(val text: String = "", val targetId: String? = null)
+data class GraphMdEmbedRow(val cells: List<GraphMdEmbedCell> = emptyList())
+data class GraphMdEmbedResponse(
+    val columns: List<GraphMdEmbedColumn> = emptyList(),
+    val rows: List<GraphMdEmbedRow> = emptyList(),
+    val diagnostics: List<GraphMdSearchDiagnostic> = emptyList(),
+)
 
 data class GraphMdSearchParams(
     val query: String = "",

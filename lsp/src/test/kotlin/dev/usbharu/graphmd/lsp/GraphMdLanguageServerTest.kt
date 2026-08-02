@@ -350,6 +350,47 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `render embed returns query tables and linked incoming backlinks`() {
+        val root = Files.createTempDirectory("graphmd-embed")
+        try {
+            Files.writeString(root.resolve("Person.md"), "---\nid: Person\nkind: NodeType\n---")
+            Files.writeString(
+                root.resolve("friendOf.md"),
+                "---\nid: friendOf\nkind: RelType\nfrom: [Person]\nto: [Person]\n---",
+            )
+            val alice = root.resolve("alice.md")
+            val bob = root.resolve("bob.md")
+            Files.writeString(alice, "---\nid: alice\nkind: Node\ntype: Person\n---\n@link[Bob](bob friendOf)")
+            Files.writeString(bob, "---\nid: bob\nkind: Node\ntype: Person\n---")
+            val server = GraphMdLanguageServer()
+            server.initialize(
+                InitializeParams().apply {
+                    workspaceFolders = listOf(WorkspaceFolder(root.toUri().toString(), "embed"))
+                },
+            ).get()
+
+            val query = server.renderEmbed(
+                GraphMdEmbedParams(
+                    bob.toUri().toString(),
+                    "query",
+                    "MATCH (n:Person) RETURN ID(n) AS id ORDER BY id LIMIT 100",
+                ),
+            ).get()
+            val backlinks = server.renderEmbed(
+                GraphMdEmbedParams(bob.toUri().toString(), "back-link", "friendOf"),
+            ).get()
+
+            assertTrue(query.diagnostics.isEmpty())
+            assertEquals(listOf("alice", "bob"), query.rows.map { it.cells.single().text })
+            assertTrue(backlinks.diagnostics.isEmpty())
+            assertEquals("alice", backlinks.rows.single().cells.first().targetId)
+            assertEquals("Anytime", backlinks.rows.single().cells.last().text)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `search keeps working when a document references an unknown validTime timeline`() {
         val root = Files.createTempDirectory("graphmd-search-invalid-timeline")
         try {

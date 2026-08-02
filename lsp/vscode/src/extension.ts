@@ -1,7 +1,12 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { Executable, LanguageClient, LanguageClientOptions, ServerOptions, TransportKind } from "vscode-languageclient/node";
-import { graphMdPlugin } from "markdown-it-graphmd";
+import {
+  graphMdPlugin,
+  type EmbedParts,
+  type EmbedResolution,
+  type EmbedTable,
+} from "markdown-it-graphmd";
 import { resolveGraphMdHref, resolveMediaHref } from "./preview-links";
 import {
   isIndexedMarkdownPath,
@@ -23,6 +28,8 @@ const workspaceScans = new PreviewWorkspaceScanTracker();
 let previewRefreshEnabled = false;
 let previewIndexActive = false;
 let diskMutationRevision = 0;
+let embedRevision = 0;
+const embedCache = new Map<string, EmbedResolution>();
 const semanticLegend = new vscode.SemanticTokensLegend([
   "graphmdRelationOperator",
   "graphmdRelationLabel",
@@ -103,6 +110,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<GraphM
       md.use(graphMdPlugin, {
         hrefTransform: (target: string, _relType: string, env?: unknown) =>
           resolveGraphMdHrefFromIndex(target, env),
+        embedResolver: resolveEmbed,
       });
       const defaultLinkOpen = md.renderer.rules.link_open ?? ((tokens: any[], idx: number, options: any, _env: any, self: any) => self.renderToken(tokens, idx, options));
       md.renderer.rules.link_open = (tokens: any[], idx: number, options: any, env: any, self: any): string => {
@@ -170,6 +178,7 @@ function isFileNotFoundError(error: unknown): boolean {
 
 function handleDiskTargetChange(uri: vscode.Uri): void {
   if (!previewIndexActive) return;
+  invalidateEmbedCache();
   diskMutationRevision += 1;
   if (!isIndexedUri(uri)) {
     diskReads.begin(uri.toString());
@@ -205,6 +214,7 @@ async function readDiskTarget(uri: vscode.Uri): Promise<void> {
 }
 
 function deleteDiskTarget(uri: vscode.Uri): void {
+  invalidateEmbedCache();
   diskMutationRevision += 1;
   const key = uri.toString();
   diskReads.begin(key);
@@ -212,6 +222,7 @@ function deleteDiskTarget(uri: vscode.Uri): void {
 }
 
 function updateEditorOverlay(document: vscode.TextDocument): void {
+  invalidateEmbedCache();
   if (!isIndexedDocument(document)) {
     updatePreviewTargets(previewTargets.deleteOverlay(document.uri.toString()));
     return;
@@ -254,8 +265,56 @@ function workspaceRootPaths(): string[] {
 
 function updatePreviewTargets(changed: boolean): void {
   if (changed && previewRefreshEnabled) {
+    invalidateEmbedCache(false);
     void vscode.commands.executeCommand("markdown.preview.refresh");
   }
+}
+
+function invalidateEmbedCache(refresh = true): void {
+  embedRevision += 1;
+  embedCache.clear();
+  if (refresh && previewRefreshEnabled) void vscode.commands.executeCommand("markdown.preview.refresh");
+}
+
+interface EmbedResponse {
+  columns: Array<{ name: string; type: string }>;
+  rows: Array<{ cells: Array<{ text: string; targetId?: string | null }> }>;
+  diagnostics: Array<{ code: string; message: string }>;
+}
+
+function resolveEmbed(directive: EmbedParts, env?: unknown): EmbedResolution {
+  const currentDocument = (env as { currentDocument?: vscode.Uri } | undefined)?.currentDocument;
+  const activeClient = client;
+  if (!currentDocument || !activeClient) return { status: "pending" };
+  const revision = embedRevision;
+  const key = `${revision}\u0000${currentDocument.toString()}\u0000${directive.kind}\u0000${directive.value}`;
+  const cached = embedCache.get(key);
+  if (cached) return cached;
+  const pending: EmbedResolution = { status: "pending" };
+  embedCache.set(key, pending);
+  void activeClient.sendRequest<EmbedResponse>("graphmd/renderEmbed", {
+    uri: currentDocument.toString(),
+    kind: directive.kind,
+    value: directive.value,
+  }).then((response) => {
+    if (revision !== embedRevision || embedCache.get(key) !== pending) return;
+    const resolution: EmbedResolution = response.diagnostics.length
+      ? {
+          status: "error",
+          message: response.diagnostics.map((item) => `${item.code}: ${item.message}`).join("\n"),
+        }
+      : { status: "ready", table: { columns: response.columns, rows: response.rows } as EmbedTable };
+    embedCache.set(key, resolution);
+    if (previewRefreshEnabled) void vscode.commands.executeCommand("markdown.preview.refresh");
+  }).catch((error: unknown) => {
+    if (revision !== embedRevision || embedCache.get(key) !== pending) return;
+    embedCache.set(key, {
+      status: "error",
+      message: error instanceof Error ? error.message : String(error),
+    });
+    if (previewRefreshEnabled) void vscode.commands.executeCommand("markdown.preview.refresh");
+  });
+  return pending;
 }
 
 function resolveGraphMdHrefFromIndex(target: string, env?: unknown): string {

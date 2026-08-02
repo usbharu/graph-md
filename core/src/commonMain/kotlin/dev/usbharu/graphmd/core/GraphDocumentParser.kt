@@ -62,7 +62,7 @@ class GraphDocumentParser {
             )
         }
         if (kindName == null) return null
-        return when (kindName) {
+        val document = when (kindName) {
             "Node" -> parseNodeDocument(id, root, body, sourcePath, diagnostics, media = false)
             "Media" -> parseNodeDocument(id, root, body, sourcePath, diagnostics, media = true)
             "NodeType" -> parseNodeTypeDocument(id, root, body, sourcePath, diagnostics)
@@ -73,6 +73,18 @@ class GraphDocumentParser {
                 null
             }
         }
+        if (document != null && document !is NodeDocument) {
+            val embedBlocks = BodySyntaxExtractor().extract(body, sourcePath, id).blocks.filter { it.embed != null }
+            embedBlocks.forEach { block ->
+                diagnostics += Diagnostic(
+                    category = DiagnosticCategory.SyntaxError,
+                    severity = Severity.Error,
+                    message = "Embed blocks are only supported in Node and Media documents",
+                    source = SourceInfo(sourcePath, id, block.range),
+                )
+            }
+        }
+        return document
     }
 
     private fun parseNodeDocument(

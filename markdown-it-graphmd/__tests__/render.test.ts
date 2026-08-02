@@ -225,6 +225,47 @@ describe("@props", () => {
   });
 });
 
+describe("embed blocks", () => {
+  it("renders the saved Markdown as a fallback without a resolver", () => {
+    const html = render('::: embed:query="MATCH (n) RETURN n"\n\n| old |\n| --- |\n| value |\n:::\n');
+
+    expect(html).toContain("<table>");
+    expect(html).toContain("value");
+    expect(html).not.toContain("graphmd-embed");
+  });
+
+  it("uses the last embed attribute and replaces fallback with a dynamic table", () => {
+    const html = render(
+      '::: embed:back-link=friendOf embed:query="MATCH (n) RETURN n"\nold\n:::\n',
+      {
+        hrefTransform: (target) => `./${target}.md`,
+        embedResolver: (directive) => ({
+          status: "ready",
+          table: {
+            columns: [{ name: "id", type: "string" }],
+            rows: [{ cells: [{ text: "<alice>", targetId: "alice" }] }],
+          },
+        }),
+      },
+    );
+
+    expect(html).toContain('data-embed-kind="query"');
+    expect(html).toContain('href="./alice.md"');
+    expect(html).toContain("&lt;alice&gt;");
+    expect(html).not.toContain("old");
+  });
+
+  it("keeps fallback and prepends an escaped diagnostic on failure", () => {
+    const html = render('::: embed:back-link=friendOf\nfallback\n:::\n', {
+      embedResolver: () => ({ status: "error", message: "bad <query>" }),
+    });
+
+    expect(html).toContain("graphmd-embed-error");
+    expect(html).toContain("bad &lt;query&gt;");
+    expect(html).toContain("fallback");
+  });
+});
+
 describe("named body blocks", () => {
   it("renders valid block boundaries transparently", () => {
     const html = render(

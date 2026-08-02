@@ -18,7 +18,16 @@ internal fun jsonObject(vararg values: Pair<String, JsonValue>): JsonValue =
 
 internal fun jsonArray(values: Iterable<JsonValue>): JsonValue = JsonValue.Array(values.toList())
 internal fun jsonString(value: String): JsonValue = JsonValue.StringValue(value)
-internal fun jsonNumber(value: Number): JsonValue = JsonValue.NumberValue(value.toString())
+internal fun jsonNumber(value: Number): JsonValue = JsonValue.NumberValue(stableNumberText(value))
+
+internal fun stableNumberText(value: Number): String {
+    val text = value.toString()
+    return if (value is Double || value is Float) {
+        if ('.' in text || 'e' in text.lowercase()) text else "$text.0"
+    } else {
+        text
+    }
+}
 internal fun jsonBoolean(value: Boolean): JsonValue = JsonValue.BooleanValue(value)
 internal fun jsonNullableString(value: String?): JsonValue = value?.let(::jsonString) ?: JsonValue.Null
 internal fun <V> Map<String, V>.sortedByKey(): Map<String, V> =

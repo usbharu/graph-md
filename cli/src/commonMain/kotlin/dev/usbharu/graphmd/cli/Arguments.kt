@@ -93,6 +93,10 @@ internal sealed interface CliCommand {
         val parameters: Map<String, String>,
     ) : CliCommand
 
+    data class Embed(
+        override val paths: List<String>,
+    ) : CliCommand
+
     data class Demo(
         val outputDirectory: String,
         val requestedCount: Int,
@@ -213,6 +217,10 @@ internal object CliArguments {
                     parameters[name] = encoded.substringAfter("=")
                 }
                 CliCommand.Search(query, queryFile, paths, parameters)
+            }
+            "embed" -> {
+                parsed.reject(emptySet())
+                CliCommand.Embed(parsed.positionals)
             }
             "demo" -> {
                 parsed.reject(setOf("count", "seed"))
@@ -339,6 +347,7 @@ internal object CliArguments {
           lint    Validate GraphMD documents
           stats   Show graph statistics
           search  Execute a GMQL query
+          embed   Materialize dynamic embed blocks as Markdown tables
           demo    Generate random, valid GraphMD demo data
 
         Global options:
@@ -360,6 +369,7 @@ internal object CliArguments {
             Usage: graphmd search QUERY [paths...] [--param NAME=VALUE]... [--json]
                    graphmd search --query-file FILE [paths...] [--param NAME=VALUE]... [--json]
         """.trimIndent() + "\n"
+        "embed" -> "Usage: graphmd embed [paths...] [--json]\n"
         "demo" -> "Usage: graphmd demo DIR --count N [--seed INT] [--json]\n"
         else -> rootHelp()
     }

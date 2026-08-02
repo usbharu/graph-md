@@ -1,5 +1,12 @@
 import type MarkdownIt from "markdown-it";
-import { bodyBlockRule, renderBodyBlockBoundary } from "./block-rule";
+import {
+  bodyBlockRule,
+  renderBodyBlockBoundary,
+  renderEmbedTable,
+  type EmbedResolver,
+  type EmbedResolution,
+  type EmbedTable,
+} from "./block-rule";
 import { propsBlockRule, propsInlineRule, renderPropsBlock, renderPropsInline } from "./props-rule";
 import { relationInlineRule, renderRelation } from "./relation-rule";
 
@@ -13,7 +20,11 @@ export interface GraphMdOptions {
    * relation metadata and label without an `href`.
    */
   hrefTransform?: (target: string, relType: string, env?: unknown) => string | null;
+  embedResolver?: EmbedResolver;
 }
+
+export type { EmbedResolver, EmbedResolution, EmbedTable } from "./block-rule";
+export type { EmbedParts } from "./core-bindings";
 
 /**
  * markdown-it plugin rendering Graph Markdown body syntax.
@@ -23,6 +34,7 @@ export interface GraphMdOptions {
  * - `@props{ ... }`                                       -> visible bound property values
  */
 export function graphMdPlugin(md: MarkdownIt, options: GraphMdOptions = {}): void {
+  (md as any).__graphmdEmbedResolver = options.embedResolver;
   md.inline.ruler.push("graphmd_relation", relationInlineRule);
   md.inline.ruler.push("graphmd_props_inline", propsInlineRule);
   md.block.ruler.before(
@@ -38,6 +50,8 @@ export function graphMdPlugin(md: MarkdownIt, options: GraphMdOptions = {}): voi
   md.renderer.rules["graphmd_props_inline"] = renderPropsInline;
   md.renderer.rules["graphmd_body_block_open"] = renderBodyBlockBoundary;
   md.renderer.rules["graphmd_body_block_close"] = renderBodyBlockBoundary;
+  md.renderer.rules["graphmd_embed_table"] = (tokens, idx, _renderOptions, env) =>
+    renderEmbedTable(tokens, idx, options.hrefTransform, env);
 }
 
 export default graphMdPlugin;

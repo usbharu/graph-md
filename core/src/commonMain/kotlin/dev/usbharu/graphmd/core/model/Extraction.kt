@@ -11,7 +11,13 @@ data class ExtractedBodyBlock(
     val validTime: List<ValidTime>,
     val range: SourceRange,
     val contentRange: SourceRange,
+    val embed: EmbedDirective? = null,
 )
+
+sealed interface EmbedDirective {
+    data class Query(val query: String) : EmbedDirective
+    data class BackLink(val relType: String) : EmbedDirective
+}
 
 data class ExtractedRelation(
     val target: String,

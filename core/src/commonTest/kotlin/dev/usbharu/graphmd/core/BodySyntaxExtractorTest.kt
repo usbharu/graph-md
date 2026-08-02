@@ -655,4 +655,67 @@ class BodySyntaxExtractorTest {
         )
         assertTrue(extracted.propsBlocks.single().props.getValue("age") !is RawArray)
     }
+
+    @Test
+    fun `embed attributes use the last value and make generated content opaque`() {
+        val extracted = extractor.extract(
+            """
+            ::: embed:back-link=friendOf embed:query="MATCH (n) RETURN ID(n) AS id"
+            @props{name="generated"}
+            @link[Generated](generated friendOf)
+            :::
+            """.trimIndent(),
+            "/tmp/alice.md",
+            "alice",
+        )
+
+        assertTrue(extracted.diagnostics.isEmpty(), extracted.diagnostics.joinToString("\n") { it.message })
+        assertEquals(
+            "MATCH (n) RETURN ID(n) AS id",
+            (extracted.blocks.single().embed as EmbedDirective.Query).query,
+        )
+        assertTrue(extracted.propsBlocks.isEmpty())
+        assertTrue(extracted.relations.isEmpty())
+    }
+
+    @Test
+    fun `embed query decodes escaped quotes and rejects mixed headers and nesting`() {
+        val escaped = extractor.extract(
+            """
+            ::: embed:query="MATCH (n) WHERE ID(n) = \"alice\" RETURN n"
+            :::
+            """.trimIndent(),
+            "/tmp/alice.md",
+            "alice",
+        )
+        assertEquals(
+            "MATCH (n) WHERE ID(n) = \"alice\" RETURN n",
+            (escaped.blocks.single().embed as EmbedDirective.Query).query,
+        )
+
+        val invalid = extractor.extract(
+            """
+            ::: history embed:back-link=friendOf
+            ::::
+            :::: embed:query="MATCH (n) RETURN n"
+            ::::
+            :::
+            """.trimIndent(),
+            "/tmp/alice.md",
+            "alice",
+        )
+        assertTrue(invalid.diagnostics.any { "Invalid block header" in it.message })
+
+        val nested = extractor.extract(
+            """
+            :::: embed:back-link=friendOf
+            ::::: embed:query="MATCH (n) RETURN n"
+            :::::
+            ::::
+            """.trimIndent(),
+            "/tmp/alice.md",
+            "alice",
+        )
+        assertTrue(nested.diagnostics.any { "must not be nested" in it.message })
+    }
 }
