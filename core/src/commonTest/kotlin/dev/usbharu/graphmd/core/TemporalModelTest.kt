@@ -169,6 +169,37 @@ class TemporalModelTest {
     }
 
     @Test
+    fun `wrapped timecode does not silently discard elapsed days`() {
+        val result = compile(
+            timeline("Frames", "coordinate: frame"),
+            timeline(
+                "Video",
+                """
+                sameAxisAs: Frames
+                coordinate:
+                  kind: timecode
+                  actualFps: 30
+                  nominalFps: 30
+                  dropFrame: false
+                  wrapHours: 24
+                """.trimIndent(),
+            ),
+        )
+        val engine = TemporalEngine(result.temporalModel)
+
+        val representable = assertIs<TemporalConversionResult.Exact>(
+            engine.convert(TemporalValue("Frames", TemporalCoordinate.FrameIndex(23 * 60 * 60 * 30L)), "Video"),
+        )
+        assertEquals(
+            TemporalCoordinate.Timecode(23, 0, 0, 0),
+            representable.value.coordinate,
+        )
+        assertIs<TemporalConversionResult.Unmappable>(
+            engine.convert(TemporalValue("Frames", TemporalCoordinate.FrameIndex(25 * 60 * 60 * 30L)), "Video"),
+        )
+    }
+
+    @Test
     fun `segments infer reverse order and pairs return alternatives`() {
         val result = compile(
             timeline("Source"),

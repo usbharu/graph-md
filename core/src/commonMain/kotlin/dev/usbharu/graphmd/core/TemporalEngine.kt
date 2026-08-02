@@ -711,6 +711,8 @@ private fun timecodeToFrame(
     coordinate: TemporalCoordinate.Timecode,
     spec: TemporalCoordinateSpec.Timecode,
 ): Long {
+    require(coordinate.hours >= 0)
+    require(spec.wrapHours == null || coordinate.hours < spec.wrapHours)
     require(coordinate.minutes in 0..59 && coordinate.seconds in 0..59)
     require(coordinate.frames in 0 until spec.nominalFps)
     val totalMinutes = coordinate.hours.toLong() * 60 + coordinate.minutes
@@ -728,7 +730,9 @@ private fun frameToTimecode(frame: Long, spec: TemporalCoordinateSpec.Timecode):
     if (!spec.dropFrame) {
         val totalSeconds = frame / spec.nominalFps
         val frames = (frame % spec.nominalFps).toInt()
-        val hours = (totalSeconds / 3600).toInt().let { spec.wrapHours?.let(it::mod) ?: it }
+        val totalHours = totalSeconds / 3600
+        if (totalHours > Int.MAX_VALUE || spec.wrapHours != null && totalHours >= spec.wrapHours.toLong()) return null
+        val hours = totalHours.toInt()
         return TemporalCoordinate.Timecode(hours, ((totalSeconds / 60) % 60).toInt(), (totalSeconds % 60).toInt(), frames)
     }
     val drop = dropFrameCount(spec)
@@ -740,7 +744,9 @@ private fun frameToTimecode(frame: Long, spec: TemporalCoordinateSpec.Timecode):
     val droppedLabels = drop.toLong() * (tenMinuteChunks * 9 + additionalMinutes.coerceAtMost(9))
     val labelFrames = frame + droppedLabels
     val totalSeconds = labelFrames / spec.nominalFps
-    val hours = (totalSeconds / 3600).toInt().let { spec.wrapHours?.let(it::mod) ?: it }
+    val totalHours = totalSeconds / 3600
+    if (totalHours > Int.MAX_VALUE || spec.wrapHours != null && totalHours >= spec.wrapHours.toLong()) return null
+    val hours = totalHours.toInt()
     return TemporalCoordinate.Timecode(hours, ((totalSeconds / 60) % 60).toInt(), (totalSeconds % 60).toInt(), (labelFrames % spec.nominalFps).toInt())
 }
 
