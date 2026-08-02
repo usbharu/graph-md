@@ -1175,7 +1175,7 @@ class GraphCompilerTest {
     }
 
     @Test
-    fun `rejects instant without numeric timecode and unmapped duration endpoints`() {
+    fun `rejects instant without numeric value and unmapped duration endpoints`() {
         val result = compiler().compile(
             listOf(
                 TimelineDocument("A", sourcePath = "/tmp/a.md"),
@@ -1202,7 +1202,7 @@ class GraphCompilerTest {
             ),
         )
 
-        assertTrue(result.diagnostics.any { "at.timecode must be number" in it.message })
+        assertTrue(result.diagnostics.any { "at.value must be number" in it.message })
         assertTrue(result.diagnostics.any { "not mapped" in it.message })
     }
 

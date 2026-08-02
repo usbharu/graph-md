@@ -1866,7 +1866,7 @@ class GraphCompiler(
             return null
         }
         if (obj == null && rawValue is RawString && timeline == null) {
-            diagnostics += typeError("$propName.timecode must be number when timeline is omitted", sourcePath, documentId)
+            diagnostics += typeError("$propName.value must be number when timeline is omitted", sourcePath, documentId)
             return null
         }
         val value = when {

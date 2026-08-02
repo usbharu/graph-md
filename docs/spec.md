@@ -85,7 +85,7 @@ Propertyで使える型
 | duration | 特定のTimeline中の期間                                           |
 | array    | 配列。各要素は個別にvalidTimeを指定できる                              |
 
-時点のtimecodeは有限の数値（小数を含む）である。`NaN`および正負の無限大は使用できない。
+Timelineを省略したinstantの`value`は有限の数値（小数を含む）である。`NaN`および正負の無限大は使用できない。Timelineを明示したinstantおよびdurationの境界値は、そのTimelineの座標系に従って数値、日付、フレーム番号、タイムコードなどで記述する。
 
 全てのPropertyの値はvalidTimeを持つことができ、validTimeは主張するTimelineと期間を指定することができる。
 
