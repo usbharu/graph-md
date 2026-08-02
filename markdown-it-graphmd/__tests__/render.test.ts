@@ -207,7 +207,7 @@ describe("@props", () => {
     const parsed = JSON.parse(dataProps(html) ?? "null");
     expect(parsed.age[0].validTime[0].timeline).toBe("CommonEra");
     expect(parsed.name[0].validTime[0].timeline).toBe("Branch");
-    expect(parsed.name[0].validTime[0].from.timecode).toBe(1);
+    expect(parsed.name[0].validTime[0].from).toBe(1);
   });
 
   it("serialises fallback and timed assertions for the same property", () => {

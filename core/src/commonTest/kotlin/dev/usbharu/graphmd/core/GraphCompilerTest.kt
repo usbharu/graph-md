@@ -991,8 +991,6 @@ class GraphCompilerTest {
                         ---
                         id: CommonEra
                         kind: Timeline
-                        timecode:
-                          type: number
                         ---
                     """.trimIndent(),
                     "/tmp/time.md",
@@ -1020,23 +1018,20 @@ class GraphCompilerTest {
                         type: Sample
                         validTime:
                           - timeline: CommonEra
-                            from:
-                              timecode: 0
+                            from: 0
                         props:
                           score:
                             - value: 1
                             - value: 2
                               validTime:
                                 - timeline: CommonEra
-                                  from:
-                                    timecode: 10
+                                  from: 10
                           values:
                             - 3
                             - value: 4
                               validTime:
                                 - timeline: CommonEra
-                                  from:
-                                    timecode: 20
+                                  from: 20
                         ---
                     """.trimIndent(),
                     "/tmp/node.md",
@@ -1230,8 +1225,6 @@ class GraphCompilerTest {
                         ---
                         id: A
                         kind: Timeline
-                        timecode:
-                          type: number
                         ---
                     """.trimIndent(), "/tmp/a.md",
                 ),
@@ -1240,12 +1233,8 @@ class GraphCompilerTest {
                         ---
                         id: B
                         kind: Timeline
-                        timecode:
-                          type: number
-                        mappings:
-                          - from: A
-                            kind: offset
-                            offset: 10
+                        sameAxisAs: A
+                        offset: 10
                         ---
                     """.trimIndent(), "/tmp/b.md",
                 ),
@@ -1270,17 +1259,16 @@ class GraphCompilerTest {
                         type: Event
                         props:
                           createdAt:
-                            value: Today
-                            timecode: 1.5
+                            timeline: A
+                            value: 1.5
                           active:
                             timeline: A
                             from:
                               timeline: A
-                              value: Start
-                              timecode: 1
+                              value: 1
                             to:
                               timeline: B
-                              timecode: 12
+                              value: 12
                         ---
                     """.trimIndent(), "/tmp/event.md",
                 ),
@@ -1291,8 +1279,7 @@ class GraphCompilerTest {
         val node = result.nodes.single()
         val instant = node.props.getValue("createdAt") as InstantValue
         assertEquals(1.5, (instant.timecode as NumberTimecode).value)
-        assertEquals("Today", instant.value)
-        assertEquals(null, instant.timeline)
+        assertEquals("A", instant.timeline)
         val duration = node.props.getValue("active") as DurationValue
         assertEquals("A", duration.timeline)
         assertEquals(1.0, duration.from?.timecode)
@@ -1301,7 +1288,7 @@ class GraphCompilerTest {
     }
 
     @Test
-    fun `rejects instant without numeric timecode and unmapped duration endpoints`() {
+    fun `rejects instant without numeric value and unmapped duration endpoints`() {
         val result = compiler().compile(
             listOf(
                 TimelineDocument("A", sourcePath = "/tmp/a.md"),
@@ -1328,7 +1315,7 @@ class GraphCompilerTest {
             ),
         )
 
-        assertTrue(result.diagnostics.any { "at.timecode must be number" in it.message })
+        assertTrue(result.diagnostics.any { "at.value must be number" in it.message })
         assertTrue(result.diagnostics.any { "not mapped" in it.message })
     }
 

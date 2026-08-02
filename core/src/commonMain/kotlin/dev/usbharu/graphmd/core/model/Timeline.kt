@@ -17,9 +17,19 @@ sealed interface TimecodeValue
 data class NumberTimecode(val value: Double) : TimecodeValue
 
 data class TimePoint(
-    val timecode: Double,
+    val coordinate: TemporalCoordinate,
     val value: String? = null,
-)
+) {
+    constructor(timecode: Double, value: String? = null) : this(
+        TemporalCoordinate.Rational(ExactRational.fromDouble(timecode)),
+        value,
+    )
+
+    @Deprecated("Use coordinate")
+    val timecode: Double
+        get() = (coordinate as? TemporalCoordinate.Rational)?.value?.toDouble()
+            ?: error("This temporal point is not a numeric coordinate")
+}
 
 data class ValidTime(
     val timeline: String,

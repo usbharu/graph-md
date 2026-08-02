@@ -460,6 +460,24 @@ internal class GraphMdWorkspaceIndex(
                     append(resolved.size)
                     append(" definitions")
                 }
+                if (symbol.first == ReferenceTargetKind.Timeline) {
+                    compiledWorkspace().timelines.firstOrNull { it.id == symbol.second }?.let { timeline ->
+                        append("\n\n- Domain: `").append(timeline.domainId).append('`')
+                        append("\n- Axis: `").append(timeline.axisId).append('`')
+                        append("\n- Coordinate: `").append(timeline.coordinate.displayName()).append('`')
+                        timeline.lineage?.let { lineage ->
+                            append("\n- Lineage: `").append(lineage.kind.name.lowercase())
+                                .append("` from `").append(lineage.sourceTimelineId).append('`')
+                        }
+                        timeline.temporalMappings.forEach { mapping ->
+                            append("\n- Mapping to `").append(mapping.targetTimelineId).append("`: `")
+                                .append(mapping.traits.cardinality.name).append(", ")
+                                .append(mapping.traits.totality.name).append(", ")
+                                .append(mapping.traits.orderBehavior.name).append(", ")
+                                .append(mapping.traits.invertibility.name).append('`')
+                        }
+                    }
+                }
             }
         }
         return Hover(contents)
@@ -1184,7 +1202,7 @@ internal class GraphMdWorkspaceIndex(
     private fun definitionContent(target: DiagnosticReferenceTarget, nodeTypeId: String?): String = when (target.kind) {
         ReferenceTargetKind.NodeType -> "---\nid: ${target.id}\nkind: NodeType\nprops:\n---\n"
         ReferenceTargetKind.RelType -> "---\nid: ${target.id}\nkind: RelType\n---\n"
-        ReferenceTargetKind.Timeline -> "---\nid: ${target.id}\nkind: Timeline\ntimecode:\n  type: number\n---\n"
+        ReferenceTargetKind.Timeline -> "---\nid: ${target.id}\nkind: Timeline\n---\n"
         ReferenceTargetKind.Node -> nodeDefinitionContent(target, "Node", nodeTypeId)
         ReferenceTargetKind.Media -> nodeDefinitionContent(target, "Media", nodeTypeId, includeUrl = true)
     }
@@ -1260,7 +1278,7 @@ internal class GraphMdWorkspaceIndex(
         return patterns.firstNotNullOfOrNull { it.matchEntire(message)?.groupValues?.get(1) }
     }
 
-    private fun ReferenceTargetKind.displayName(): String = when (this) {
+private fun ReferenceTargetKind.displayName(): String = when (this) {
         ReferenceTargetKind.Node -> "Node"
         ReferenceTargetKind.Media -> "Media"
         ReferenceTargetKind.NodeType -> "NodeType"
@@ -1355,8 +1373,12 @@ internal class GraphMdWorkspaceIndex(
             "Unknown parent NodeType: ${reference.targetId}"
         reference.kind == ReferenceTargetKind.RelType && reference.field == "extends" ->
             "Unknown parent RelType: ${reference.targetId}"
-        reference.kind == ReferenceTargetKind.Timeline && reference.field == "extends" ->
-            "Unknown parent Timeline: ${reference.targetId}"
+        reference.kind == ReferenceTargetKind.Timeline && reference.field == "sameAxisAs" ->
+            "Unknown sameAxisAs Timeline: ${reference.targetId}"
+        reference.kind == ReferenceTargetKind.Timeline && reference.field == "derivedFrom" ->
+            "Unknown derivedFrom Timeline: ${reference.targetId}"
+        reference.kind == ReferenceTargetKind.Timeline && reference.field == "mapsTo" ->
+            "Unknown mapsTo Timeline: ${reference.targetId}"
         reference.kind == ReferenceTargetKind.NodeType ->
             "Unknown NodeType: ${reference.targetId}"
         reference.kind == ReferenceTargetKind.RelType ->
@@ -1997,8 +2019,8 @@ internal class GraphMdWorkspaceIndex(
         Regex("""^Unknown Timeline: (.+)$""").matchEntire(message)?.let {
             return DiagnosticReferenceTarget(ReferenceTargetKind.Timeline, it.groupValues[1], null)
         }
-        Regex("""^Unknown parent Timeline: (.+)$""").matchEntire(message)?.let {
-            return DiagnosticReferenceTarget(ReferenceTargetKind.Timeline, it.groupValues[1], "extends")
+        Regex("""^Unknown (sameAxisAs|derivedFrom|mapsTo) Timeline: (.+)$""").matchEntire(message)?.let {
+            return DiagnosticReferenceTarget(ReferenceTargetKind.Timeline, it.groupValues[2], it.groupValues[1])
         }
         Regex("""^Unknown mapped Timeline: (.+)$""").matchEntire(message)?.let {
             return DiagnosticReferenceTarget(ReferenceTargetKind.Timeline, it.groupValues[1], null)
@@ -2013,6 +2035,14 @@ internal class GraphMdWorkspaceIndex(
         "Timeline" -> ReferenceTargetKind.Timeline
         else -> error("Unknown reference target kind: $name")
     }
+}
+
+private fun TemporalCoordinateSpec.displayName(): String = when (this) {
+    TemporalCoordinateSpec.Number -> "number"
+    is TemporalCoordinateSpec.Calendar -> "calendar:${calendar.name.lowercase()}"
+    is TemporalCoordinateSpec.Frame -> "frame"
+    is TemporalCoordinateSpec.Timecode -> "timecode:${actualFps}"
+    is TemporalCoordinateSpec.Era -> "era"
 }
 
 internal data class CompletionEntry(
@@ -2146,7 +2176,7 @@ private fun propValueSnippet(
     PropType.number -> PropValueSnippet("0", placeholder)
     PropType.instant -> PropValueSnippet(
         "{ timeline$separator${snippetPlaceholder(placeholder, timelineId(schema).orEmpty())}, " +
-            "timecode$separator${snippetPlaceholder(placeholder + 1, "0")} }",
+            "value$separator${snippetPlaceholder(placeholder + 1, "0")} }",
         placeholder + 2,
     )
     PropType.duration -> PropValueSnippet(
@@ -2255,15 +2285,48 @@ internal class FrontMatterCompletionResolver(
                 idCompletions(valuePrefix, nodeTypeIds, "NodeType")
             hasColon && path == listOf("extends") && documentKind == DocumentKind.RelType ->
                 idCompletions(valuePrefix, relTypeIds, "RelType")
-            hasColon && path == listOf("extends") && documentKind == DocumentKind.Timeline ->
+            hasColon && path == listOf("sameAxisAs") && documentKind == DocumentKind.Timeline ->
                 idCompletions(valuePrefix, timelineIds, "Timeline")
-            hasColon && documentKind == DocumentKind.Timeline && "mappings" in path && path.lastOrNull() in setOf("from", "to") ->
+            hasColon && documentKind == DocumentKind.Timeline && path == listOf("derivedFrom") ->
                 idCompletions(valuePrefix, timelineIds, "Timeline")
+            hasColon && documentKind == DocumentKind.Timeline && path == listOf("mapsTo") ->
+                idCompletions(valuePrefix, timelineIds, "Timeline")
+            hasColon && documentKind == DocumentKind.Timeline &&
+                path.lastOrNull() == "timeline" && path.firstOrNull() in setOf("derivedFrom", "mapsTo") ->
+                idCompletions(valuePrefix, timelineIds, "Timeline")
+            hasColon && documentKind == DocumentKind.Timeline && path == listOf("coordinate") ->
+                enumCompletions(valuePrefix, listOf("number", "gregorian", "julian", "frame"), "coordinate preset")
+            hasColon && documentKind == DocumentKind.Timeline && path == listOf("coordinate", "kind") ->
+                enumCompletions(valuePrefix, listOf("number", "calendar", "frame", "timecode", "era"), "coordinate kind")
+            hasColon && documentKind == DocumentKind.Timeline && path == listOf("coordinate", "calendar") ->
+                enumCompletions(valuePrefix, listOf("gregorian", "julian"), "calendar")
+            hasColon && documentKind == DocumentKind.Timeline && path == listOf("coordinate", "numbering") ->
+                enumCompletions(valuePrefix, listOf("common-era", "astronomical"), "year numbering")
+            hasColon && documentKind == DocumentKind.Timeline && path == listOf("coordinate", "numbering", "kind") ->
+                enumCompletions(valuePrefix, listOf("common-era", "astronomical", "offset"), "year numbering")
+            hasColon && documentKind == DocumentKind.Timeline && path.lastOrNull() == "kind" &&
+                path.dropLast(1).lastOrNull() == "derivedFrom" ->
+                enumCompletions(valuePrefix, listOf("fork", "simulation", "recording", "edit", "resample", "copy"), "derived kind")
+            hasColon && documentKind == DocumentKind.Timeline && path.lastOrNull() == "kind" &&
+                path.dropLast(1).lastOrNull() == "mapsTo" ->
+                enumCompletions(valuePrefix, listOf("alignment", "correspondence", "isomorphism", "embedding", "projection", "coercion"), "Mapping kind")
+            hasColon && documentKind == DocumentKind.Timeline && path.lastOrNull() == "precision" && "mapsTo" in path ->
+                enumCompletions(valuePrefix, listOf("exact", "approximate", "uncertain"), "Mapping precision")
+            hasColon && documentKind == DocumentKind.Timeline && path.lastOrNull() == "kind" && "precision" in path && "mapsTo" in path ->
+                enumCompletions(valuePrefix, listOf("exact", "approximate", "uncertain"), "Mapping precision")
+            hasColon && documentKind == DocumentKind.Timeline && path.lastOrNull() == "cardinality" && "traits" in path ->
+                enumCompletions(valuePrefix, listOf("one-to-one", "one-to-many", "many-to-one", "many-to-many"), "Mapping cardinality")
+            hasColon && documentKind == DocumentKind.Timeline && path.lastOrNull() == "totality" && "traits" in path ->
+                enumCompletions(valuePrefix, listOf("total", "partial"), "Mapping totality")
+            hasColon && documentKind == DocumentKind.Timeline && path.lastOrNull() == "order" && "traits" in path ->
+                enumCompletions(valuePrefix, listOf("strictly-increasing", "strictly-decreasing", "monotonic", "non-monotonic"), "Mapping order")
+            hasColon && documentKind == DocumentKind.Timeline && path.lastOrNull() == "invertibility" && "traits" in path ->
+                enumCompletions(valuePrefix, listOf("invertible", "conditionally-invertible", "non-invertible"), "Mapping invertibility")
+            hasColon && documentKind == DocumentKind.Timeline && path.lastOrNull() == "continuity" && "traits" in path ->
+                enumCompletions(valuePrefix, listOf("continuous", "piecewise", "discrete"), "Mapping continuity")
             hasColon && (path == listOf("from") || path == listOf("to")) -> idCompletions(valuePrefix, nodeTypeIds, "NodeType")
             hasColon && path.lastOrNull() == "required" && isPropSchemaPath(path.dropLast(1), documentKind) ->
                 enumCompletions(valuePrefix, listOf("true", "false"), "boolean")
-            hasColon && path == listOf("timecode", "type") ->
-                enumCompletions(valuePrefix, listOf("number"), "timecode type")
             hasColon && path.lastOrNull() == "type" &&
                 documentKind in setOf(DocumentKind.NodeType, DocumentKind.RelType) &&
                 isPropSchemaPath(path.dropLast(1), documentKind) ->
@@ -2287,8 +2350,13 @@ internal class FrontMatterCompletionResolver(
             DocumentKind.Media -> keys += listOf("type", "url", "validTime", "props")
             DocumentKind.NodeType -> keys += listOf("extends", "props")
             DocumentKind.RelType -> keys += listOf("extends", "from", "to", "props")
-            DocumentKind.Timeline -> keys += listOf("extends", "timecode", "mappings", "props")
-            null -> keys += listOf("type", "url", "validTime", "extends", "from", "to", "props", "timecode", "mappings")
+            DocumentKind.Timeline -> keys += listOf(
+                "sameAxisAs", "scale", "offset", "coordinate", "domain", "derivedFrom", "mapsTo", "aliases", "props",
+            )
+            null -> keys += listOf(
+                "type", "url", "validTime", "extends", "from", "to", "props", "sameAxisAs", "scale", "offset",
+                "coordinate", "domain", "derivedFrom", "mapsTo", "aliases",
+            )
         }
         val filteredKeys = keys.distinct().filter { key ->
             key.startsWith(prefix) && (key !in usedKeys || key == prefix)
@@ -2387,18 +2455,25 @@ internal class FrontMatterCompletionResolver(
         }
         val keys = when {
             path.lastOrNull() == "validTime" -> listOf("timeline", "from", "to")
-            path.takeLast(2).let { it == listOf("validTime", "from") || it == listOf("validTime", "to") } ->
-                listOf("value", "timecode")
             isPropSchemaPath(path, documentKind) -> when (siblingScalarValue(lines, lineIndex, "type")) {
                 "instant", "duration" -> listOf("type", "required", "timeline")
                 "array" -> listOf("type", "required", "items")
                 else -> listOf("type", "required")
             }
-            path == listOf("timecode") -> listOf("type")
-            path == listOf("mappings") -> when (siblingScalarValue(lines, lineIndex, "kind")) {
-                "offset" -> listOf("kind", "from", "to", "offset")
-                else -> listOf("kind", "from", "to", "offset")
-            }
+            path == listOf("coordinate") -> listOf(
+                "kind", "calendar", "numbering", "actualFps", "nominalFps", "dropFrame", "wrapHours", "periods",
+            )
+            path == listOf("coordinate", "numbering") -> listOf("kind", "offset", "yearZero")
+            path == listOf("derivedFrom") -> listOf("timeline", "kind", "sourceAt", "origin")
+            path.lastOrNull() == "mapsTo" -> listOf(
+                "id", "timeline", "kind", "precision", "scale", "offset", "range", "segments", "pairs",
+                "traits", "requiredContext", "provenance",
+            )
+            path.lastOrNull() == "precision" && "mapsTo" in path -> listOf("kind", "error")
+            path.lastOrNull() == "segments" -> listOf("source", "target", "scale", "offset", "pairs")
+            path.lastOrNull() in setOf("range", "source", "target") && "mapsTo" in path -> listOf("from", "to")
+            path.lastOrNull() == "pairs" -> listOf("from", "to")
+            path.lastOrNull() == "traits" -> listOf("cardinality", "totality", "order", "invertibility", "continuity")
             else -> return null
         }
         val usedKeys = siblingKeysAtIndent(lines, lineIndex, indentOf(lines[lineIndex])).toMutableSet()
@@ -2469,7 +2544,7 @@ internal class FrontMatterCompletionResolver(
             )
             PropType.number -> listOf(CompletionEntry("0", CompletionItemKind.Value, "0", "number"))
             PropType.instant -> listOf(
-                CompletionEntry("0", CompletionItemKind.Value, "0", "instant timecode"),
+                CompletionEntry("0", CompletionItemKind.Value, "0", "instant coordinate"),
                 CompletionEntry(
                     "instant",
                     CompletionItemKind.Struct,
@@ -2525,7 +2600,6 @@ internal class FrontMatterCompletionResolver(
             "extends" -> when (documentKind) {
                 DocumentKind.NodeType -> idCompletions(prefix, nodeTypeIds, "NodeType")
                 DocumentKind.RelType -> idCompletions(prefix, relTypeIds, "RelType")
-                DocumentKind.Timeline -> idCompletions(prefix, timelineIds, "Timeline")
                 else -> null
             }
             "from", "to" -> idCompletions(prefix, if (documentKind == DocumentKind.Timeline) timelineIds else nodeTypeIds, if (documentKind == DocumentKind.Timeline) "Timeline" else "NodeType")
@@ -2547,7 +2621,7 @@ internal class FrontMatterCompletionResolver(
                         }
                 }
             }
-            "mappings" -> listOf(CompletionEntry("kind", CompletionItemKind.Field, "kind: offset", "offset mapping"))
+            "mapsTo" -> listOf(CompletionEntry("timeline", CompletionItemKind.Field, "timeline: ", "Temporal Mapping"))
             else -> null
         }
     }
@@ -2747,7 +2821,7 @@ internal class FrontMatterCompletionResolver(
 
     private fun specialKeys(schema: ResolvedPropSchema): List<String> {
         return when (schema.type) {
-            PropType.instant -> listOf("timeline", "value", "timecode")
+            PropType.instant -> listOf("timeline", "value")
             PropType.duration -> listOf("timeline", "from", "to")
             else -> emptyList()
         }
@@ -3004,10 +3078,13 @@ internal class PropsPrefixScanner(
             key == "timeline" -> allowedTimelineIds(frames.lastOrNull()?.ownerSchema)
                 .filter { it.startsWith(prefix) }
                 .map { CompletionEntry(it, CompletionItemKind.Value, it, "timeline") }
-            key in setOf("timecode", "from", "to") ->
+            key in setOf("from", "to") ->
                 listOf(CompletionEntry("0", CompletionItemKind.Value, "0", "number")).filter { it.label.startsWith(prefix) }
             key == "value" ->
-                listOf(CompletionEntry("string", CompletionItemKind.Value, "\"\${1:value}\"", "display value", InsertTextFormat.Snippet))
+                listOf(
+                    CompletionEntry("0", CompletionItemKind.Value, "0", "temporal coordinate"),
+                    CompletionEntry("string", CompletionItemKind.Value, "\"\${1:value}\"", "temporal coordinate", InsertTextFormat.Snippet),
+                ).filter { it.label.startsWith(prefix) }
             else -> emptyList()
         }
         return if (entries.isEmpty()) null else PropsCompletionResult(entries)
@@ -3028,7 +3105,7 @@ internal class PropsPrefixScanner(
             )
             PropType.number -> listOf(CompletionEntry("0", CompletionItemKind.Value, "0", "number")).filter { it.label.startsWith(prefix) }
             PropType.instant -> listOf(
-                CompletionEntry("0", CompletionItemKind.Value, "0", "instant timecode"),
+                CompletionEntry("0", CompletionItemKind.Value, "0", "instant coordinate"),
                 CompletionEntry(
                     "{",
                     CompletionItemKind.Struct,
@@ -3085,7 +3162,7 @@ internal class PropsPrefixScanner(
                     val boundsPrefix = valuePrefix.substring(openBounds + 1)
                     val currentBound = boundsPrefix.substringAfterLast(',').trimStart()
                     if ('=' in currentBound) {
-                        listOf(CompletionEntry("0", CompletionItemKind.Value, "0", "timecode"))
+                        listOf(CompletionEntry("0", CompletionItemKind.Value, "0", "temporal coordinate"))
                     } else {
                         val usedBounds = Regex("""(?:^|,)\s*(from|to)\s*=""")
                             .findAll(boundsPrefix).map { it.groupValues[1] }.toSet()
@@ -3129,7 +3206,7 @@ internal class PropsPrefixScanner(
 
     private fun specialKeys(schema: ResolvedPropSchema?): List<String> {
         return when (schema?.type) {
-            PropType.instant -> listOf("timeline", "value", "timecode")
+            PropType.instant -> listOf("timeline", "value")
             PropType.duration -> listOf("timeline", "from", "to")
             else -> emptyList()
         }

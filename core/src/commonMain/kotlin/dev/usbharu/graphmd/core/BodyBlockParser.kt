@@ -440,20 +440,30 @@ private fun rawValidTime(raw: RawValue): ValidTime {
     )
 }
 
-private fun rawTimePoint(raw: RawValue): TimePoint {
-    val objectValue = raw as? RawObject ?: throw InlinePropsParseException("timePoint must be an object")
-    val timecode = when (val value = objectValue.values["timecode"]) {
-        is RawInteger -> value.value.toDouble()
-        is RawNumber -> value.value
-        else -> throw InlinePropsParseException("timePoint.timecode must be number")
+private fun rawTimePoint(raw: RawValue): TimePoint = when (raw) {
+    is RawInteger -> TimePoint(TemporalCoordinate.Rational(ExactRational.of(raw.value)))
+    is RawNumber -> TimePoint(TemporalCoordinate.Rational(ExactRational.fromDouble(raw.value)))
+    is RawString -> TimePoint(parseGenericTemporalCoordinate(raw.value))
+    is RawObject -> {
+        val legacy = raw.values["timecode"] ?: throw InlinePropsParseException("Unknown timePoint coordinate shape")
+        val point = rawTimePoint(legacy)
+        TimePoint(point.coordinate, (raw.values["value"] as? RawString)?.value)
     }
-    return TimePoint(timecode, (objectValue.values["value"] as? RawString)?.value)
+    else -> throw InlinePropsParseException("timePoint must be a temporal coordinate")
 }
 
-private fun rawTimePoint(point: TimePoint): RawObject =
-    RawObject(
-        buildMap {
-            put("timecode", RawNumber(point.timecode))
-            point.value?.let { put("value", RawString(it)) }
-        },
+private fun rawTimePoint(point: TimePoint): RawValue = when (val coordinate = point.coordinate) {
+    is TemporalCoordinate.Rational -> if (coordinate.value.denominator == 1L) {
+        RawInteger(coordinate.value.numerator)
+    } else {
+        RawString(coordinate.value.toString())
+    }
+    is TemporalCoordinate.CalendarDate -> RawString("${coordinate.year}-${coordinate.month.toString().padStart(2, '0')}-${coordinate.day.toString().padStart(2, '0')}")
+    is TemporalCoordinate.EraDate -> RawString("${coordinate.era}-${coordinate.year}-${coordinate.month.toString().padStart(2, '0')}-${coordinate.day.toString().padStart(2, '0')}")
+    is TemporalCoordinate.FrameIndex -> RawInteger(coordinate.value)
+    is TemporalCoordinate.Timecode -> RawString(
+        "${coordinate.hours.toString().padStart(2, '0')}:${coordinate.minutes.toString().padStart(2, '0')}:" +
+            "${coordinate.seconds.toString().padStart(2, '0')}:${coordinate.frames.toString().padStart(2, '0')}",
     )
+    is TemporalCoordinate.Label -> RawString(coordinate.value)
+}

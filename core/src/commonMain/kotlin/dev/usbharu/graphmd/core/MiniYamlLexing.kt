@@ -78,7 +78,10 @@ internal fun findYamlMappingColon(value: String): Int {
         } else {
             when (char) {
                 '\'', '"' -> quote = char
-                ':' -> return index
+                ':' -> {
+                    val next = value.getOrNull(index + 1)
+                    if (next == null || next.isWhitespace()) return index
+                }
             }
         }
         index++

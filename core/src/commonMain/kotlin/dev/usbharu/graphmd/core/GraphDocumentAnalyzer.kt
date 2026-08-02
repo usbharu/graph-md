@@ -191,6 +191,8 @@ class GraphDocumentAnalyzer {
             if (offset >= valueStart) {
                 return when (field) {
                     "type" -> ReferenceTargetKind.NodeType
+                    "sameAxisAs", "derivedFrom", "mapsTo" ->
+                        if (kind == DocumentKind.Timeline) ReferenceTargetKind.Timeline else null
                     "extends" -> when (kind) {
                         DocumentKind.RelType -> ReferenceTargetKind.RelType
                         DocumentKind.Timeline -> ReferenceTargetKind.Timeline
@@ -558,6 +560,7 @@ class GraphDocumentAnalyzer {
             collectRootField("type", ReferenceTargetKind.NodeType)
         }
         collectRootField("extends", listFieldKind("extends", document))
+        if (document is TimelineDocument) collectRootField("sameAxisAs", ReferenceTargetKind.Timeline)
         collectRootField("from", listFieldKind("from", document))
         collectRootField("to", listFieldKind("to", document))
 
@@ -571,16 +574,17 @@ class GraphDocumentAnalyzer {
         if (document !is TimelineDocument) return
         structure.scalars
             .filter {
-                it.path.size == 2 &&
-                    it.path.firstOrNull() == "mappings" &&
-                    it.path.lastOrNull() in setOf("from", "to")
+                it.path == listOf("derivedFrom") ||
+                    it.path == listOf("derivedFrom", "timeline") ||
+                    it.path == listOf("mapsTo") ||
+                    it.path == listOf("mapsTo", "timeline")
             }
             .forEach { scalar ->
                 if (references.none { it.kind == ReferenceTargetKind.Timeline && it.range.start == scalar.range.start }) {
                     references += SymbolReference(
                         scalar.value,
                         ReferenceTargetKind.Timeline,
-                        scalar.path.last(),
+                        scalar.path.first(),
                         scalar.range,
                     )
                 }
@@ -693,8 +697,8 @@ class GraphDocumentAnalyzer {
             val listItemId = listItems.lastOrNull()?.id
             val content = listContent ?: rawContent
             val contentOffset = indent + if (listContent != null) 2 else 0
-            val mapping = Regex("""^([A-Za-z_][A-Za-z0-9_.-]*)\s*:(.*)$""").matchEntire(content)
-            if (mapping == null) {
+            val colonIndex = findYamlMappingColon(content)
+            if (colonIndex <= 0) {
                 if (listContent != null && path.lastOrNull() == "timeline") {
                     scalar(
                         content,
@@ -706,8 +710,9 @@ class GraphDocumentAnalyzer {
                 }
                 continue
             }
-            val key = mapping.groupValues[1]
-            val rawValue = mapping.groupValues[2]
+            val key = stripYamlScalar(content.substring(0, colonIndex).trim())
+            if (key.isEmpty()) continue
+            val rawValue = content.substring(colonIndex + 1)
             keysByPath.getOrPut(path) { mutableSetOf() } += key
             val selectorContext = SelectorContext(listItemId, path)
             keysBySelectorContext.getOrPut(selectorContext) { mutableSetOf() } += key
@@ -724,7 +729,7 @@ class GraphDocumentAnalyzer {
             ) {
                 numericKeysByPath.getOrPut(path) { mutableSetOf() } += key
             }
-            val colonOffset = content.indexOf(':') + 1
+            val colonOffset = colonIndex + 1
             if (rawValue.isBlank()) {
                 containerKeysByPath.getOrPut(path) { mutableSetOf() } += key
                 if (
@@ -783,7 +788,8 @@ class GraphDocumentAnalyzer {
                         )
                 }
                 document is TimelineDocument ->
-                    path.firstOrNull() == "mappings" && candidate.key in setOf("from", "to")
+                    candidate.key == "sameAxisAs" ||
+                        candidate.key == "timeline" && path.firstOrNull() in setOf("derivedFrom", "mapsTo")
                 document is NodeDocument && path.firstOrNull() == "props" -> {
                     candidate.key == "timeline" && (
                             path.size == 2 && !candidate.id.matches(Regex("[A-Za-z_][A-Za-z0-9_.:-]*")) ||
@@ -1024,7 +1030,7 @@ class GraphDocumentAnalyzer {
     private fun yamlMappingKey(line: String): String? {
         val content = line.drop(line.indentWidth())
         if (content.startsWith("-")) return null
-        val colon = findYamlColon(content)
+        val colon = findYamlMappingColon(content)
         if (colon <= 0) return null
         return stripYamlScalar(content.substring(0, colon).trim())
     }
@@ -1047,7 +1053,7 @@ class GraphDocumentAnalyzer {
     }
 
     private fun yamlMappingEntry(content: String, absoluteStart: Int): YamlMappingEntry? {
-        val colon = findYamlColon(content)
+        val colon = findYamlMappingColon(content)
         if (colon <= 0) return null
         val rawKey = content.substring(0, colon).trim()
         val valuePart = content.substring(colon + 1)
@@ -1081,21 +1087,6 @@ class GraphDocumentAnalyzer {
             }
         }
         return value
-    }
-
-    private fun findYamlColon(value: String): Int {
-        var quote: Char? = null
-        var escaped = false
-        value.forEachIndexed { index, char ->
-            when {
-                escaped -> escaped = false
-                quote == '"' && char == '\\' -> escaped = true
-                quote != null && char == quote -> quote = null
-                quote == null && (char == '"' || char == '\'') -> quote = char
-                quote == null && char == ':' -> return index
-            }
-        }
-        return -1
     }
 
     private fun String.indentWidth(): Int =
@@ -1465,6 +1456,8 @@ class GraphDocumentAnalyzer {
     private fun listFieldKind(field: String, document: GraphDocument?): ReferenceTargetKind? {
         return when (field) {
             "timeline" -> ReferenceTargetKind.Timeline
+            "sameAxisAs", "derivedFrom", "mapsTo" ->
+                if (document is TimelineDocument) ReferenceTargetKind.Timeline else null
             "from", "to" -> if (document is RelTypeDocument) ReferenceTargetKind.NodeType else null
             "extends" -> when (document) {
             is RelTypeDocument -> ReferenceTargetKind.RelType

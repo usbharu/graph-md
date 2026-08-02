@@ -35,7 +35,7 @@ data class StaticSearchBundle(
 }
 
 object StaticSearchIndexCodec {
-    const val FORMAT_VERSION: Int = 3
+    const val FORMAT_VERSION: Int = 4
 
     fun encode(
         index: SearchIndex,
@@ -305,8 +305,13 @@ private fun decodeManifest(json: Json): SearchIndexManifest {
 private fun encodeTimeline(timeline: QueryTimeline): Json = jsonObject(
     "id" to jsonString(timeline.id.value),
     "canonicalId" to jsonString(timeline.canonicalId.value),
-    "offsetToCanonical" to jsonNumber(timeline.offsetToCanonical),
+    "offsetToCanonical" to encodeRational(timeline.exactOffsetToCanonical),
     "assertionScopeId" to jsonString(timeline.assertionScopeId.value),
+    "domainId" to jsonString(timeline.domainId),
+    "axisId" to jsonString(timeline.axisId.value),
+    "axisUnit" to jsonString(timeline.axisUnit.name),
+    "coordinateSystem" to encodeCoordinateSystem(timeline.coordinateSystem),
+    "mappings" to jsonArray(timeline.mappings.map(::encodeMapping)),
 )
 
 private fun decodeTimeline(json: Json): QueryTimeline {
@@ -314,8 +319,13 @@ private fun decodeTimeline(json: Json): QueryTimeline {
     return QueryTimeline(
         TimelineId(value.required("id").stringValue()),
         TimelineId(value.required("canonicalId").stringValue()),
-        value.required("offsetToCanonical").doubleValue(),
-        TimelineId(value["assertionScopeId"]?.stringValue() ?: value.required("id").stringValue()),
+        decodeRational(value.required("offsetToCanonical")),
+        TimelineId(value.required("assertionScopeId").stringValue()),
+        value.required("domainId").stringValue(),
+        TimelineId(value.required("axisId").stringValue()),
+        TemporalAxisUnit.valueOf(value.required("axisUnit").stringValue()),
+        decodeCoordinateSystem(value.required("coordinateSystem")),
+        value.required("mappings").arrayValue().map(::decodeMapping),
     )
 }
 
@@ -593,14 +603,14 @@ private fun decodeInterval(json: Json): TemporalInterval {
 }
 
 private fun encodeBoundary(boundary: IntervalBoundary?): Json = boundary?.let {
-    jsonObject("value" to jsonNumber(it.value), "inclusive" to jsonBoolean(it.inclusive))
+    jsonObject("value" to encodeRational(it.exactValue), "inclusive" to jsonBoolean(it.inclusive))
 } ?: Json.Null
 
 private fun decodeBoundary(json: Json): IntervalBoundary? {
     if (json === Json.Null) return null
     val value = json.objectValue()
     return IntervalBoundary(
-        value.required("value").doubleValue(),
+        decodeRational(value.required("value")),
         value.required("inclusive").booleanValue(),
     )
 }
@@ -658,9 +668,7 @@ private fun encodeNormalizedValue(value: NormalizedValue): Json = when (value) {
         "kind" to jsonString("instant"),
         "timeline" to jsonNullableString(value.timeline),
         "lexicalValue" to jsonNullableString(value.value),
-        "timecode" to when (val code = value.timecode) {
-            is NumberTimecode -> jsonNumber(code.value)
-        },
+        "coordinate" to encodeCoordinate(value.coordinate),
     )
     is DurationValue -> jsonObject(
         "kind" to jsonString("duration"),
@@ -697,7 +705,7 @@ private fun decodeNormalizedValue(json: Json): NormalizedValue {
         "instant" -> InstantValue(
             timeline = value.required("timeline").nullableStringValue(),
             value = value.required("lexicalValue").nullableStringValue(),
-            timecode = NumberTimecode(value.required("timecode").doubleValue()),
+            coordinate = decodeCoordinate(value.required("coordinate")),
         )
         "duration" -> DurationValue(
             timeline = value.required("timeline").nullableStringValue(),
@@ -746,18 +754,18 @@ private fun decodeValidTimes(json: Json): List<ValidTime> = json.arrayValue().ma
 }
 
 private fun encodeTimePoint(point: TimePoint?): Json = point?.let {
-    jsonObject("timecode" to jsonNumber(it.timecode), "value" to jsonNullableString(it.value))
+    jsonObject("coordinate" to encodeCoordinate(it.coordinate), "value" to jsonNullableString(it.value))
 } ?: Json.Null
 
 private fun decodeTimePoint(json: Json): TimePoint? {
     if (json === Json.Null) return null
     val value = json.objectValue()
-    return TimePoint(value.required("timecode").doubleValue(), value.required("value").nullableStringValue())
+    return TimePoint(decodeCoordinate(value.required("coordinate")), value.required("value").nullableStringValue())
 }
 
 private fun encodeTemporalPoint(point: TemporalPoint?): Json = point?.let {
     jsonObject(
-        "timecode" to jsonNumber(it.timecode),
+        "coordinate" to encodeCoordinate(it.coordinate),
         "value" to jsonNullableString(it.value),
         "timeline" to jsonNullableString(it.timeline),
     )
@@ -767,9 +775,292 @@ private fun decodeTemporalPoint(json: Json): TemporalPoint? {
     if (json === Json.Null) return null
     val value = json.objectValue()
     return TemporalPoint(
-        value.required("timecode").doubleValue(),
+        decodeCoordinate(value.required("coordinate")),
         value.required("value").nullableStringValue(),
         value.required("timeline").nullableStringValue(),
+    )
+}
+
+private fun encodeRational(value: ExactRational): Json = jsonObject(
+    "numerator" to jsonNumber(value.numerator),
+    "denominator" to jsonNumber(value.denominator),
+)
+
+private fun decodeRational(json: Json): ExactRational {
+    val value = json.objectValue()
+    return ExactRational.of(
+        value.required("numerator").longValue(),
+        value.required("denominator").longValue(),
+    )
+}
+
+private fun encodeCoordinate(value: TemporalCoordinate): Json = when (value) {
+    is TemporalCoordinate.Rational -> jsonObject(
+        "kind" to jsonString("rational"),
+        "value" to encodeRational(value.value),
+    )
+    is TemporalCoordinate.CalendarDate -> jsonObject(
+        "kind" to jsonString("calendar"),
+        "year" to jsonNumber(value.year),
+        "month" to jsonNumber(value.month),
+        "day" to jsonNumber(value.day),
+    )
+    is TemporalCoordinate.EraDate -> jsonObject(
+        "kind" to jsonString("era"),
+        "era" to jsonString(value.era),
+        "year" to jsonNumber(value.year),
+        "month" to jsonNumber(value.month),
+        "day" to jsonNumber(value.day),
+    )
+    is TemporalCoordinate.FrameIndex -> jsonObject(
+        "kind" to jsonString("frame"),
+        "value" to jsonNumber(value.value),
+    )
+    is TemporalCoordinate.Timecode -> jsonObject(
+        "kind" to jsonString("timecode"),
+        "hours" to jsonNumber(value.hours),
+        "minutes" to jsonNumber(value.minutes),
+        "seconds" to jsonNumber(value.seconds),
+        "frames" to jsonNumber(value.frames),
+    )
+    is TemporalCoordinate.Label -> jsonObject(
+        "kind" to jsonString("label"),
+        "value" to jsonString(value.value),
+    )
+}
+
+private fun decodeCoordinate(json: Json): TemporalCoordinate {
+    val value = json.objectValue()
+    return when (value.required("kind").stringValue()) {
+        "rational" -> TemporalCoordinate.Rational(decodeRational(value.required("value")))
+        "calendar" -> TemporalCoordinate.CalendarDate(
+            value.required("year").longValue(),
+            value.required("month").intValue(),
+            value.required("day").intValue(),
+        )
+        "era" -> TemporalCoordinate.EraDate(
+            value.required("era").stringValue(),
+            value.required("year").longValue(),
+            value.required("month").intValue(),
+            value.required("day").intValue(),
+        )
+        "frame" -> TemporalCoordinate.FrameIndex(value.required("value").longValue())
+        "timecode" -> TemporalCoordinate.Timecode(
+            value.required("hours").intValue(),
+            value.required("minutes").intValue(),
+            value.required("seconds").intValue(),
+            value.required("frames").intValue(),
+        )
+        "label" -> TemporalCoordinate.Label(value.required("value").stringValue())
+        else -> error("Unknown temporal coordinate kind")
+    }
+}
+
+private fun encodeCoordinateSpec(spec: TemporalCoordinateSpec): Json = when (spec) {
+    TemporalCoordinateSpec.Number -> jsonObject("kind" to jsonString("number"))
+    is TemporalCoordinateSpec.Calendar -> jsonObject(
+        "kind" to jsonString("calendar"),
+        "calendar" to jsonString(spec.calendar.name),
+        "numbering" to encodeYearNumbering(spec.numbering),
+    )
+    is TemporalCoordinateSpec.Frame -> jsonObject(
+        "kind" to jsonString("frame"),
+        "start" to jsonNumber(spec.start),
+    )
+    is TemporalCoordinateSpec.Timecode -> jsonObject(
+        "kind" to jsonString("timecode"),
+        "actualFps" to encodeRational(spec.actualFps),
+        "nominalFps" to jsonNumber(spec.nominalFps),
+        "dropFrame" to jsonBoolean(spec.dropFrame),
+        "wrapHours" to jsonNullableLong(spec.wrapHours?.toLong()),
+    )
+    is TemporalCoordinateSpec.Era -> jsonObject(
+        "kind" to jsonString("era"),
+        "periods" to jsonArray(spec.periods.map { period ->
+            jsonObject(
+                "name" to jsonString(period.name),
+                "aliases" to jsonArray(period.aliases.map(::jsonString)),
+                "since" to jsonString(period.since),
+                "firstYear" to jsonNumber(period.firstYear),
+            )
+        }),
+    )
+}
+
+private fun decodeCoordinateSpec(json: Json): TemporalCoordinateSpec {
+    val value = json.objectValue()
+    return when (value.required("kind").stringValue()) {
+        "number" -> TemporalCoordinateSpec.Number
+        "calendar" -> TemporalCoordinateSpec.Calendar(
+            CalendarKind.valueOf(value.required("calendar").stringValue()),
+            decodeYearNumbering(value.required("numbering")),
+        )
+        "frame" -> TemporalCoordinateSpec.Frame(value.required("start").longValue())
+        "timecode" -> TemporalCoordinateSpec.Timecode(
+            decodeRational(value.required("actualFps")),
+            value.required("nominalFps").intValue(),
+            value.required("dropFrame").booleanValue(),
+            value.required("wrapHours").nullableLongValue()?.toInt(),
+        )
+        "era" -> TemporalCoordinateSpec.Era(value.required("periods").arrayValue().map { encoded ->
+            val period = encoded.objectValue()
+            EraPeriodSpec(
+                period.required("name").stringValue(),
+                period.required("aliases").arrayValue().map(Json::stringValue),
+                period.required("since").stringValue(),
+                period.required("firstYear").longValue(),
+            )
+        })
+        else -> error("Unknown temporal coordinate spec")
+    }
+}
+
+private fun encodeYearNumbering(numbering: YearNumbering): Json = when (numbering) {
+    YearNumbering.CommonEra -> jsonObject("kind" to jsonString("commonEra"))
+    YearNumbering.Astronomical -> jsonObject("kind" to jsonString("astronomical"))
+    is YearNumbering.Offset -> jsonObject(
+        "kind" to jsonString("offset"),
+        "offset" to jsonNumber(numbering.offset),
+        "yearZero" to jsonBoolean(numbering.yearZero),
+    )
+}
+
+private fun decodeYearNumbering(json: Json): YearNumbering {
+    val value = json.objectValue()
+    return when (value.required("kind").stringValue()) {
+        "commonEra" -> YearNumbering.CommonEra
+        "astronomical" -> YearNumbering.Astronomical
+        "offset" -> YearNumbering.Offset(
+            value.required("offset").longValue(),
+            value.required("yearZero").booleanValue(),
+        )
+        else -> error("Unknown year numbering")
+    }
+}
+
+private fun encodeCoordinateSystem(system: TemporalCoordinateSystem): Json = jsonObject(
+    "id" to jsonString(system.id),
+    "axisId" to jsonString(system.axisId),
+    "domainId" to jsonString(system.domainId),
+    "coordinate" to encodeCoordinateSpec(system.coordinate),
+    "scaleToParent" to encodeRational(system.scaleToParent),
+    "offsetFromParent" to encodeRational(system.offsetFromParent),
+    "parentTimelineId" to jsonNullableString(system.parentTimelineId),
+    "aliases" to jsonArray(system.aliases.map(::jsonString)),
+)
+
+private fun decodeCoordinateSystem(json: Json): TemporalCoordinateSystem {
+    val value = json.objectValue()
+    return TemporalCoordinateSystem(
+        value.required("id").stringValue(),
+        value.required("axisId").stringValue(),
+        value.required("domainId").stringValue(),
+        decodeCoordinateSpec(value.required("coordinate")),
+        decodeRational(value.required("scaleToParent")),
+        decodeRational(value.required("offsetFromParent")),
+        value.required("parentTimelineId").nullableStringValue(),
+        value.required("aliases").arrayValue().map(Json::stringValue),
+    )
+}
+
+private fun encodeCoordinateRange(range: TemporalCoordinateRange?): Json = range?.let {
+    jsonObject(
+        "from" to (it.from?.let(::encodeCoordinate) ?: Json.Null),
+        "to" to (it.to?.let(::encodeCoordinate) ?: Json.Null),
+    )
+} ?: Json.Null
+
+private fun decodeCoordinateRange(json: Json): TemporalCoordinateRange? {
+    if (json === Json.Null) return null
+    val value = json.objectValue()
+    return TemporalCoordinateRange(
+        value.required("from").takeUnless { it === Json.Null }?.let(::decodeCoordinate),
+        value.required("to").takeUnless { it === Json.Null }?.let(::decodeCoordinate),
+    )
+}
+
+private fun encodePair(pair: TemporalMappingPair): Json = jsonObject(
+    "from" to encodeCoordinate(pair.from),
+    "to" to jsonArray(pair.to.map(::encodeCoordinate)),
+)
+
+private fun decodePair(json: Json): TemporalMappingPair {
+    val value = json.objectValue()
+    return TemporalMappingPair(
+        decodeCoordinate(value.required("from")),
+        value.required("to").arrayValue().map(::decodeCoordinate),
+    )
+}
+
+private fun encodeSegment(segment: TemporalMappingSegment): Json = jsonObject(
+    "source" to encodeCoordinateRange(segment.source),
+    "target" to encodeCoordinateRange(segment.target),
+    "scale" to encodeRational(segment.scale),
+    "offset" to encodeRational(segment.offset),
+    "pairs" to jsonArray(segment.pairs.map(::encodePair)),
+)
+
+private fun decodeSegment(json: Json): TemporalMappingSegment {
+    val value = json.objectValue()
+    return TemporalMappingSegment(
+        decodeCoordinateRange(value.required("source")),
+        decodeCoordinateRange(value.required("target")),
+        decodeRational(value.required("scale")),
+        decodeRational(value.required("offset")),
+        value.required("pairs").arrayValue().map(::decodePair),
+    )
+}
+
+private fun encodeMapping(mapping: TemporalMappingInstance): Json = jsonObject(
+    "id" to jsonString(mapping.id),
+    "sourceTimelineId" to jsonString(mapping.sourceTimelineId),
+    "targetTimelineId" to jsonString(mapping.targetTimelineId),
+    "sourceAxisId" to jsonString(mapping.sourceAxisId),
+    "targetAxisId" to jsonString(mapping.targetAxisId),
+    "kind" to jsonString(mapping.kind.name),
+    "precisionKind" to jsonString(mapping.precision.kind.name),
+    "precisionError" to (mapping.precision.error?.let(::encodeRational) ?: Json.Null),
+    "scale" to encodeRational(mapping.scale),
+    "offset" to encodeRational(mapping.offset),
+    "range" to encodeCoordinateRange(mapping.range),
+    "segments" to jsonArray(mapping.segments.map(::encodeSegment)),
+    "pairs" to jsonArray(mapping.pairs.map(::encodePair)),
+    "cardinality" to jsonString(mapping.traits.cardinality.name),
+    "totality" to jsonString(mapping.traits.totality.name),
+    "orderBehavior" to jsonString(mapping.traits.orderBehavior.name),
+    "invertibility" to jsonString(mapping.traits.invertibility.name),
+    "continuity" to jsonString(mapping.traits.continuity.name),
+    "requiredContext" to jsonArray(mapping.requiredContext.map(::jsonString)),
+    "provenance" to Json.Object(mapping.provenance.mapValues { (_, raw) -> encodeRawValue(raw) }),
+)
+
+private fun decodeMapping(json: Json): TemporalMappingInstance {
+    val value = json.objectValue()
+    return TemporalMappingInstance(
+        id = value.required("id").stringValue(),
+        sourceTimelineId = value.required("sourceTimelineId").stringValue(),
+        targetTimelineId = value.required("targetTimelineId").stringValue(),
+        sourceAxisId = value.required("sourceAxisId").stringValue(),
+        targetAxisId = value.required("targetAxisId").stringValue(),
+        kind = TemporalMappingKind.valueOf(value.required("kind").stringValue()),
+        precision = TemporalPrecision(
+            TemporalPrecisionKind.valueOf(value.required("precisionKind").stringValue()),
+            value.required("precisionError").takeUnless { it === Json.Null }?.let(::decodeRational),
+        ),
+        scale = decodeRational(value.required("scale")),
+        offset = decodeRational(value.required("offset")),
+        range = decodeCoordinateRange(value.required("range")),
+        segments = value.required("segments").arrayValue().map(::decodeSegment),
+        pairs = value.required("pairs").arrayValue().map(::decodePair),
+        traits = TemporalMappingTraits(
+            TemporalCardinality.valueOf(value.required("cardinality").stringValue()),
+            TemporalTotality.valueOf(value.required("totality").stringValue()),
+            TemporalOrderBehavior.valueOf(value.required("orderBehavior").stringValue()),
+            TemporalInvertibility.valueOf(value.required("invertibility").stringValue()),
+            TemporalContinuity.valueOf(value.required("continuity").stringValue()),
+        ),
+        requiredContext = value.required("requiredContext").arrayValue().map(Json::stringValue),
+        provenance = value.required("provenance").objectValue().mapValues { (_, raw) -> decodeRawValue(raw) },
     )
 }
 
