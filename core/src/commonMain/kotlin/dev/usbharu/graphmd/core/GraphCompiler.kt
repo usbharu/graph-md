@@ -644,7 +644,7 @@ class GraphCompiler(
                     doc.id,
                 )
             }
-            val lineage = doc.derivedFrom?.let { derived ->
+            val lineage = parent?.lineage ?: doc.derivedFrom?.let { derived ->
                 lineageSource?.let { source ->
                     AxisLineage(
                         sourceAxisId = source.axisId,

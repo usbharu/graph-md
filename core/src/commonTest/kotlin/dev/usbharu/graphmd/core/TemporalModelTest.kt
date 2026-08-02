@@ -85,6 +85,23 @@ class TemporalModelTest {
     }
 
     @Test
+    fun `same axis aliases preserve axis lineage regardless of document order`() {
+        val result = compile(
+            timeline("Alias", "sameAxisAs: Fork"),
+            timeline("Fork", "derivedFrom:\n  timeline: Reality\n  kind: fork"),
+            timeline("Reality"),
+        )
+
+        val fork = result.timelines.single { it.id == "Fork" }
+        val alias = result.timelines.single { it.id == "Alias" }
+        val axis = result.temporalModel.axes.single { it.id == fork.axisId }
+
+        assertEquals(AxisLineageKind.Fork, fork.lineage?.kind)
+        assertEquals(fork.lineage, alias.lineage)
+        assertEquals(fork.lineage, axis.lineage)
+    }
+
+    @Test
     fun `calendar presets normalize Gregorian and Julian labels`() {
         val result = compile(
             timeline("Gregorian", "coordinate: gregorian"),
