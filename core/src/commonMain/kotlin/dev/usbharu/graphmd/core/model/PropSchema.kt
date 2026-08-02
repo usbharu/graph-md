@@ -15,6 +15,7 @@ data class PropSchema(
     val timeline: TimelineSelector? = null,
     val timelines: List<TimelineSelector>? = null,
     val items: PropSchema? = null,
+    val enumValues: List<RawValue>? = null,
 )
 
 data class ResolvedPropSchema(
@@ -23,4 +24,5 @@ data class ResolvedPropSchema(
     val timeline: TimelineSelector? = null,
     val timelines: List<TimelineSelector>? = null,
     val items: ResolvedPropSchema? = null,
+    val enumValues: List<RawValue>? = null,
 )

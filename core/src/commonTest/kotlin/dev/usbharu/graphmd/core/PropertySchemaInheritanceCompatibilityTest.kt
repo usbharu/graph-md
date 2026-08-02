@@ -880,6 +880,113 @@ class PropertySchemaInheritanceCompatibilityTest {
         assertEquals(3, inheritedConflictCount(result, "DisjointNodeReverse", "at"))
     }
 
+    @Test
+    fun `treats enum inheritance as a narrowing constraint for nodes and relations`() {
+        val parentEnum = PropSchema(
+            PropType.string,
+            enumValues = listOf(RawString("a"), RawString("b")),
+        )
+        val childEnum = PropSchema(
+            PropType.string,
+            enumValues = listOf(RawString("a")),
+        )
+        val result = compiler().compile(
+            listOf(
+                NodeTypeDocument(
+                    "EnumParent",
+                    props = mapOf("status" to parentEnum),
+                    sourcePath = "/types/enum-parent.md",
+                ),
+                NodeTypeDocument(
+                    "EnumChild",
+                    extends = listOf("EnumParent"),
+                    props = mapOf("status" to childEnum),
+                    sourcePath = "/types/enum-child.md",
+                ),
+                NodeTypeDocument(
+                    "EnumWidenedChild",
+                    extends = listOf("EnumParent"),
+                    props = mapOf(
+                        "status" to PropSchema(
+                            PropType.string,
+                            enumValues = listOf(RawString("a"), RawString("c")),
+                        ),
+                    ),
+                    sourcePath = "/types/enum-widened-child.md",
+                ),
+                NodeTypeDocument(
+                    "EnumOtherParent",
+                    props = mapOf(
+                        "status" to PropSchema(
+                            PropType.string,
+                            enumValues = listOf(RawString("b"), RawString("c")),
+                        ),
+                    ),
+                    sourcePath = "/types/enum-other-parent.md",
+                ),
+                NodeTypeDocument(
+                    "EnumBothParents",
+                    extends = listOf("EnumParent", "EnumOtherParent"),
+                    sourcePath = "/types/enum-both.md",
+                ),
+                RelTypeDocument(
+                    "EnumRelParent",
+                    props = mapOf("status" to parentEnum),
+                    sourcePath = "/rels/enum-parent.md",
+                ),
+                RelTypeDocument(
+                    "EnumRelChild",
+                    extends = listOf("EnumRelParent"),
+                    props = mapOf("status" to childEnum),
+                    sourcePath = "/rels/enum-child.md",
+                ),
+                RelTypeDocument(
+                    "EnumRelWidenedChild",
+                    extends = listOf("EnumRelParent"),
+                    props = mapOf(
+                        "status" to PropSchema(
+                            PropType.string,
+                            enumValues = listOf(RawString("a"), RawString("c")),
+                        ),
+                    ),
+                    sourcePath = "/rels/enum-widened-child.md",
+                ),
+                NodeDocument(
+                    "enum-child-node",
+                    "EnumChild",
+                    props = mapOf("status" to RawString("b")),
+                    sourcePath = "/nodes/enum-child.md",
+                ),
+            ),
+        )
+
+        assertEquals(
+            listOf(RawString("a")),
+            result.nodeTypes.single { it.id == "EnumChild" }.props.getValue("status").enumValues,
+        )
+        assertTrue(result.diagnostics.none {
+            it.source?.documentId == "EnumChild" && it.message == "Invalid refinement for prop status"
+        })
+        assertTrue(result.diagnostics.any {
+            it.source?.documentId == "EnumWidenedChild" && it.message == "Invalid refinement for prop status"
+        })
+        assertTrue(result.diagnostics.any {
+            it.source?.documentId == "EnumRelWidenedChild" && it.message == "Invalid refinement for prop status"
+        })
+        assertTrue(result.diagnostics.any {
+            it.source?.documentId == "EnumBothParents" &&
+                it.message == "Incompatible inherited prop schemas for status"
+        })
+        assertEquals(
+            listOf(RawString("b")),
+            result.nodeTypes.single { it.id == "EnumBothParents" }.props.getValue("status").enumValues,
+        )
+        assertTrue(result.diagnostics.any {
+            it.source?.documentId == "enum-child-node" &&
+                it.message == "status value is not in enum"
+        })
+    }
+
     private fun nested(items: PropSchema): PropSchema =
         PropSchema(PropType.array, items = PropSchema(PropType.array, items = items))
 

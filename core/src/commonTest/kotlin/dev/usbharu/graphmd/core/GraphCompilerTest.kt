@@ -397,6 +397,119 @@ class GraphCompilerTest {
     }
 
     @Test
+    fun `validates enum values for scalar array text and nested item properties`() {
+        val result = compiler().compile(
+            listOf(
+                TimelineDocument("Era", sourcePath = "/tmp/era.md"),
+                NodeTypeDocument(
+                    id = "Choice",
+                    props = mapOf(
+                        "status" to PropSchema(
+                            PropType.string,
+                            enumValues = listOf(RawString("ok"), RawString("ready")),
+                        ),
+                        "amount" to PropSchema(
+                            PropType.number,
+                            enumValues = listOf(RawInteger(1), RawNumber(2.5)),
+                        ),
+                        "tags" to PropSchema(
+                            PropType.array,
+                            enumValues = listOf(RawString("a"), RawString("b")),
+                        ),
+                        "labels" to PropSchema(
+                            PropType.text,
+                            enumValues = listOf(RawString("日本語"), RawString("English")),
+                        ),
+                        "nested" to PropSchema(
+                            PropType.array,
+                            items = PropSchema(
+                                PropType.array,
+                                items = PropSchema(
+                                    PropType.string,
+                                    enumValues = listOf(RawString("deep")),
+                                ),
+                            ),
+                        ),
+                    ),
+                    sourcePath = "/tmp/choice-type.md",
+                ),
+                NodeDocument(
+                    id = "choice",
+                    type = "Choice",
+                    props = mapOf(
+                        "status" to RawString("invalid"),
+                        "amount" to RawNumber(1.0),
+                        "tags" to RawArray(
+                            listOf(
+                                RawString("a"),
+                                RawObject(
+                                    mapOf(
+                                        "value" to RawString("b"),
+                                        "validTime" to RawArray(
+                                            listOf(RawObject(mapOf("timeline" to RawString("Era")))),
+                                        ),
+                                    ),
+                                ),
+                                RawString("invalid"),
+                            ),
+                        ),
+                        "labels" to RawObject(
+                            mapOf(
+                                "ja" to RawString("日本語"),
+                                "en" to RawObject(
+                                    mapOf(
+                                        "value" to RawString("invalid"),
+                                        "validTime" to RawArray(
+                                            listOf(RawObject(mapOf("timeline" to RawString("Era")))),
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
+                        "nested" to RawArray(
+                            listOf(
+                                RawArray(listOf(RawString("deep"), RawString("invalid"))),
+                            ),
+                        ),
+                    ),
+                    sourcePath = "/tmp/choice.md",
+                ),
+            ),
+        )
+
+        val node = result.nodes.single()
+        assertEquals(StringValue("invalid"), node.props.getValue("status"))
+        assertEquals(NumberValue(1.0), node.props.getValue("amount"))
+        assertEquals(
+            listOf(StringValue("a"), StringValue("b"), StringValue("invalid")),
+            (node.props.getValue("tags") as ArrayValue).values,
+        )
+        assertEquals(
+            mapOf(
+                "ja" to StringValue("日本語"),
+                "en" to StringValue("invalid"),
+            ),
+            (node.props.getValue("labels") as TextValue).entries,
+        )
+        assertEquals(
+            listOf(StringValue("deep"), StringValue("invalid")),
+            ((node.props.getValue("nested") as ArrayValue).values.single() as ArrayValue).values,
+        )
+
+        assertEquals(
+            listOf(
+                "status value is not in enum",
+                "tags[] value is not in enum",
+                "labels.en value is not in enum",
+                "nested[][] value is not in enum",
+            ),
+            result.diagnostics
+                .filter { it.category == DiagnosticCategory.ConstraintError }
+                .map { it.message },
+        )
+    }
+
+    @Test
     fun `drops invalid typed array elements without affecting valid schemaless nested or timed elements`() {
         val validTime = RawArray(listOf(RawObject(mapOf("timeline" to RawString("CommonEra")))))
         val result = compiler().compile(

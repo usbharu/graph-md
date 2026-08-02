@@ -883,7 +883,7 @@ class GraphDocumentParser {
                 }
             }
         } ?: PropType.string
-        val unknown = map.map.keys - setOf("type", "required", "timeline", "items")
+        val unknown = map.map.keys - setOf("type", "required", "timeline", "items", "enum")
         unknown.forEach { diagnostics += schemaError("Unknown property schema field: $fieldName.$it", sourcePath, documentId) }
         return PropSchema(
             type = type,
@@ -902,7 +902,31 @@ class GraphDocumentParser {
                     else -> parsePropSchema(it, sourcePath, diagnostics, documentId, "$fieldName.items")
                 }
             },
+            enumValues = map.map["enum"]?.let {
+                parsePropEnum(it, sourcePath, diagnostics, documentId, "$fieldName.enum")
+            },
         )
+    }
+
+    private fun parsePropEnum(
+        value: YamlValue,
+        sourcePath: String,
+        diagnostics: MutableList<Diagnostic>,
+        documentId: String,
+        fieldName: String,
+    ): List<RawValue>? {
+        val values = (value as? YamlList)?.values ?: run {
+            diagnostics += schemaError("$fieldName MUST be a non-empty list", sourcePath, documentId)
+            return null
+        }
+        if (values.isEmpty()) {
+            diagnostics += schemaError("$fieldName MUST be a non-empty list", sourcePath, documentId)
+        }
+        val rawValues = values.map(::parseRawValue)
+        if (!rawValuesAreUnique(rawValues)) {
+            diagnostics += schemaError("$fieldName values MUST be unique", sourcePath, documentId)
+        }
+        return rawValues
     }
 
     private fun parseTimelineMapping(

@@ -506,6 +506,7 @@ private fun encodePropertySchema(schema: ResolvedPropSchema): Json = jsonObject(
     "type" to jsonString(schema.type.name),
     "required" to jsonBoolean(schema.required),
     "items" to (schema.items?.let(::encodePropertySchema) ?: Json.Null),
+    "enum" to (schema.enumValues?.let { jsonArray(it.map(::encodeRawValue)) } ?: Json.Null),
 )
 
 private fun decodePropertySchema(json: Json): ResolvedPropSchema {
@@ -514,7 +515,42 @@ private fun decodePropertySchema(json: Json): ResolvedPropSchema {
         type = PropType.valueOf(value.required("type").stringValue()),
         required = value.required("required").booleanValue(),
         items = value.required("items").let { if (it === Json.Null) null else decodePropertySchema(it) },
+        enumValues = value["enum"]?.let { if (it === Json.Null) null else it.arrayValue().map(::decodeRawValue) },
     )
+}
+
+private fun encodeRawValue(value: RawValue): Json = when (value) {
+    is RawString -> jsonObject("kind" to jsonString("string"), "value" to jsonString(value.value))
+    is RawInteger -> jsonObject("kind" to jsonString("integer"), "value" to jsonNumber(value.value))
+    is RawNumber -> jsonObject("kind" to jsonString("number"), "value" to jsonNumber(value.value))
+    is RawBoolean -> jsonObject("kind" to jsonString("boolean"), "value" to jsonBoolean(value.value))
+    RawNull -> jsonObject("kind" to jsonString("null"))
+    is RawArray -> jsonObject(
+        "kind" to jsonString("array"),
+        "values" to jsonArray(value.values.map(::encodeRawValue)),
+    )
+    is RawObject -> jsonObject(
+        "kind" to jsonString("object"),
+        "values" to Json.Object(
+            value.values.entries
+                .sortedBy { it.key }
+                .associateTo(linkedMapOf()) { (key, child) -> key to encodeRawValue(child) },
+        ),
+    )
+}
+
+private fun decodeRawValue(json: Json): RawValue {
+    val value = json.objectValue()
+    return when (value.required("kind").stringValue()) {
+        "string" -> RawString(value.required("value").stringValue())
+        "integer" -> RawInteger(value.required("value").longValue())
+        "number" -> RawNumber(value.required("value").doubleValue())
+        "boolean" -> RawBoolean(value.required("value").booleanValue())
+        "null" -> RawNull
+        "array" -> RawArray(value.required("values").arrayValue().map(::decodeRawValue))
+        "object" -> RawObject(value.required("values").objectValue().mapValues { (_, child) -> decodeRawValue(child) })
+        else -> error("Unknown encoded RawValue kind")
+    }
 }
 
 private fun encodeOwner(owner: AssertionOwner): Json = when (owner) {
@@ -1026,33 +1062,6 @@ private fun decodeMapping(json: Json): TemporalMappingInstance {
         requiredContext = value.required("requiredContext").arrayValue().map(Json::stringValue),
         provenance = value.required("provenance").objectValue().mapValues { (_, raw) -> decodeRawValue(raw) },
     )
-}
-
-private fun encodeRawValue(value: RawValue): Json = when (value) {
-    is RawString -> jsonObject("kind" to jsonString("string"), "value" to jsonString(value.value))
-    is RawInteger -> jsonObject("kind" to jsonString("integer"), "value" to jsonNumber(value.value))
-    is RawNumber -> jsonObject("kind" to jsonString("number"), "value" to jsonNumber(value.value))
-    is RawBoolean -> jsonObject("kind" to jsonString("boolean"), "value" to jsonBoolean(value.value))
-    RawNull -> jsonObject("kind" to jsonString("null"))
-    is RawArray -> jsonObject("kind" to jsonString("array"), "values" to jsonArray(value.values.map(::encodeRawValue)))
-    is RawObject -> jsonObject(
-        "kind" to jsonString("object"),
-        "values" to Json.Object(value.values.mapValues { (_, nested) -> encodeRawValue(nested) }),
-    )
-}
-
-private fun decodeRawValue(json: Json): RawValue {
-    val value = json.objectValue()
-    return when (value.required("kind").stringValue()) {
-        "string" -> RawString(value.required("value").stringValue())
-        "integer" -> RawInteger(value.required("value").longValue())
-        "number" -> RawNumber(value.required("value").doubleValue())
-        "boolean" -> RawBoolean(value.required("value").booleanValue())
-        "null" -> RawNull
-        "array" -> RawArray(value.required("values").arrayValue().map(::decodeRawValue))
-        "object" -> RawObject(value.required("values").objectValue().mapValues { (_, nested) -> decodeRawValue(nested) })
-        else -> error("Unknown raw value kind")
-    }
 }
 
 private fun encodePropertyPosting(posting: PropertyValuePosting): Json = jsonObject(

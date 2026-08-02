@@ -109,6 +109,17 @@ PropSchemaが`string`である場合、値は文字列のままでありtext値�
 arrayの`items`は任意であり、省略した場合は任意の型の要素を許容する。arrayの要素にvalidTimeを指定する場合、要素は`value`と`validTime`を持つエントリとして表現する。itemsで指定した型は、そのエントリの`value`に適用する。
 `items`はPropSchemaの共通フィールドとして記述でき、`items`自体は通常のPropSchemaとして検証するが、Property値への適用は`type: array`のときだけ行う。それ以外の型に指定された`items`は、Property値の検証、継承互換性、および正規化結果へ影響しない。
 
+`enum`はPropSchemaの共通フィールドであり、空でないRawValueの配列で指定する。候補値は暗黙変換せずに比較するが、整数と小数は同じ数値として扱う。通常の型ではProperty値そのもの、`type: array`では各要素、`type: text`では各キーの値に適用する。`{value, validTime}`形式の要素またはtextメンバーでは`value`に対して適用し、`items.enum`は配列要素へ再帰的に適用する。候補に含まれない値は制約違反として診断するが、型が正しい値は正規化結果に保持する。
+
+```yaml
+props:
+  status:
+    type: string
+    enum:
+      - draft
+      - published
+```
+
 PropSchemaに検索用の`index`設定は存在しない。`index`フィールドを記述した場合は未知のProperty Schemaフィールドとして診断する。検索インデックスの構築方法はGraphMD文書モデルの範囲外とする。
 
 空配列`[]`の意味は解決済みPropSchemaによって決まる。`type: array`では、`[]`は要素を持たない有効なarray値であり、一つのProperty主張として扱う。それ以外の型、または利用可能なPropSchemaがない場合は、`[]`をPropertyの時系列バリエーションが0件であるものとして扱い、そのProperty自体が指定されなかった場合と同じ正規化結果にする。したがって、そのPropertyが`required`なら必須Property欠落として診断する。
@@ -304,6 +315,11 @@ Propertyとして扱う`name`、`aliases`、`tags`、`lang`、`meta`をトップ
         "required": {
           "type": "boolean"
         },
+        "enum": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true
+        },
         "timeline": {
           "$ref": "#/$defs/timelineSelector"
         },
@@ -338,6 +354,8 @@ Propertyとして扱う`name`、`aliases`、`tags`、`lang`、`meta`をトップ
 extendsで継承することができ、サブタイプはスーパータイプの全てのプロパティを持つ。サブタイプがスーパータイプの型を上書きすることはできない。extendsは推移的である。
 
 複数のスーパータイプが同名Propertyを定義し、その型に互換性がない場合、実装は警告を出す。timeline selectorも同じProperty Schema制約として扱い、指定したTimelineが同じAxisに属する場合は互換とする。型やtimeline selectorなどの通常の定義はextendsに先に記載されたスーパータイプを優先し、requiredはすべての定義の論理積（AND）として扱う。
+
+`enum`を継承する場合、子の候補集合は親の候補集合の部分集合でなければならない。親が`enum`を持たない場合、子はenumを追加できる。複数の親の候補集合が互いに包含関係にない場合は、他の互換性のないProperty Schemaと同じく警告する。
 
 NodeTypeは型定義であり、validTimeを指定してはならない。validTimeはNodeとそのPropertyに指定する。
 
@@ -392,6 +410,11 @@ Property Schemaのtimeline selectorは指定Timelineの個体ではなくAxisを
           "enum": [ "number", "string", "text", "instant", "duration", "array" ]
         },
         "required": { "type": "boolean" },
+        "enum": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true
+        },
         "timeline": { "$ref": "#/$defs/timelineSelector" },
         "items": {
           "description": "通常のPropSchemaとして検証するが、Property値へはtypeがarrayの場合だけ適用する",

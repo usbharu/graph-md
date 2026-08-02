@@ -8,6 +8,7 @@ import dev.usbharu.graphmd.core.model.GraphDocument
 import dev.usbharu.graphmd.core.model.NodeDocument
 import dev.usbharu.graphmd.core.model.NodeTypeDocument
 import dev.usbharu.graphmd.core.model.PropType
+import dev.usbharu.graphmd.core.model.RawString
 import dev.usbharu.graphmd.core.model.RelTypeDocument
 import dev.usbharu.graphmd.core.model.ResolvedPropSchema
 import dev.usbharu.graphmd.core.model.SourceDocument
@@ -2082,6 +2083,156 @@ class GraphMdLanguageServerTest {
         assertEquals(listOf("ThirdAge"), resolve("activeDuring(validTime=Th").map { it.label })
         assertEquals(listOf("from", "to"), resolve("activeDuring(validTime=ThirdAge(").map { it.label })
         assertEquals(listOf("0"), resolve("activeDuring(validTime=ThirdAge(from=").map { it.label })
+    }
+
+    @Test
+    fun `enum props completion offers configured scalar text and array values`() {
+        val enumValues = listOf(RawString("draft"), RawString("published"))
+        val arrayEnumValues = listOf(RawString("alpha"), RawString("beta"))
+        val nestedEnumValues = listOf(RawString("deep"), RawString("deeper"))
+        val schema = mapOf(
+            "status" to ResolvedPropSchema(type = PropType.string, enumValues = enumValues),
+            "labels" to ResolvedPropSchema(type = PropType.text, enumValues = enumValues),
+            "tags" to ResolvedPropSchema(type = PropType.array, enumValues = arrayEnumValues),
+            "matrix" to ResolvedPropSchema(
+                type = PropType.array,
+                items = ResolvedPropSchema(
+                    type = PropType.array,
+                    items = ResolvedPropSchema(type = PropType.string, enumValues = nestedEnumValues),
+                ),
+            ),
+        )
+        fun resolve(body: String) = PropsCompletionContextResolver(
+            text = "@props{$body",
+            offset = "@props{$body".length,
+            rootSchema = schema,
+            timelineIds = emptyList(),
+        ).resolve()?.items.orEmpty()
+
+        assertEquals(listOf("draft", "published"), resolve("status = ").map { it.label })
+        assertEquals(listOf("published"), resolve("status = pub").map { it.label })
+        assertTrue(resolve("status = ").all { it.kind == CompletionItemKind.EnumMember && it.detail == "enum" })
+        assertEquals(listOf("draft", "published"), resolve("labels(key=\"en\") = ").map { it.label })
+        assertEquals(listOf("alpha", "beta"), resolve("tags = [").map { it.label })
+        assertEquals(listOf("beta"), resolve("tags = [b").map { it.label })
+        assertEquals(listOf("deep", "deeper"), resolve("matrix = [[").map { it.label })
+    }
+
+    @Test
+    fun `front matter enum completion filters scalar and block array values`() {
+        val schema = mapOf(
+            "status" to ResolvedPropSchema(
+                type = PropType.string,
+                enumValues = listOf(RawString("draft"), RawString("published")),
+            ),
+            "tags" to ResolvedPropSchema(
+                type = PropType.array,
+                items = ResolvedPropSchema(
+                    type = PropType.string,
+                    enumValues = listOf(RawString("alpha"), RawString("beta")),
+                ),
+            ),
+        )
+        fun resolve(text: String, cursor: String): List<String> {
+            val offset = text.indexOf(cursor) + cursor.length
+            return FrontMatterCompletionResolver(
+                text = text,
+                offset = offset,
+                parsedDocument = NodeDocument(id = "alice", type = "Person", sourcePath = "/tmp/alice.md"),
+                nodeTypeIds = listOf("Person"),
+                relTypeIds = emptyList(),
+                timelineIds = emptyList(),
+                nodePropsSchema = schema,
+            ).resolve().orEmpty().map { it.label }
+        }
+
+        assertEquals(
+            listOf("published"),
+            resolve("---\nid: alice\nkind: Node\ntype: Person\nprops:\n  status: pub\n---", "pub"),
+        )
+        assertEquals(
+            listOf("alpha", "beta"),
+            resolve("---\nid: alice\nkind: Node\ntype: Person\nprops:\n  tags:\n    - \n---", "- "),
+        )
+    }
+
+    @Test
+    fun `enum diagnostics highlight the invalid property value`() {
+        val typeUri = "file:///workspace/types/Person.md"
+        val nodeUri = "file:///workspace/alice.md"
+        val inlineUri = "file:///workspace/inline.md"
+        val nodeText = """
+            ---
+            id: alice
+            kind: Node
+            type: Person
+            props:
+              status: invalid
+              tags:
+                - invalid
+              labels:
+                en:
+                  value: invalid
+            ---
+        """.trimIndent()
+        val inlineText = """
+            ---
+            id: inline
+            kind: Node
+            type: Person
+            ---
+            @props{status = invalid}
+        """.trimIndent()
+        val fixture = serverFixture(
+            mapOf(
+                typeUri to """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    props:
+                      status:
+                        type: string
+                        enum:
+                          - draft
+                          - published
+                      tags:
+                        type: array
+                        items:
+                          type: string
+                          enum:
+                            - draft
+                            - published
+                      labels:
+                        type: text
+                        enum:
+                          - draft
+                          - published
+                    ---
+                """.trimIndent(),
+                nodeUri to nodeText,
+                inlineUri to inlineText,
+            ),
+        )
+
+        val diagnostic = fixture.diagnostics.getValue(nodeUri).single {
+            it.message == "status value is not in enum"
+        }
+        assertEquals(Range(Position(5, 10), Position(5, 17)), diagnostic.range)
+
+        val arrayDiagnostic = fixture.diagnostics.getValue(nodeUri).single {
+            it.message == "tags[] value is not in enum"
+        }
+        assertEquals(Range(Position(7, 6), Position(7, 13)), arrayDiagnostic.range)
+
+        val textDiagnostic = fixture.diagnostics.getValue(nodeUri).single {
+            it.message == "labels.en value is not in enum"
+        }
+        assertEquals(Range(Position(10, 13), Position(10, 20)), textDiagnostic.range)
+
+        val inlineDiagnostic = fixture.diagnostics.getValue(inlineUri).single {
+            it.message == "status value is not in enum"
+        }
+        assertEquals(Range(Position(5, 16), Position(5, 23)), inlineDiagnostic.range)
     }
 
     @Test
