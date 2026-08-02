@@ -1,5 +1,7 @@
 package dev.usbharu.graphmd.cli
 
+import dev.usbharu.graphmd.core.model.ExactRational
+
 internal enum class CliKind(val wireName: String, val order: Int) {
     Node("node", 0),
     Media("media", 1),
@@ -33,8 +35,8 @@ internal enum class LinkDirection {
 
 internal data class ValidTimeFilter(
     val timeline: String,
-    val from: Double?,
-    val to: Double?,
+    val from: String?,
+    val to: String?,
 )
 
 internal sealed interface CliCommand {
@@ -283,10 +285,10 @@ internal object CliArguments {
         if (specified.size > 1) usage("--valid-time may only be specified once")
         val value = specified.singleOrNull() ?: return null
         val match = VALID_TIME_PATTERN.matchEntire(value.trim())
-            ?: usage("--valid-time must be TIMELINE, TIMELINE(from=N), TIMELINE(to=N), or TIMELINE(from=N,to=N)")
+            ?: usage("--valid-time must be TIMELINE, TIMELINE(from=VALUE), TIMELINE(to=VALUE), or TIMELINE(from=VALUE,to=VALUE)")
         val timeline = match.groupValues[1]
-        var from: Double? = null
-        var to: Double? = null
+        var from: String? = null
+        var to: String? = null
         val arguments = match.groupValues[2]
         if (arguments.isNotBlank()) {
             arguments.split(",").forEach { argument ->
@@ -294,15 +296,20 @@ internal object CliArguments {
                 if (parts.size != 2 || parts[0] !in setOf("from", "to")) {
                     usage("Invalid --valid-time bound: $argument")
                 }
-                val timecode = parts[1].toDoubleOrNull()?.takeIf { it.isFinite() }
-                    ?: usage("Invalid --valid-time timecode: ${parts[1]}")
+                val coordinate = parts[1].removeSurrounding("\"").removeSurrounding("'")
+                    .takeIf { it.isNotBlank() }
+                    ?: usage("Invalid --valid-time coordinate: ${parts[1]}")
                 when (parts[0]) {
-                    "from" -> if (from == null) from = timecode else usage("Duplicate from bound")
-                    "to" -> if (to == null) to = timecode else usage("Duplicate to bound")
+                    "from" -> if (from == null) from = coordinate else usage("Duplicate from bound")
+                    "to" -> if (to == null) to = coordinate else usage("Duplicate to bound")
                 }
             }
         }
-        if (from != null && to != null && from > to) usage("--valid-time from must not exceed to")
+        val numericFrom = from?.let { runCatching { ExactRational.parse(it) }.getOrNull() }
+        val numericTo = to?.let { runCatching { ExactRational.parse(it) }.getOrNull() }
+        if (numericFrom != null && numericTo != null && numericFrom > numericTo) {
+            usage("--valid-time from must not exceed to")
+        }
         return ValidTimeFilter(timeline, from, to)
     }
 

@@ -1,17 +1,26 @@
 package dev.usbharu.graphmd.query.model
 
-import dev.usbharu.graphmd.core.model.NormalizedValue
+import dev.usbharu.graphmd.core.model.*
 
 sealed interface TemporalWindow {
     val timelineId: TimelineId
 
     data class At(
         override val timelineId: TimelineId,
-        val instant: Double,
+        val coordinate: TemporalCoordinate,
     ) : TemporalWindow {
-        init {
-            require(instant.isFinite()) { "A query instant must be finite" }
-        }
+        constructor(timelineId: TimelineId, instant: Double) : this(
+            timelineId,
+            TemporalCoordinate.Rational(ExactRational.fromDouble(instant)),
+        )
+
+        constructor(timelineId: TimelineId, instant: ExactRational) : this(
+            timelineId,
+            TemporalCoordinate.Rational(instant),
+        )
+
+        @Deprecated("Use coordinate")
+        val instant: Double get() = (coordinate as? TemporalCoordinate.Rational)?.value?.toDouble() ?: Double.NaN
     }
 
     /**
@@ -19,14 +28,20 @@ sealed interface TemporalWindow {
      */
     data class Range(
         override val timelineId: TimelineId,
-        val start: Double? = null,
-        val endExclusive: Double? = null,
+        val startCoordinate: TemporalCoordinate? = null,
+        val endExclusiveCoordinate: TemporalCoordinate? = null,
     ) : TemporalWindow {
-        init {
-            require(start?.isFinite() != false && endExclusive?.isFinite() != false) {
-                "Query range boundaries must be finite"
-            }
-        }
+        constructor(timelineId: TimelineId, start: Double?, endExclusive: Double?) : this(
+            timelineId,
+            start?.let { TemporalCoordinate.Rational(ExactRational.fromDouble(it)) },
+            endExclusive?.let { TemporalCoordinate.Rational(ExactRational.fromDouble(it)) },
+        )
+
+        @Deprecated("Use startCoordinate")
+        val start: Double? get() = (startCoordinate as? TemporalCoordinate.Rational)?.value?.toDouble()
+
+        @Deprecated("Use endExclusiveCoordinate")
+        val endExclusive: Double? get() = (endExclusiveCoordinate as? TemporalCoordinate.Rational)?.value?.toDouble()
     }
 
     /**
@@ -34,41 +49,44 @@ sealed interface TemporalWindow {
      */
     data class ClosedRange(
         override val timelineId: TimelineId,
-        val start: Double? = null,
-        val endInclusive: Double? = null,
+        val startCoordinate: TemporalCoordinate? = null,
+        val endInclusiveCoordinate: TemporalCoordinate? = null,
     ) : TemporalWindow {
-        init {
-            require(start?.isFinite() != false && endInclusive?.isFinite() != false) {
-                "Query range boundaries must be finite"
-            }
-        }
+        constructor(timelineId: TimelineId, start: Double?, endInclusive: Double?) : this(
+            timelineId,
+            start?.let { TemporalCoordinate.Rational(ExactRational.fromDouble(it)) },
+            endInclusive?.let { TemporalCoordinate.Rational(ExactRational.fromDouble(it)) },
+        )
+
+        @Deprecated("Use startCoordinate")
+        val start: Double? get() = (startCoordinate as? TemporalCoordinate.Rational)?.value?.toDouble()
+
+        @Deprecated("Use endInclusiveCoordinate")
+        val endInclusive: Double? get() = (endInclusiveCoordinate as? TemporalCoordinate.Rational)?.value?.toDouble()
     }
 
     fun toIntervalSet(catalog: TimelineCatalog): IntervalSet {
-        val interval = when (this) {
-            is At -> catalog.assertedInterval(
+        return when (this) {
+            is At -> catalog.searchIntervals(
                 timelineId,
-                IntervalBoundary(instant, inclusive = true),
-                IntervalBoundary(instant, inclusive = true),
+                coordinate to true,
+                coordinate to true,
             )
             is Range -> {
-                if (start != null && endExclusive != null && start >= endExclusive) return IntervalSet.empty()
-                catalog.assertedInterval(
+                catalog.searchIntervals(
                     timelineId,
-                    start?.let { IntervalBoundary(it, inclusive = true) },
-                    endExclusive?.let { IntervalBoundary(it, inclusive = false) },
+                    startCoordinate?.let { it to true },
+                    endExclusiveCoordinate?.let { it to false },
                 )
             }
             is ClosedRange -> {
-                if (start != null && endInclusive != null && start > endInclusive) return IntervalSet.empty()
-                catalog.assertedInterval(
+                catalog.searchIntervals(
                     timelineId,
-                    start?.let { IntervalBoundary(it, inclusive = true) },
-                    endInclusive?.let { IntervalBoundary(it, inclusive = true) },
+                    startCoordinate?.let { it to true },
+                    endInclusiveCoordinate?.let { it to true },
                 )
             }
         }
-        return IntervalSet.of(interval)
     }
 }
 

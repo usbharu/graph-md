@@ -29,8 +29,23 @@ data class ObjectValue(
 data class InstantValue(
     val timeline: String? = null,
     val value: String? = null,
-    val timecode: TimecodeValue,
-) : NormalizedValue
+    val coordinate: TemporalCoordinate,
+) : NormalizedValue {
+    constructor(timeline: String? = null, value: String? = null, timecode: TimecodeValue) : this(
+        timeline,
+        value,
+        when (timecode) {
+            is NumberTimecode -> TemporalCoordinate.Rational(ExactRational.fromDouble(timecode.value))
+        },
+    )
+
+    @Deprecated("Use coordinate")
+    val timecode: TimecodeValue
+        get() = NumberTimecode(
+            (coordinate as? TemporalCoordinate.Rational)?.value?.toDouble()
+                ?: error("This instant is not a numeric coordinate"),
+        )
+}
 data class DurationValue(
     val timeline: String? = null,
     val from: TemporalPoint? = null,
@@ -38,10 +53,21 @@ data class DurationValue(
 ) : NormalizedValue
 
 data class TemporalPoint(
-    val timecode: Double,
+    val coordinate: TemporalCoordinate,
     val value: String? = null,
     val timeline: String? = null,
-)
+) {
+    constructor(timecode: Double, value: String? = null, timeline: String? = null) : this(
+        TemporalCoordinate.Rational(ExactRational.fromDouble(timecode)),
+        value,
+        timeline,
+    )
+
+    @Deprecated("Use coordinate")
+    val timecode: Double
+        get() = (coordinate as? TemporalCoordinate.Rational)?.value?.toDouble()
+            ?: error("This temporal point is not numeric")
+}
 
 data class NormalizedPropEntry(
     val value: NormalizedValue,

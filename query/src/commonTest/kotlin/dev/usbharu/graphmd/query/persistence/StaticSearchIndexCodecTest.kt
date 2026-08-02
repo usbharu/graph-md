@@ -29,6 +29,7 @@ class StaticSearchIndexCodecTest {
         assertEquals("0.1.0-test", manifest.compilerVersion)
         assertEquals(3, manifest.shards.getValue("nodes").size)
         assertTrue(manifest.shards.getValue("properties").size > 1)
+        assertTrue(first.shards.values.any { "\"numerator\"" in it })
         assertEquals(index, decoded)
     }
 
@@ -111,8 +112,34 @@ class StaticSearchIndexCodecTest {
                 TemporalPoint(3.0, "end", "TimelineA"),
             ),
         )
+        val sourceTimeline = graph.timelines.single()
+        val targetTimeline = QueryTimeline(TimelineId("TimelineB"), TimelineId("TimelineB"), 0.0)
+        val mapping = TemporalMappingInstance(
+            id = "TimelineA->TimelineB#0",
+            sourceTimelineId = "TimelineA",
+            targetTimelineId = "TimelineB",
+            sourceAxisId = "TimelineA",
+            targetAxisId = "TimelineB",
+            kind = TemporalMappingKind.Alignment,
+            precision = TemporalPrecision(),
+            scale = ExactRational.ONE,
+            offset = ExactRational.ZERO,
+            range = null,
+            segments = emptyList(),
+            pairs = emptyList(),
+            traits = TemporalMappingTraits(
+                TemporalCardinality.OneToOne,
+                TemporalTotality.Total,
+                TemporalOrderBehavior.StrictlyIncreasing,
+                TemporalInvertibility.Invertible,
+                TemporalContinuity.Continuous,
+            ),
+            requiredContext = emptyList(),
+            provenance = mapOf("source" to RawString("spec sample")),
+        )
         graph.copy(
             nodes = graph.nodes + graph.nodes.first().copy(id = NodeId("value-holder")),
+            timelines = listOf(sourceTimeline.copy(mappings = listOf(mapping)), targetTimeline),
             propertyAssertions = graph.propertyAssertions + values.mapIndexed { index, value ->
                 PropertyAssertion(
                     id = AssertionId(6 + index),

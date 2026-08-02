@@ -18,9 +18,23 @@ internal fun jsonObject(vararg values: Pair<String, JsonValue>): JsonValue =
 
 internal fun jsonArray(values: Iterable<JsonValue>): JsonValue = JsonValue.Array(values.toList())
 internal fun jsonString(value: String): JsonValue = JsonValue.StringValue(value)
-internal fun jsonNumber(value: Number): JsonValue = JsonValue.NumberValue(value.toString())
+internal fun jsonNumber(value: Number): JsonValue = JsonValue.NumberValue(
+    when (value) {
+        is Double -> value.graphNumberText()
+        is Float -> value.toDouble().graphNumberText()
+        else -> value.toString()
+    },
+)
 internal fun jsonBoolean(value: Boolean): JsonValue = JsonValue.BooleanValue(value)
 internal fun jsonNullableString(value: String?): JsonValue = value?.let(::jsonString) ?: JsonValue.Null
+internal fun Double.graphNumberText(): String {
+    val rendered = toString()
+    return if (isFinite() && this % 1.0 == 0.0 && '.' !in rendered && 'e' !in rendered.lowercase()) {
+        "$rendered.0"
+    } else {
+        rendered
+    }
+}
 internal fun <V> Map<String, V>.sortedByKey(): Map<String, V> =
     entries.sortedBy { it.key }.associateTo(linkedMapOf()) { it.key to it.value }
 
@@ -78,12 +92,12 @@ internal fun ValidTime.toJson(): JsonValue = jsonObject(
 )
 
 private fun TimePoint.toJson(): JsonValue = jsonObject(
-    "timecode" to jsonNumber(timecode),
+    "coordinate" to coordinate.toJson(),
     "value" to jsonNullableString(value),
 )
 
 private fun TemporalPoint.toJson(): JsonValue = jsonObject(
-    "timecode" to jsonNumber(timecode),
+    "coordinate" to coordinate.toJson(),
     "value" to jsonNullableString(value),
     "timeline" to jsonNullableString(timeline),
 )
@@ -106,15 +120,37 @@ internal fun NormalizedValue.toJson(): JsonValue = when (this) {
     is InstantValue -> jsonObject(
         "timeline" to jsonNullableString(timeline),
         "value" to jsonNullableString(value),
-        "timecode" to when (val code = timecode) {
-            is NumberTimecode -> jsonNumber(code.value)
-        },
+        "coordinate" to coordinate.toJson(),
     )
     is DurationValue -> jsonObject(
         "timeline" to jsonNullableString(timeline),
         "from" to (from?.toJson() ?: JsonValue.Null),
         "to" to (to?.toJson() ?: JsonValue.Null),
     )
+}
+
+internal fun ExactRational.toJson(): JsonValue = jsonObject(
+    "numerator" to jsonNumber(numerator),
+    "denominator" to jsonNumber(denominator),
+)
+
+internal fun TemporalCoordinate.toJson(): JsonValue = when (this) {
+    is TemporalCoordinate.Rational -> value.toJson()
+    is TemporalCoordinate.CalendarDate -> jsonString(
+        "${year.toString().padStart(4, '0')}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}",
+    )
+    is TemporalCoordinate.EraDate -> jsonString(
+        "$era $year-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}",
+    )
+    is TemporalCoordinate.FrameIndex -> jsonObject(
+        "numerator" to jsonNumber(value),
+        "denominator" to jsonNumber(1),
+    )
+    is TemporalCoordinate.Timecode -> jsonString(
+        "${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:" +
+            "${seconds.toString().padStart(2, '0')}:${frames.toString().padStart(2, '0')}",
+    )
+    is TemporalCoordinate.Label -> jsonString(value)
 }
 
 internal fun NormalizedPropEntry.toJson(): JsonValue = jsonObject(
@@ -208,8 +244,51 @@ private fun IntervalSet.toJson(): JsonValue = when {
 }
 
 private fun IntervalBoundary?.toJson(): JsonValue = this?.let {
-    jsonObject("value" to jsonNumber(value), "inclusive" to jsonBoolean(inclusive))
+    jsonObject("value" to exactValue.toJson(), "inclusive" to jsonBoolean(inclusive))
 } ?: JsonValue.Null
+
+internal fun TemporalCoordinateSpec.toJson(): JsonValue = when (this) {
+    TemporalCoordinateSpec.Number -> jsonString("number")
+    is TemporalCoordinateSpec.Calendar -> jsonObject(
+        "kind" to jsonString("calendar"),
+        "calendar" to jsonString(calendar.name.lowercase()),
+    )
+    is TemporalCoordinateSpec.Frame -> jsonObject("kind" to jsonString("frame"), "start" to jsonNumber(start))
+    is TemporalCoordinateSpec.Timecode -> jsonObject(
+        "kind" to jsonString("timecode"),
+        "actualFps" to actualFps.toJson(),
+        "nominalFps" to jsonNumber(nominalFps),
+        "dropFrame" to jsonBoolean(dropFrame),
+        "wrapHours" to (wrapHours?.let(::jsonNumber) ?: JsonValue.Null),
+    )
+    is TemporalCoordinateSpec.Era -> jsonObject(
+        "kind" to jsonString("era"),
+        "periods" to jsonArray(periods.map { jsonString(it.name) }),
+    )
+}
+
+internal fun AxisLineage.toJson(): JsonValue = jsonObject(
+    "sourceAxis" to jsonString(sourceAxisId),
+    "derivedAxis" to jsonString(derivedAxisId),
+    "sourceTimeline" to jsonString(sourceTimelineId),
+    "kind" to jsonString(kind.name.lowercase()),
+)
+
+internal fun TemporalMappingInstance.toJson(): JsonValue = jsonObject(
+    "id" to jsonString(id),
+    "timeline" to jsonString(targetTimelineId),
+    "kind" to jsonString(kind.name.lowercase()),
+    "precision" to jsonString(precision.kind.name.lowercase()),
+    "scale" to scale.toJson(),
+    "offset" to offset.toJson(),
+    "traits" to jsonObject(
+        "cardinality" to jsonString(traits.cardinality.name),
+        "totality" to jsonString(traits.totality.name),
+        "order" to jsonString(traits.orderBehavior.name),
+        "invertibility" to jsonString(traits.invertibility.name),
+        "continuity" to jsonString(traits.continuity.name),
+    ),
+)
 
 internal fun TimelineMapping.toJson(): JsonValue = when (this) {
     is OffsetTimelineMapping -> jsonObject(

@@ -36,7 +36,11 @@ private fun canonicalRawValue(value: RawValue): CanonicalRawValue = when (value)
     is RawBoolean -> CanonicalBoolean(value.value)
     RawNull -> CanonicalNull
     is RawArray -> CanonicalArray(value.values.map(::canonicalRawValue))
-    is RawObject -> CanonicalObject(value.values.mapValues { canonicalRawValue(it.value) })
+    is RawObject -> if (value.values.keys == setOf("timecode")) {
+        canonicalRawValue(value.values.getValue("timecode"))
+    } else {
+        CanonicalObject(value.values.mapValues { canonicalRawValue(it.value) })
+    }
 }
 
 private fun canonicalNumber(value: Double): CanonicalNumber =

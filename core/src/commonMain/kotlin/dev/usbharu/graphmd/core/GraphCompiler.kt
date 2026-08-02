@@ -72,8 +72,14 @@ class GraphCompiler(
         val uniqueTimelineDocs = timelineDocs.filterNot { it.id in ambiguousTimelineIds }
         val uniqueNodeTypeDocs = nodeTypeDocs.filterNot { it.id in ambiguousNodeTypeIds }
         val uniqueRelTypeDocs = relTypeDocs.filterNot { it.id in ambiguousRelTypeIds }
-        val timelines = resolveTimelineMappings(
+        val legacyResolvedTimelines = resolveTimelineMappings(
             resolveTimelines(uniqueTimelineDocs, referenceCandidates, diagnostics),
+            uniqueTimelineDocs,
+            referenceCandidates,
+            diagnostics,
+        )
+        val timelines = resolveTemporalTimelines(
+            legacyResolvedTimelines,
             uniqueTimelineDocs,
             referenceCandidates,
             diagnostics,
@@ -354,6 +360,7 @@ class GraphCompiler(
         sourcePath: String,
         documentId: String,
     ): List<Diagnostic> = buildList {
+        val temporalEngine = temporalEngine(timelineById.values)
         validTimes.forEach { validTime ->
             addAll(referenceDiagnostics(
                 referenceCandidates,
@@ -363,8 +370,21 @@ class GraphCompiler(
                 sourcePath,
                 documentId,
             ))
-            val from = validTime.from?.timecode
-            val to = validTime.to?.timecode
+            val timeline = timelineById[validTime.timeline]
+            val from = validTime.from?.let { point ->
+                runCatching { temporalEngine.normalizeToAxis(validTime.timeline, point.coordinate) }.getOrNull()
+            }
+            val to = validTime.to?.let { point ->
+                runCatching { temporalEngine.normalizeToAxis(validTime.timeline, point.coordinate) }.getOrNull()
+            }
+            if (timeline != null) {
+                if (validTime.from != null && from == null) {
+                    add(typeError("validTime.from is not valid for ${validTime.timeline}", sourcePath, documentId))
+                }
+                if (validTime.to != null && to == null) {
+                    add(typeError("validTime.to is not valid for ${validTime.timeline}", sourcePath, documentId))
+                }
+            }
             if (from != null && to != null && from > to) {
                 add(Diagnostic(
                     DiagnosticCategory.ConstraintError,
@@ -544,6 +564,434 @@ class GraphCompiler(
                 }
             }
             timeline.copy(mappedOffsets = offsets - timeline.id)
+        }
+    }
+
+    private fun resolveTemporalTimelines(
+        legacyTimelines: List<NormalizedTimeline>,
+        docs: List<TimelineDocument>,
+        referenceCandidates: Map<String, List<GraphDocument>>,
+        diagnostics: MutableList<Diagnostic>,
+    ): List<NormalizedTimeline> {
+        val docById = docs.associateBy { it.id }
+        val legacyById = legacyTimelines.associateBy { it.id }
+        val resolved = mutableMapOf<String, NormalizedTimeline>()
+        val visiting = mutableSetOf<String>()
+
+        fun resolve(id: String): NormalizedTimeline? {
+            resolved[id]?.let { return it }
+            val doc = docById[id] ?: return null
+            val legacy = legacyById[id] ?: return null
+            if (!visiting.add(id)) {
+                diagnostics += schemaError("Cyclic sameAxisAs relationship: $id", doc.sourcePath, doc.id)
+                return null
+            }
+
+            val parent = doc.sameAxisAs?.let { parentId ->
+                diagnostics += referenceDiagnostics(
+                    referenceCandidates,
+                    ReferenceTargetKind.Timeline,
+                    parentId,
+                    "Unknown sameAxisAs Timeline: $parentId",
+                    doc.sourcePath,
+                    doc.id,
+                )
+                resolve(parentId)
+            }
+            val lineageSource = doc.derivedFrom?.let { derived ->
+                diagnostics += referenceDiagnostics(
+                    referenceCandidates,
+                    ReferenceTargetKind.Timeline,
+                    derived.timeline,
+                    "Unknown derivedFrom Timeline: ${derived.timeline}",
+                    doc.sourcePath,
+                    doc.id,
+                )
+                resolve(derived.timeline)
+            }
+
+            val coordinate = when {
+                doc.coordinate != null -> doc.coordinate
+                parent != null -> parent.coordinate
+                else -> TemporalCoordinateSpec.Number
+            }
+            if (coordinate is TemporalCoordinateSpec.Era && parent == null) {
+                diagnostics += schemaError("era coordinate requires sameAxisAs with a calendar Timeline", doc.sourcePath, doc.id)
+            }
+            if (coordinate is TemporalCoordinateSpec.Era && parent?.coordinate !is TemporalCoordinateSpec.Calendar) {
+                diagnostics += schemaError("era coordinate sameAxisAs target MUST use a calendar coordinate", doc.sourcePath, doc.id)
+            }
+            if ((doc.scale != ExactRational.ONE || doc.offset != ExactRational.ZERO) && coordinate != TemporalCoordinateSpec.Number) {
+                diagnostics += schemaError("scale and offset are only valid for number coordinates", doc.sourcePath, doc.id)
+            }
+
+            val axisId = parent?.axisId ?: doc.id
+            val defaultDerivedDomain = when (doc.derivedFrom?.kind) {
+                AxisLineageKind.Fork, AxisLineageKind.Simulation -> "domain:${doc.id}"
+                AxisLineageKind.Recording, AxisLineageKind.Edit, AxisLineageKind.Resample,
+                AxisLineageKind.Copy, AxisLineageKind.Derived -> lineageSource?.domainId
+                null -> null
+            }
+            val domainId = parent?.domainId ?: doc.domain ?: defaultDerivedDomain ?: "domain:${doc.id}"
+            if (parent != null && doc.domain != null && doc.domain != parent.domainId) {
+                diagnostics += schemaError("sameAxisAs MUST use the same domain as ${parent.id}", doc.sourcePath, doc.id)
+            }
+            val axisUnit = parent?.axisUnit ?: coordinate.defaultAxisUnit()
+            if (parent != null && !coordinate.isCompatibleWith(axisUnit)) {
+                diagnostics += schemaError(
+                    "coordinate is incompatible with the ${parent.axisUnit.name.lowercase()} axis of ${parent.id}",
+                    doc.sourcePath,
+                    doc.id,
+                )
+            }
+            val lineage = parent?.lineage ?: doc.derivedFrom?.let { derived ->
+                lineageSource?.let { source ->
+                    AxisLineage(
+                        sourceAxisId = source.axisId,
+                        derivedAxisId = axisId,
+                        kind = derived.kind,
+                        sourceTimelineId = source.id,
+                        sourceAt = derived.sourceAt,
+                        origin = derived.origin,
+                        metadata = derived.metadata,
+                    )
+                }
+            }
+            val coordinateSystem = TemporalCoordinateSystem(
+                id = doc.id,
+                axisId = axisId,
+                domainId = domainId,
+                coordinate = coordinate,
+                scaleToParent = doc.scale,
+                offsetFromParent = doc.offset,
+                parentTimelineId = parent?.id,
+                aliases = doc.aliases,
+            )
+            val timeline = legacy.copy(
+                domainId = domainId,
+                axisId = axisId,
+                coordinate = coordinate,
+                coordinateSystem = coordinateSystem,
+                lineage = lineage,
+                temporalMappings = emptyList(),
+                axisUnit = axisUnit,
+            )
+            visiting.remove(id)
+            resolved[id] = timeline
+            return timeline
+        }
+
+        docs.forEach { resolve(it.id) }
+        val base = docs.mapNotNull { resolved[it.id] }
+        val byId = base.associateBy { it.id }
+        val validationEngine = temporalEngine(base)
+        val mappingsBySource = mutableMapOf<String, MutableList<TemporalMappingInstance>>()
+        docs.forEach { doc ->
+            val source = byId[doc.id] ?: return@forEach
+            doc.mapsTo.forEachIndexed { index, spec ->
+                diagnostics += referenceDiagnostics(
+                    referenceCandidates,
+                    ReferenceTargetKind.Timeline,
+                    spec.timeline,
+                    "Unknown mapsTo Timeline: ${spec.timeline}",
+                    doc.sourcePath,
+                    doc.id,
+                )
+                val target = byId[spec.timeline] ?: return@forEachIndexed
+                validateMappingSpec(spec, source, target, validationEngine, doc, diagnostics)
+                val inferred = inferMappingTraits(spec, source, target, validationEngine)
+                val traits = applyTraitsOverride(inferred, spec.traits, doc, diagnostics)
+                mappingsBySource.getOrPut(doc.id) { mutableListOf() } += TemporalMappingInstance(
+                    id = spec.id ?: "${doc.id}->${spec.timeline}#$index",
+                    sourceTimelineId = doc.id,
+                    targetTimelineId = spec.timeline,
+                    sourceAxisId = source.axisId,
+                    targetAxisId = target.axisId,
+                    kind = spec.kind,
+                    precision = spec.precision,
+                    scale = spec.scale,
+                    offset = spec.offset,
+                    range = spec.range,
+                    segments = spec.segments,
+                    pairs = spec.pairs,
+                    traits = traits,
+                    requiredContext = spec.requiredContext,
+                    provenance = spec.provenance,
+                )
+            }
+        }
+        return base.map { it.copy(temporalMappings = mappingsBySource[it.id].orEmpty()) }
+    }
+
+    private fun TemporalCoordinateSpec.defaultAxisUnit(): TemporalAxisUnit = when (this) {
+        is TemporalCoordinateSpec.Calendar, is TemporalCoordinateSpec.Era -> TemporalAxisUnit.Day
+        is TemporalCoordinateSpec.Frame, is TemporalCoordinateSpec.Timecode -> TemporalAxisUnit.Frame
+        TemporalCoordinateSpec.Number -> TemporalAxisUnit.Tick
+    }
+
+    private fun TemporalCoordinateSpec.isCompatibleWith(unit: TemporalAxisUnit): Boolean = when (this) {
+        TemporalCoordinateSpec.Number -> true
+        is TemporalCoordinateSpec.Calendar, is TemporalCoordinateSpec.Era -> unit == TemporalAxisUnit.Day
+        is TemporalCoordinateSpec.Frame, is TemporalCoordinateSpec.Timecode -> unit == TemporalAxisUnit.Frame
+    }
+
+    private fun inferMappingTraits(
+        spec: TemporalMappingSpec,
+        source: NormalizedTimeline,
+        target: NormalizedTimeline,
+        engine: TemporalEngine,
+    ): TemporalMappingTraits {
+        val pairs = spec.pairs + spec.segments.flatMap { it.pairs }
+        val segmentScales = if (spec.segments.isEmpty()) {
+            listOf(spec.scale)
+        } else {
+            spec.segments.map { effectiveSegmentScale(it, source, target, engine) }
+        }
+        val sourceCounts = pairs.groupingBy { it.from }.eachCount()
+        val targets = pairs.flatMap { pair -> pair.to.map { it to pair.from } }
+        val targetCounts = targets.groupingBy { it.first }.eachCount()
+        val oneToMany = pairs.any { it.to.size > 1 } || sourceCounts.values.any { it > 1 }
+        val manyToOne = targetCounts.values.any { it > 1 } ||
+            (pairs.isEmpty() && segmentScales.any { it == ExactRational.ZERO })
+        val cardinality = when {
+            oneToMany && manyToOne -> TemporalCardinality.ManyToMany
+            oneToMany -> TemporalCardinality.OneToMany
+            manyToOne -> TemporalCardinality.ManyToOne
+            else -> TemporalCardinality.OneToOne
+        }
+        val totality = if (spec.range != null || spec.segments.isNotEmpty() || pairs.isNotEmpty()) {
+            TemporalTotality.Partial
+        } else {
+            TemporalTotality.Total
+        }
+        val order = when {
+            pairs.isNotEmpty() -> TemporalOrderBehavior.NonMonotonic
+            spec.segments.isNotEmpty() -> inferSegmentOrder(spec.segments, source, target, engine)
+            else -> orderFromDeltas(segmentScales)
+        }
+        val invertibility = if (cardinality == TemporalCardinality.OneToOne && segmentScales.none { it == ExactRational.ZERO }) {
+            TemporalInvertibility.Invertible
+        } else {
+            TemporalInvertibility.NonInvertible
+        }
+        val continuity = when {
+            pairs.isNotEmpty() -> TemporalContinuity.Discrete
+            spec.segments.isNotEmpty() -> TemporalContinuity.Piecewise
+            else -> TemporalContinuity.Continuous
+        }
+        return TemporalMappingTraits(cardinality, totality, order, invertibility, continuity)
+    }
+
+    private fun effectiveSegmentScale(
+        segment: TemporalMappingSegment,
+        source: NormalizedTimeline,
+        target: NormalizedTimeline,
+        engine: TemporalEngine,
+    ): ExactRational = effectiveSegmentTransform(segment, source, target, engine).first
+
+    private fun effectiveSegmentTransform(
+        segment: TemporalMappingSegment,
+        source: NormalizedTimeline,
+        target: NormalizedTimeline,
+        engine: TemporalEngine,
+    ): Pair<ExactRational, ExactRational> {
+        val sourceFrom = segment.source?.from?.let { engine.normalizeForTraits(source.id, it) }
+        val sourceTo = segment.source?.to?.let { engine.normalizeForTraits(source.id, it) }
+        val targetFrom = segment.target?.from?.let { engine.normalizeForTraits(target.id, it) }
+        val targetTo = segment.target?.to?.let { engine.normalizeForTraits(target.id, it) }
+        return if (
+            sourceFrom != null && sourceTo != null && sourceFrom != sourceTo &&
+            targetFrom != null && targetTo != null
+        ) {
+            val scale = (targetTo - targetFrom) / (sourceTo - sourceFrom)
+            scale to (targetFrom - sourceFrom * scale)
+        } else {
+            segment.scale to segment.offset
+        }
+    }
+
+    private fun inferSegmentOrder(
+        segments: List<TemporalMappingSegment>,
+        source: NormalizedTimeline,
+        target: NormalizedTimeline,
+        engine: TemporalEngine,
+    ): TemporalOrderBehavior {
+        val points = segments.flatMap { segment ->
+            val sourceFrom = segment.source?.from?.let { engine.normalizeForTraits(source.id, it) }
+                ?: return@flatMap emptyList()
+            val sourceTo = segment.source.to?.let { engine.normalizeForTraits(source.id, it) }
+                ?: return@flatMap emptyList()
+            val (scale, offset) = effectiveSegmentTransform(segment, source, target, engine)
+            val targetFrom = sourceFrom * scale + offset
+            val targetTo = sourceTo * scale + offset
+            listOf(sourceFrom to targetFrom, sourceTo to targetTo)
+        }
+        if (points.size != segments.size * 2) {
+            return if (segments.size == 1) {
+                orderFromDeltas(listOf(effectiveSegmentScale(segments.single(), source, target, engine)))
+            } else {
+                TemporalOrderBehavior.NonMonotonic
+            }
+        }
+        val targetDeltas = points.sortedBy { it.first }
+            .zipWithNext { left, right -> right.second - left.second }
+        return orderFromDeltas(targetDeltas)
+    }
+
+    private fun orderFromDeltas(deltas: List<ExactRational>): TemporalOrderBehavior = when {
+        deltas.isNotEmpty() && deltas.all { it > ExactRational.ZERO } -> TemporalOrderBehavior.StrictlyIncreasing
+        deltas.isNotEmpty() && deltas.all { it < ExactRational.ZERO } -> TemporalOrderBehavior.StrictlyDecreasing
+        deltas.all { it >= ExactRational.ZERO } || deltas.all { it <= ExactRational.ZERO } ->
+            TemporalOrderBehavior.Monotonic
+        else -> TemporalOrderBehavior.NonMonotonic
+    }
+
+    private fun TemporalEngine.normalizeForTraits(
+        timeline: String,
+        coordinate: TemporalCoordinate,
+    ): ExactRational? = runCatching { normalizeToAxis(timeline, coordinate) }.getOrNull()
+
+    private fun applyTraitsOverride(
+        inferred: TemporalMappingTraits,
+        override: TemporalMappingTraitsOverride?,
+        doc: TimelineDocument,
+        diagnostics: MutableList<Diagnostic>,
+    ): TemporalMappingTraits {
+        if (override == null) return inferred
+        fun invalid(field: String) {
+            diagnostics += schemaError("mapsTo.traits.$field cannot strengthen the inferred Mapping", doc.sourcePath, doc.id)
+        }
+        val cardinality = override.cardinality?.takeIf { inferred.cardinality.canWeakenTo(it) }
+            ?: inferred.cardinality.also { if (override.cardinality != null) invalid("cardinality") }
+        val totality = override.totality?.takeIf { inferred.totality == TemporalTotality.Total || it == TemporalTotality.Partial }
+            ?: inferred.totality.also { if (override.totality != null && override.totality != inferred.totality) invalid("totality") }
+        val order = override.orderBehavior?.takeIf { inferred.orderBehavior.canWeakenTo(it) }
+            ?: inferred.orderBehavior.also { if (override.orderBehavior != null) invalid("order") }
+        val invertibility = override.invertibility?.takeIf { inferred.invertibility.canWeakenTo(it) }
+            ?: inferred.invertibility.also { if (override.invertibility != null) invalid("invertibility") }
+        val continuity = override.continuity?.takeIf { inferred.continuity.canWeakenTo(it) }
+            ?: inferred.continuity.also { if (override.continuity != null) invalid("continuity") }
+        return TemporalMappingTraits(cardinality, totality, order, invertibility, continuity)
+    }
+
+    private fun TemporalCardinality.canWeakenTo(other: TemporalCardinality): Boolean = when (this) {
+        TemporalCardinality.OneToOne -> true
+        TemporalCardinality.OneToMany -> other == this || other == TemporalCardinality.ManyToMany
+        TemporalCardinality.ManyToOne -> other == this || other == TemporalCardinality.ManyToMany
+        TemporalCardinality.ManyToMany -> other == this
+    }
+
+    private fun TemporalOrderBehavior.canWeakenTo(other: TemporalOrderBehavior): Boolean = when (this) {
+        TemporalOrderBehavior.StrictlyIncreasing -> other in setOf(
+            TemporalOrderBehavior.StrictlyIncreasing,
+            TemporalOrderBehavior.Monotonic,
+            TemporalOrderBehavior.NonMonotonic,
+        )
+        TemporalOrderBehavior.StrictlyDecreasing -> other in setOf(
+            TemporalOrderBehavior.StrictlyDecreasing,
+            TemporalOrderBehavior.Monotonic,
+            TemporalOrderBehavior.NonMonotonic,
+        )
+        TemporalOrderBehavior.Monotonic -> other == this || other == TemporalOrderBehavior.NonMonotonic
+        TemporalOrderBehavior.NonMonotonic -> other == this
+    }
+
+    private fun TemporalInvertibility.canWeakenTo(other: TemporalInvertibility): Boolean = when (this) {
+        TemporalInvertibility.Invertible -> true
+        TemporalInvertibility.ConditionallyInvertible -> other != TemporalInvertibility.Invertible
+        TemporalInvertibility.NonInvertible -> other == this
+    }
+
+    private fun TemporalContinuity.canWeakenTo(other: TemporalContinuity): Boolean = when (this) {
+        TemporalContinuity.Continuous -> true
+        TemporalContinuity.Piecewise -> other != TemporalContinuity.Continuous
+        TemporalContinuity.Discrete -> other == this
+    }
+
+    private fun validateMappingSpec(
+        spec: TemporalMappingSpec,
+        source: NormalizedTimeline,
+        target: NormalizedTimeline,
+        engine: TemporalEngine,
+        doc: TimelineDocument,
+        diagnostics: MutableList<Diagnostic>,
+    ) {
+        if (spec.precision.kind == TemporalPrecisionKind.Approximate && spec.precision.error == null) {
+            diagnostics += schemaError("approximate mapsTo requires an error", doc.sourcePath, doc.id)
+        }
+        if (spec.precision.error?.let { it < ExactRational.ZERO } == true) {
+            diagnostics += schemaError("mapsTo precision error MUST NOT be negative", doc.sourcePath, doc.id)
+        }
+        if (spec.precision.kind == TemporalPrecisionKind.Exact && spec.precision.error != null) {
+            diagnostics += schemaError("exact mapsTo MUST NOT define an error", doc.sourcePath, doc.id)
+        }
+        if (spec.pairs.isNotEmpty() && (spec.segments.isNotEmpty() || spec.range != null)) {
+            diagnostics += schemaError("mapsTo.pairs cannot be combined with range or segments", doc.sourcePath, doc.id)
+        }
+
+        fun normalized(
+            timeline: NormalizedTimeline,
+            coordinate: TemporalCoordinate?,
+            field: String,
+        ): ExactRational? {
+            coordinate ?: return null
+            val result = runCatching { engine.normalizeToAxis(timeline.id, coordinate) }.getOrNull()
+            if (result == null) {
+                diagnostics += schemaError("$field is not valid for ${timeline.id}", doc.sourcePath, doc.id)
+            }
+            return result
+        }
+
+        val rangeFrom = normalized(source, spec.range?.from, "mapsTo.range.from")
+        val rangeTo = normalized(source, spec.range?.to, "mapsTo.range.to")
+        if (rangeFrom != null && rangeTo != null && rangeFrom > rangeTo) {
+            diagnostics += schemaError("mapsTo.range.from MUST NOT be after range.to", doc.sourcePath, doc.id)
+        }
+        spec.pairs.forEach { pair ->
+            normalized(source, pair.from, "mapsTo.pairs.from")
+            pair.to.forEach { normalized(target, it, "mapsTo.pairs.to") }
+        }
+
+        val normalizedSegments = mutableListOf<Pair<ExactRational, ExactRational>>()
+        spec.segments.forEach { segment ->
+            if (segment.pairs.isNotEmpty() && (segment.source != null || segment.target != null)) {
+                diagnostics += schemaError("segment.pairs cannot be combined with source or target ranges", doc.sourcePath, doc.id)
+            }
+            val sourceFrom = normalized(source, segment.source?.from, "mapsTo.segment.source.from")
+            val sourceTo = normalized(source, segment.source?.to, "mapsTo.segment.source.to")
+            normalized(target, segment.target?.from, "mapsTo.segment.target.from")
+            normalized(target, segment.target?.to, "mapsTo.segment.target.to")
+            segment.pairs.forEach { pair ->
+                normalized(source, pair.from, "mapsTo.segment.pairs.from")
+                pair.to.forEach { normalized(target, it, "mapsTo.segment.pairs.to") }
+            }
+            if (sourceFrom != null && sourceTo != null && sourceFrom > sourceTo) {
+                diagnostics += schemaError("mapsTo segment source.from MUST NOT be after source.to", doc.sourcePath, doc.id)
+            } else if (sourceFrom != null && sourceTo != null) {
+                normalizedSegments += sourceFrom to sourceTo
+            }
+        }
+        normalizedSegments.sortedBy { it.first }.zipWithNext().forEach { (left, right) ->
+            when {
+                left.second >= right.first -> diagnostics += schemaError(
+                    "mapsTo segments overlap on the source axis",
+                    doc.sourcePath,
+                    doc.id,
+                )
+                left.second < right.first -> diagnostics += schemaWarning(
+                    "mapsTo segments contain a gap on the source axis",
+                    doc.sourcePath,
+                    doc.id,
+                )
+            }
+        }
+        if (source.id == target.id) {
+            diagnostics += Diagnostic(
+                DiagnosticCategory.ConstraintError,
+                Severity.Warning,
+                "mapsTo target is the same Timeline: ${source.id}",
+                SourceInfo(doc.sourcePath, doc.id),
+            )
         }
     }
 
@@ -999,6 +1447,7 @@ class GraphCompiler(
                 selectors.any { selector ->
                     when (selector) {
                         is TimelineSelector.Id -> selector.id == timelineId ||
+                            timelineById[selector.id]?.axisId == timelineById[timelineId]?.axisId ||
                             timelineById[timelineId]?.ancestorIds?.contains(selector.id) == true
                         is TimelineSelector.Mapped -> selector.to == timelineId ||
                             timelineById[timelineId]?.ancestorIds?.contains(selector.to) == true ||
@@ -1225,25 +1674,36 @@ class GraphCompiler(
         diagnostics: MutableList<Diagnostic>,
     ): TimePoint? {
         if (raw == null) return null
+        parseRawTemporalCoordinate(raw)?.let { return TimePoint(it) }
         val obj = raw as? RawObject ?: run {
-            diagnostics += typeError("$field must be an object", sourcePath, documentId)
+            diagnostics += typeError("$field must be a temporal coordinate", sourcePath, documentId)
             return null
         }
-        val timecode = when (val value = obj.values["timecode"]) {
-            is RawInteger -> value.value.toDouble()
-            is RawNumber -> value.value
-            else -> {
-                diagnostics += typeError("$field.timecode must be number", sourcePath, documentId)
-                return null
-            }
+        val timecode = parseRawTemporalCoordinate(obj.values["timecode"] ?: return null) ?: run {
+            diagnostics += typeError("$field.timecode must be a temporal coordinate", sourcePath, documentId)
+            return null
         }
         val unknown = obj.values.keys - setOf("value", "timecode")
         if (unknown.isNotEmpty()) diagnostics += typeError("$field has unknown fields: ${unknown.joinToString()}", sourcePath, documentId)
-        if (!timecode.isFinite()) {
-            diagnostics += typeError("$field.timecode must be finite", sourcePath, documentId)
-            return null
-        }
         return TimePoint(timecode, (obj.values["value"] as? RawString)?.value)
+    }
+
+    private fun parseRawTemporalCoordinate(raw: RawValue?): TemporalCoordinate? = when (raw) {
+        is RawInteger -> TemporalCoordinate.Rational(ExactRational.of(raw.value))
+        is RawNumber -> runCatching { TemporalCoordinate.Rational(ExactRational.fromDouble(raw.value)) }.getOrNull()
+        is RawString -> parseGenericTemporalCoordinate(raw.value)
+        is RawObject -> {
+            val year = (raw.values["year"] as? RawInteger)?.value
+            val month = (raw.values["month"] as? RawInteger)?.value?.toInt()
+            val day = (raw.values["day"] as? RawInteger)?.value?.toInt()
+            val era = (raw.values["era"] as? RawString)?.value
+            when {
+                year != null && month != null && day != null && era != null -> TemporalCoordinate.EraDate(era, year, month, day)
+                year != null && month != null && day != null -> TemporalCoordinate.CalendarDate(year, month, day)
+                else -> null
+            }
+        }
+        else -> null
     }
 
     private fun normalizeValue(
@@ -1395,17 +1855,34 @@ class GraphCompiler(
             diagnostics += constraintError("$propName timeline $timeline is not allowed", SourceInfo(sourcePath, documentId))
             return null
         }
-        val timecode = parseNumberTimecode(
-            obj?.values?.get("timecode") ?: rawValue.takeIf { it is RawInteger || it is RawNumber },
-            "$propName.timecode",
-            sourcePath,
-            documentId,
-            diagnostics,
-        ) ?: return null
-        val value = (obj?.values?.get("value") as? RawString)?.value
+        val coordinateRaw = when {
+            obj?.values?.containsKey("timecode") == true -> obj.values["timecode"]
+            obj?.values?.containsKey("value") == true -> obj.values["value"]
+            obj == null -> rawValue
+            else -> null
+        }
+        val coordinate = parseRawTemporalCoordinate(coordinateRaw) ?: run {
+            diagnostics += typeError("$propName.value must be a temporal coordinate", sourcePath, documentId)
+            return null
+        }
+        if (obj == null && rawValue is RawString && timeline == null) {
+            diagnostics += typeError("$propName.value must be number when timeline is omitted", sourcePath, documentId)
+            return null
+        }
+        val value = when {
+            obj?.values?.containsKey("timecode") == true -> (obj.values["value"] as? RawString)?.value
+            else -> (coordinateRaw as? RawString)?.value
+        }
         val unknown = obj?.values?.keys.orEmpty() - setOf("timeline", "value", "timecode")
         if (unknown.isNotEmpty()) diagnostics += typeError("$propName instant has unknown fields: ${unknown.joinToString()}", sourcePath, documentId)
-        return InstantValue(timeline = timeline, value = value, timecode = NumberTimecode(timecode))
+        if (timeline != null) {
+            val engine = temporalEngine(timelineById.values)
+            if (runCatching { engine.normalizeToAxis(timeline, coordinate) }.getOrNull() == null) {
+                diagnostics += typeError("$propName.value is not valid for $timeline", sourcePath, documentId)
+                return null
+            }
+        }
+        return InstantValue(timeline = timeline, value = value, coordinate = coordinate)
     }
 
     private fun normalizeDuration(
@@ -1444,10 +1921,10 @@ class GraphCompiler(
         }
         val from = normalizeTemporalPoint(
             obj.values["from"], "$propName.from", timelineById, referenceCandidates, sourcePath, documentId, diagnostics,
-        )
+        )?.let { point -> if (point.timeline == null && timeline != null) point.copy(timeline = timeline) else point }
         val to = normalizeTemporalPoint(
             obj.values["to"], "$propName.to", timelineById, referenceCandidates, sourcePath, documentId, diagnostics,
-        )
+        )?.let { point -> if (point.timeline == null && timeline != null) point.copy(timeline = timeline) else point }
         if (from == null && to == null) {
             if ("from" !in obj.values && "to" !in obj.values) {
                 diagnostics += constraintError("$propName duration must define from or to", SourceInfo(sourcePath, documentId))
@@ -1487,13 +1964,16 @@ class GraphCompiler(
         diagnostics: MutableList<Diagnostic>,
     ): TemporalPoint? {
         if (raw == null) return null
-        if (raw is RawInteger) return TemporalPoint(raw.value.toDouble())
-        if (raw is RawNumber) return TemporalPoint(raw.value)
+        parseRawTemporalCoordinate(raw)?.let { return TemporalPoint(it) }
         val obj = raw as? RawObject ?: run {
-            diagnostics += typeError("$field must be a number or timePoint object", sourcePath, documentId)
+            diagnostics += typeError("$field must be a temporal coordinate or timePoint object", sourcePath, documentId)
             return null
         }
-        val timecode = parseNumberTimecode(obj.values["timecode"], "$field.timecode", sourcePath, documentId, diagnostics) ?: return null
+        val coordinateRaw = obj.values["timecode"] ?: obj.values["value"]
+        val coordinate = parseRawTemporalCoordinate(coordinateRaw) ?: run {
+            diagnostics += typeError("$field.value must be a temporal coordinate", sourcePath, documentId)
+            return null
+        }
         val timeline = (obj.values["timeline"] as? RawString)?.value
         if (timeline != null) {
             val diagnosticsForReference = referenceDiagnostics(
@@ -1511,7 +1991,18 @@ class GraphCompiler(
         }
         val unknown = obj.values.keys - setOf("timeline", "value", "timecode")
         if (unknown.isNotEmpty()) diagnostics += typeError("$field has unknown fields: ${unknown.joinToString()}", sourcePath, documentId)
-        return TemporalPoint(timecode, (obj.values["value"] as? RawString)?.value, timeline)
+        if (timeline != null) {
+            val engine = temporalEngine(timelineById.values)
+            if (runCatching { engine.normalizeToAxis(timeline, coordinate) }.getOrNull() == null) {
+                diagnostics += typeError("$field.value is not valid for $timeline", sourcePath, documentId)
+                return null
+            }
+        }
+        val label = when {
+            "timecode" in obj.values -> (obj.values["value"] as? RawString)?.value
+            else -> (coordinateRaw as? RawString)?.value
+        }
+        return TemporalPoint(coordinate, label, timeline)
     }
 
     private fun parseNumberTimecode(
@@ -1532,11 +2023,50 @@ class GraphCompiler(
         null
     }
 
+    private fun temporalEngine(timelines: Collection<NormalizedTimeline>): TemporalEngine {
+        val timelineList = timelines.toList()
+        return TemporalEngine(
+            TemporalModel(
+                domains = timelineList.map { TemporalDomain(it.domainId) }.distinctBy { it.id },
+                axes = timelineList.map {
+                    TemporalAxis(it.axisId, it.domainId, it.axisUnit, it.lineage)
+                }.distinctBy { it.id },
+                coordinateSystems = timelineList.map { it.coordinateSystem },
+                mappings = timelineList.flatMap { it.temporalMappings },
+            ),
+        )
+    }
+
     private fun timelinesMapped(
         left: String,
         right: String,
         timelineById: Map<String, NormalizedTimeline>,
-    ): Boolean = left == right || timelineById[left]?.mappedOffsets?.containsKey(right) == true
+    ): Boolean {
+        if (left == right) return true
+        val leftTimeline = timelineById[left] ?: return false
+        val rightTimeline = timelineById[right] ?: return false
+        if (leftTimeline.axisId == rightTimeline.axisId) return true
+        if (leftTimeline.mappedOffsets.containsKey(right) || rightTimeline.mappedOffsets.containsKey(left)) return true
+        val edges = timelineById.values.flatMap { timeline ->
+            timeline.temporalMappings.map { it.sourceAxisId to it.targetAxisId }
+        }
+        val seen = mutableSetOf(leftTimeline.axisId)
+        val queue = ArrayDeque<String>()
+        queue.addLast(leftTimeline.axisId)
+        while (queue.isNotEmpty()) {
+            val axis = queue.removeFirst()
+            edges.forEach { (source, target) ->
+                val next = when (axis) {
+                    source -> target
+                    target -> source
+                    else -> null
+                } ?: return@forEach
+                if (next == rightTimeline.axisId) return true
+                if (seen.add(next)) queue.addLast(next)
+            }
+        }
+        return false
+    }
 
     private fun timelineAllowed(
         timeline: String,
@@ -1545,6 +2075,7 @@ class GraphCompiler(
     ): Boolean {
         fun TimelineSelector.matches(): Boolean = when (this) {
             is TimelineSelector.Id -> id == timeline ||
+                timelineById[id]?.axisId == timelineById[timeline]?.axisId ||
                 timelineById[timeline]?.ancestorIds?.contains(id) == true
             is TimelineSelector.Mapped -> to == timeline ||
                 timelineById[timeline]?.ancestorIds?.contains(to) == true ||

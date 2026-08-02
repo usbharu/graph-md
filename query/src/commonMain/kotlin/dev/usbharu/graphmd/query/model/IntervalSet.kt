@@ -1,15 +1,17 @@
 package dev.usbharu.graphmd.query.model
 
-import dev.usbharu.graphmd.core.model.NormalizedTimeline
-import dev.usbharu.graphmd.core.model.ValidTime
+import dev.usbharu.graphmd.core.TemporalEngine
+import dev.usbharu.graphmd.core.model.*
 
 data class IntervalBoundary(
-    val value: Double,
+    val exactValue: ExactRational,
     val inclusive: Boolean,
 ) {
-    init {
-        require(value.isFinite()) { "Interval boundaries must be finite" }
-    }
+    constructor(value: Double, inclusive: Boolean) : this(ExactRational.fromDouble(value), inclusive)
+    constructor(value: Long, inclusive: Boolean) : this(ExactRational.of(value), inclusive)
+
+    @Deprecated("Use exactValue")
+    val value: Double get() = exactValue.toDouble()
 }
 
 /**
@@ -27,24 +29,26 @@ data class TemporalInterval(
         require(!isEmpty()) { "An interval must not be empty" }
     }
 
-    fun contains(value: Double): Boolean =
-        (start == null || value > start.value || value == start.value && start.inclusive) &&
-            (end == null || value < end.value || value == end.value && end.inclusive)
+    fun contains(value: ExactRational): Boolean =
+        (start == null || value > start.exactValue || value == start.exactValue && start.inclusive) &&
+            (end == null || value < end.exactValue || value == end.exactValue && end.inclusive)
+
+    fun contains(value: Double): Boolean = contains(ExactRational.fromDouble(value))
 
     fun contains(other: TemporalInterval): Boolean {
         if (timelineId != other.timelineId) return false
         val startsBefore = when {
             start == null -> true
             other.start == null -> false
-            start.value < other.start.value -> true
-            start.value > other.start.value -> false
+            start.exactValue < other.start.exactValue -> true
+            start.exactValue > other.start.exactValue -> false
             else -> start.inclusive || !other.start.inclusive
         }
         val endsAfter = when {
             end == null -> true
             other.end == null -> false
-            end.value > other.end.value -> true
-            end.value < other.end.value -> false
+            end.exactValue > other.end.exactValue -> true
+            end.exactValue < other.end.exactValue -> false
             else -> end.inclusive || !other.end.inclusive
         }
         return startsBefore && endsAfter
@@ -63,11 +67,11 @@ data class TemporalInterval(
         if (overlap == this) return emptyList()
         return buildList {
             overlap.start?.let { overlapStart ->
-                val leftEnd = IntervalBoundary(overlapStart.value, !overlapStart.inclusive)
+                val leftEnd = IntervalBoundary(overlapStart.exactValue, !overlapStart.inclusive)
                 if (!isEmpty(start, leftEnd)) add(TemporalInterval(timelineId, start, leftEnd))
             }
             overlap.end?.let { overlapEnd ->
-                val rightStart = IntervalBoundary(overlapEnd.value, !overlapEnd.inclusive)
+                val rightStart = IntervalBoundary(overlapEnd.exactValue, !overlapEnd.inclusive)
                 if (!isEmpty(rightStart, end)) add(TemporalInterval(timelineId, rightStart, end))
             }
         }
@@ -78,25 +82,25 @@ data class TemporalInterval(
     companion object {
         internal fun isEmpty(start: IntervalBoundary?, end: IntervalBoundary?): Boolean = when {
             start == null || end == null -> false
-            start.value > end.value -> true
-            start.value < end.value -> false
+            start.exactValue > end.exactValue -> true
+            start.exactValue < end.exactValue -> false
             else -> !start.inclusive || !end.inclusive
         }
 
         internal fun laterStart(left: IntervalBoundary?, right: IntervalBoundary?): IntervalBoundary? = when {
             left == null -> right
             right == null -> left
-            left.value > right.value -> left
-            right.value > left.value -> right
-            else -> IntervalBoundary(left.value, left.inclusive && right.inclusive)
+            left.exactValue > right.exactValue -> left
+            right.exactValue > left.exactValue -> right
+            else -> IntervalBoundary(left.exactValue, left.inclusive && right.inclusive)
         }
 
         internal fun earlierEnd(left: IntervalBoundary?, right: IntervalBoundary?): IntervalBoundary? = when {
             left == null -> right
             right == null -> left
-            left.value < right.value -> left
-            right.value < left.value -> right
-            else -> IntervalBoundary(left.value, left.inclusive && right.inclusive)
+            left.exactValue < right.exactValue -> left
+            right.exactValue < left.exactValue -> right
+            else -> IntervalBoundary(left.exactValue, left.inclusive && right.inclusive)
         }
     }
 }
@@ -143,8 +147,10 @@ data class IntervalSet private constructor(
         }
     }
 
-    fun contains(timelineId: TimelineId, value: Double): Boolean =
+    fun contains(timelineId: TimelineId, value: ExactRational): Boolean =
         isUniversal || intervals.any { it.timelineId == timelineId && it.contains(value) }
+
+    fun contains(timelineId: TimelineId, value: Double): Boolean = contains(timelineId, ExactRational.fromDouble(value))
 
     companion object {
         fun empty(): IntervalSet = IntervalSet(emptyList(), isUniversal = false)
@@ -178,8 +184,8 @@ data class IntervalSet private constructor(
             left == null && right == null -> 0
             left == null -> -1
             right == null -> 1
-            left.value < right.value -> -1
-            left.value > right.value -> 1
+            left.exactValue < right.exactValue -> -1
+            left.exactValue > right.exactValue -> 1
             left.inclusive == right.inclusive -> 0
             left.inclusive -> -1
             else -> 1
@@ -189,15 +195,15 @@ data class IntervalSet private constructor(
             if (left.timelineId != right.timelineId) return false
             val leftEnd = left.end ?: return true
             val rightStart = right.start ?: return true
-            return leftEnd.value > rightStart.value ||
-                leftEnd.value == rightStart.value && (leftEnd.inclusive || rightStart.inclusive)
+            return leftEnd.exactValue > rightStart.exactValue ||
+                leftEnd.exactValue == rightStart.exactValue && (leftEnd.inclusive || rightStart.inclusive)
         }
 
         private fun laterEnd(left: IntervalBoundary?, right: IntervalBoundary?): IntervalBoundary? = when {
             left == null || right == null -> null
-            left.value > right.value -> left
-            right.value > left.value -> right
-            else -> IntervalBoundary(left.value, left.inclusive || right.inclusive)
+            left.exactValue > right.exactValue -> left
+            right.exactValue > left.exactValue -> right
+            else -> IntervalBoundary(left.exactValue, left.inclusive || right.inclusive)
         }
     }
 }
@@ -205,14 +211,41 @@ data class IntervalSet private constructor(
 data class QueryTimeline(
     val id: TimelineId,
     val canonicalId: TimelineId,
-    val offsetToCanonical: Double,
+    val exactOffsetToCanonical: ExactRational,
     val assertionScopeId: TimelineId = id,
-)
+    val domainId: String = "domain:${id.value}",
+    val axisId: TimelineId = canonicalId,
+    val axisUnit: TemporalAxisUnit = TemporalAxisUnit.Tick,
+    val coordinateSystem: TemporalCoordinateSystem = TemporalCoordinateSystem(
+        id = id.value,
+        axisId = axisId.value,
+        domainId = domainId,
+        coordinate = TemporalCoordinateSpec.Number,
+    ),
+    val mappings: List<TemporalMappingInstance> = emptyList(),
+) {
+    constructor(
+        id: TimelineId,
+        canonicalId: TimelineId,
+        offsetToCanonical: Double,
+        assertionScopeId: TimelineId = id,
+    ) : this(id, canonicalId, ExactRational.fromDouble(offsetToCanonical), assertionScopeId)
+
+    @Deprecated("Use exactOffsetToCanonical")
+    val offsetToCanonical: Double get() = exactOffsetToCanonical.toDouble()
+}
 
 class TimelineCatalog private constructor(
     val timelines: List<QueryTimeline>,
 ) {
     private val byId = timelines.associateBy { it.id }
+    private val temporalModel = TemporalModel(
+        domains = timelines.map { TemporalDomain(it.domainId) }.distinctBy { it.id },
+        axes = timelines.map { TemporalAxis(it.axisId.value, it.domainId, it.axisUnit) }.distinctBy { it.id },
+        coordinateSystems = timelines.map { it.coordinateSystem },
+        mappings = timelines.flatMap { it.mappings }.distinctBy { it.id },
+    )
+    private val engine = TemporalEngine(temporalModel)
 
     fun normalize(
         timelineId: TimelineId,
@@ -220,7 +253,16 @@ class TimelineCatalog private constructor(
         end: IntervalBoundary?,
     ): TemporalInterval {
         val timeline = requireNotNull(byId[timelineId]) { "Unknown Timeline: ${timelineId.value}" }
-        fun IntervalBoundary.shift(): IntervalBoundary = copy(value = value + timeline.offsetToCanonical)
+        fun IntervalBoundary.shift(): IntervalBoundary {
+            val normalized = if (timeline.canonicalId != timeline.axisId) {
+                exactValue + timeline.exactOffsetToCanonical
+            } else {
+                runCatching {
+                    engine.normalizeToAxis(timelineId.value, TemporalCoordinate.Rational(exactValue))
+                }.getOrNull() ?: exactValue + timeline.exactOffsetToCanonical
+            }
+            return copy(exactValue = normalized)
+        }
         return TemporalInterval(
             timelineId = timeline.canonicalId,
             start = start?.shift(),
@@ -238,22 +280,84 @@ class TimelineCatalog private constructor(
         start: IntervalBoundary?,
         end: IntervalBoundary?,
     ): TemporalInterval {
-        return TemporalInterval(assertionScopeId(timelineId), start, end)
+        return normalize(timelineId, start, end)
+    }
+
+    fun searchIntervals(
+        timelineId: TimelineId,
+        start: Pair<TemporalCoordinate, Boolean>?,
+        end: Pair<TemporalCoordinate, Boolean>?,
+    ): IntervalSet {
+        val source = requireNotNull(byId[timelineId]) { "Unknown Timeline: ${timelineId.value}" }
+        if (start == null && end == null) {
+            return IntervalSet.of(TemporalInterval(source.assertionScopeId))
+        }
+        val normalizedStart = start?.let { engine.normalizeToAxis(timelineId.value, it.first) }
+        val normalizedEnd = end?.let { engine.normalizeToAxis(timelineId.value, it.first) }
+        val isPoint = normalizedStart != null &&
+            normalizedStart == normalizedEnd &&
+            start.second &&
+            end.second
+        // Endpoint conversion is only sufficient for a full, continuous path.
+        // Partial or piecewise paths need interval splitting; excluding them here
+        // prevents an unmapped gap from becoming a searchable continuous range.
+        val requireTotalContinuousPath = !isPoint
+        val targetByAxis = timelines.distinctBy { it.axisId }
+        val intervals = targetByAxis.mapNotNull { target ->
+            fun convert(boundary: Pair<TemporalCoordinate, Boolean>?): IntervalBoundary? {
+                boundary ?: return null
+                val converted = if (source.axisId == target.axisId) {
+                    TemporalValue(timelineId.value, boundary.first)
+                } else {
+                    engine.convertForSearch(
+                        TemporalValue(timelineId.value, boundary.first),
+                        target.id.value,
+                        requireTotalContinuousPath = requireTotalContinuousPath,
+                    ) ?: return null
+                }
+                val exact = engine.normalizeToAxis(converted.timeline, converted.coordinate) ?: return null
+                return IntervalBoundary(exact, boundary.second)
+            }
+
+            val convertedStart = convert(start)
+            val convertedEnd = convert(end)
+            if (start != null && convertedStart == null || end != null && convertedEnd == null) return@mapNotNull null
+            if (TemporalInterval.isEmpty(convertedStart, convertedEnd)) return@mapNotNull null
+            TemporalInterval(target.axisId, convertedStart, convertedEnd)
+        }
+        return IntervalSet.of(intervals)
     }
 
     fun assertionScopeId(timelineId: TimelineId): TimelineId =
         requireNotNull(byId[timelineId]) { "Unknown Timeline: ${timelineId.value}" }.assertionScopeId
+
+    fun parseCoordinate(timelineId: TimelineId, raw: String): TemporalCoordinate {
+        require(timelineId in byId) { "Unknown Timeline: ${timelineId.value}" }
+        return engine.parse(timelineId.value, raw).coordinate
+    }
+
+    internal fun normalizeCoordinate(
+        timelineId: TimelineId,
+        coordinate: TemporalCoordinate,
+    ): ExactRational? {
+        if (timelineId !in byId) return null
+        return runCatching { engine.normalizeToAxis(timelineId.value, coordinate) }.getOrNull()
+    }
 
     fun fromValidTimes(validTimes: List<ValidTime>): IntervalSet {
         if (validTimes.isEmpty()) return IntervalSet.universal()
         return IntervalSet.of(validTimes.mapNotNull { validTime ->
             val timelineId = TimelineId(validTime.timeline)
             if (timelineId !in byId) return@mapNotNull null
-            val from = validTime.from?.timecode
-            val to = validTime.to?.timecode
+            val from = validTime.from?.let { point ->
+                runCatching { engine.normalizeToAxis(validTime.timeline, point.coordinate) }.getOrNull()
+            }
+            val to = validTime.to?.let { point ->
+                runCatching { engine.normalizeToAxis(validTime.timeline, point.coordinate) }.getOrNull()
+            }
             if (from != null && to != null && from > to) return@mapNotNull null
-            assertedInterval(
-                timelineId = timelineId,
+            TemporalInterval(
+                timelineId = requireNotNull(byId[timelineId]).assertionScopeId,
                 start = from?.let { IntervalBoundary(it, inclusive = true) },
                 end = to?.let { IntervalBoundary(it, inclusive = true) },
             )
@@ -287,16 +391,27 @@ class TimelineCatalog private constructor(
 
             return TimelineCatalog(timelines.map { timeline ->
                 val component = (timeline.mappedOffsets.keys + timeline.id).filter { it in ids }
-                val canonical = component.minOrNull() ?: timeline.id
+                val legacyCanonical = component.minOrNull() ?: timeline.id
+                val usesLegacyMapping = timeline.temporalMappings.isEmpty() && timeline.mappedOffsets.isNotEmpty()
+                val canonical = if (usesLegacyMapping) legacyCanonical else timeline.axisId
                 QueryTimeline(
                     id = TimelineId(timeline.id),
                     canonicalId = TimelineId(canonical),
-                    offsetToCanonical = if (canonical == timeline.id) {
-                        0.0
+                    exactOffsetToCanonical = if (!usesLegacyMapping || canonical == timeline.id) {
+                        ExactRational.ZERO
                     } else {
-                        timeline.mappedOffsets.getValue(canonical)
+                        ExactRational.fromDouble(timeline.mappedOffsets.getValue(canonical))
                     },
-                    assertionScopeId = TimelineId(assertionScope(timeline.id)),
+                    assertionScopeId = if (usesLegacyMapping) {
+                        TimelineId(assertionScope(timeline.id))
+                    } else {
+                        TimelineId(timeline.axisId)
+                    },
+                    domainId = if (usesLegacyMapping) "domain:$canonical" else timeline.domainId,
+                    axisId = TimelineId(timeline.axisId),
+                    axisUnit = timeline.axisUnit,
+                    coordinateSystem = timeline.coordinateSystem,
+                    mappings = timeline.temporalMappings,
                 )
             })
         }

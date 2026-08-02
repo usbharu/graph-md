@@ -183,7 +183,7 @@ class InlinePropsParserTest {
         val validTime = branchEntry.values.getValue("validTime") as RawArray
         val branch = validTime.values.single() as RawObject
         assertEquals("Branch", (branch.values.getValue("timeline") as RawString).value)
-        assertEquals(1L, ((branch.values.getValue("from") as RawObject).values.getValue("timecode") as RawInteger).value)
+        assertEquals(1L, (branch.values.getValue("from") as RawInteger).value)
     }
 
     @Test
