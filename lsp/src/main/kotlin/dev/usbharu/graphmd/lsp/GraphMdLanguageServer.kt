@@ -2040,6 +2040,7 @@ private fun ReferenceTargetKind.displayName(): String = when (this) {
 private fun TemporalCoordinateSpec.displayName(): String = when (this) {
     TemporalCoordinateSpec.Number -> "number"
     is TemporalCoordinateSpec.Calendar -> "calendar:${calendar.name.lowercase()}"
+    is TemporalCoordinateSpec.CalendarPattern -> "calendar-pattern:${fields.joinToString(",") { it.name.replaceFirstChar(Char::lowercase) }}"
     is TemporalCoordinateSpec.Frame -> "frame"
     is TemporalCoordinateSpec.Timecode -> "timecode:${actualFps}"
     is TemporalCoordinateSpec.Era -> "era"

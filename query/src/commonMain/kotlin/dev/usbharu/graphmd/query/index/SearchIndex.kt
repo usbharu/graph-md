@@ -58,6 +58,7 @@ data class IntervalIndex(
     val entriesByTimeline: Map<TimelineId, List<IntervalEntry>>,
     val universalAssertionIds: Set<AssertionId>,
     val assertionTimes: Map<AssertionId, IntervalSet>,
+    val recurringAssertionIds: Set<AssertionId> = assertionTimes.filterValues { it.deferred != null }.keys,
 ) {
     fun candidates(
         window: IntervalSet,
@@ -67,6 +68,7 @@ data class IntervalIndex(
         if (window.isEmpty) return emptySet()
         val coarse = buildSet {
             addAll(universalAssertionIds)
+            addAll(recurringAssertionIds)
             window.intervals.forEach { queryInterval ->
                 entriesByTimeline[queryInterval.timelineId].orEmpty()
                     .asSequence()
@@ -83,7 +85,7 @@ data class IntervalIndex(
         }
         return coarse.filterTo(linkedSetOf()) { id ->
             val asserted = assertionTimes.getValue(id)
-            asserted.isUniversal || when (operator) {
+            asserted.isUniversal || id in recurringAssertionIds || when (operator) {
                 TemporalOperator.AT, TemporalOperator.OVERLAPS -> !(asserted intersect window).isEmpty
                 TemporalOperator.ASSERTION_CONTAINS_QUERY -> asserted.contains(window)
                 TemporalOperator.QUERY_CONTAINS_ASSERTION -> window.contains(asserted)

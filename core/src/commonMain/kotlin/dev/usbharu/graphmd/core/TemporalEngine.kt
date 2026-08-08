@@ -22,6 +22,38 @@ class TemporalEngine(
         return TemporalValue(timeline, parseCoordinate(system.coordinate, raw))
     }
 
+    fun coerceCoordinate(timeline: String, coordinate: TemporalCoordinate): TemporalCoordinate? {
+        val spec = coordinateSystems[timeline]?.coordinate ?: return null
+        if (spec !is TemporalCoordinateSpec.CalendarPattern) return coordinate
+        return when (coordinate) {
+            is TemporalCoordinate.CalendarPattern -> coordinate
+            is TemporalCoordinate.Label -> parseCalendarPattern(spec, coordinate.value)
+            is TemporalCoordinate.Rational -> if (coordinate.value.denominator == 1L && spec.fields.size == 1) {
+                TemporalCoordinate.CalendarPattern(mapOf(spec.fields.single() to coordinate.value.numerator))
+                    .takeIf { validCalendarPatternFields(spec, it.fields) }
+            } else {
+                null
+            }
+            is TemporalCoordinate.CalendarDate -> if (spec.fields.toSet() == setOf(
+                    CalendarField.Year,
+                    CalendarField.Month,
+                    CalendarField.Day,
+                )
+            ) {
+                TemporalCoordinate.CalendarPattern(
+                    mapOf(
+                        CalendarField.Year to coordinate.year,
+                        CalendarField.Month to coordinate.month.toLong(),
+                        CalendarField.Day to coordinate.day.toLong(),
+                    ),
+                )
+            } else {
+                null
+            }
+            else -> null
+        }
+    }
+
     fun convert(
         value: TemporalValue,
         targetTimeline: String,
@@ -233,6 +265,18 @@ class TemporalEngine(
                 } ?: return null
                 calendarToDayIndex(date, spec)
             }
+            is TemporalCoordinateSpec.CalendarPattern -> {
+                val pattern = coerceCoordinate(timeline, coordinate) as? TemporalCoordinate.CalendarPattern ?: return null
+                if (spec.repeatsEvery != null || spec.fields.toSet() != setOf(
+                        CalendarField.Year,
+                        CalendarField.Month,
+                        CalendarField.Day,
+                    )
+                ) return null
+                pattern.toCalendarDate()?.let {
+                    calendarToDayIndex(it, TemporalCoordinateSpec.Calendar(spec.calendar, spec.numbering))
+                }
+            }
             is TemporalCoordinateSpec.Frame -> {
                 val frame = when (coordinate) {
                     is TemporalCoordinate.FrameIndex -> coordinate.value
@@ -280,6 +324,25 @@ class TemporalEngine(
                 if (value.denominator != 1L) return null
                 dayIndexToCalendar(value.numerator, spec)
             }
+            is TemporalCoordinateSpec.CalendarPattern -> {
+                if (value.denominator != 1L || spec.repeatsEvery != null || spec.fields.toSet() != setOf(
+                        CalendarField.Year,
+                        CalendarField.Month,
+                        CalendarField.Day,
+                    )
+                ) return null
+                val date = dayIndexToCalendar(
+                    value.numerator,
+                    TemporalCoordinateSpec.Calendar(spec.calendar, spec.numbering),
+                ) ?: return null
+                TemporalCoordinate.CalendarPattern(
+                    mapOf(
+                        CalendarField.Year to date.year,
+                        CalendarField.Month to date.month.toLong(),
+                        CalendarField.Day to date.day.toLong(),
+                    ),
+                )
+            }
             is TemporalCoordinateSpec.Frame -> {
                 if (value.denominator != 1L) return null
                 TemporalCoordinate.FrameIndex(value.numerator + spec.start)
@@ -301,6 +364,49 @@ class TemporalEngine(
         val order = compareCoordinates(left.timeline, left.coordinate, right.coordinate)
             ?: return TemporalComparisonResult.Unmappable("Coordinates cannot be ordered")
         return TemporalComparisonResult.Ordered(order)
+    }
+
+    fun format(timeline: String, coordinate: TemporalCoordinate): String {
+        val spec = coordinateSystems[timeline]?.coordinate
+            ?: throw IllegalArgumentException("Unknown Timeline: $timeline")
+        return when {
+            spec is TemporalCoordinateSpec.CalendarPattern && coordinate is TemporalCoordinate.CalendarPattern ->
+                formatCalendarPattern(spec, coordinate)
+            else -> coordinate.toString()
+        }
+    }
+
+    fun resolveToAxis(
+        timeline: String,
+        coordinate: TemporalCoordinate,
+        window: TemporalExpansionWindow? = null,
+        recurrenceContextYears: Int = 0,
+    ): TemporalSelection? {
+        require(recurrenceContextYears >= 0) { "recurrence context years must not be negative" }
+        val system = coordinateSystems[timeline] ?: return null
+        val spec = system.coordinate as? TemporalCoordinateSpec.CalendarPattern
+            ?: return normalizeToAxis(timeline, coordinate)?.let(TemporalSelection::Instant)
+        val pattern = coerceCoordinate(timeline, coordinate) as? TemporalCoordinate.CalendarPattern ?: return null
+        return resolveCalendarPattern(spec, pattern, window, recurrenceContextYears)
+    }
+
+    fun expansionWindow(
+        timeline: String,
+        start: TemporalCoordinate.CalendarDate,
+        endExclusive: TemporalCoordinate.CalendarDate,
+    ): TemporalExpansionWindow? {
+        val coordinate = coordinateSystems[timeline]?.coordinate ?: return null
+        val calendar = when (coordinate) {
+            is TemporalCoordinateSpec.Calendar -> coordinate
+            is TemporalCoordinateSpec.CalendarPattern -> TemporalCoordinateSpec.Calendar(
+                coordinate.calendar,
+                coordinate.numbering,
+            )
+            else -> return null
+        }
+        val normalizedStart = calendarToDayIndex(start, calendar) ?: return null
+        val normalizedEnd = calendarToDayIndex(endExclusive, calendar) ?: return null
+        return runCatching { TemporalExpansionWindow(normalizedStart, normalizedEnd) }.getOrNull()
     }
 
     private fun compareCoordinates(
@@ -537,11 +643,142 @@ internal fun parseCoordinate(spec: TemporalCoordinateSpec, raw: String): Tempora
     TemporalCoordinateSpec.Number -> TemporalCoordinate.Rational(ExactRational.parse(raw))
     is TemporalCoordinateSpec.Calendar -> parseCalendarDate(raw)
         ?: throw IllegalArgumentException("Invalid calendar date: $raw")
+    is TemporalCoordinateSpec.CalendarPattern -> parseCalendarPattern(spec, raw)
+        ?: throw IllegalArgumentException("Invalid calendar pattern: $raw")
     is TemporalCoordinateSpec.Frame -> TemporalCoordinate.FrameIndex(raw.trim().toLong())
     is TemporalCoordinateSpec.Timecode -> parseTimecode(raw)
         ?: throw IllegalArgumentException("Invalid timecode: $raw")
     is TemporalCoordinateSpec.Era -> parseEraDate(raw)
         ?: throw IllegalArgumentException("Invalid era date: $raw")
+}
+
+private fun TemporalCoordinate.CalendarPattern.toCalendarDate(): TemporalCoordinate.CalendarDate? {
+    val year = fields[CalendarField.Year] ?: return null
+    val month = fields[CalendarField.Month]?.toInt() ?: return null
+    val day = fields[CalendarField.Day]?.toInt() ?: return null
+    return TemporalCoordinate.CalendarDate(year, month, day)
+}
+
+private val calendarPatternPlaceholder = Regex("""\{([A-Za-z][A-Za-z0-9]*)(?::(\d+))?\}""")
+
+private fun parseCalendarPattern(
+    spec: TemporalCoordinateSpec.CalendarPattern,
+    raw: String,
+): TemporalCoordinate.CalendarPattern? {
+    val template = spec.format ?: defaultCalendarPatternFormat(spec.fields)
+    val placeholders = calendarPatternPlaceholder.findAll(template).toList()
+    if (placeholders.isEmpty()) return null
+    val fieldByName = spec.fields.associateBy(::calendarFieldName)
+    val fields = mutableListOf<CalendarField>()
+    val regex = buildString {
+        append('^')
+        var offset = 0
+        placeholders.forEach { placeholder ->
+            append(Regex.escape(template.substring(offset, placeholder.range.first)))
+            val field = fieldByName[placeholder.groupValues[1]] ?: return null
+            fields += field
+            val width = placeholder.groupValues[2].takeIf(String::isNotEmpty)?.toIntOrNull()
+            append(calendarFieldPattern(field, width))
+            offset = placeholder.range.last + 1
+        }
+        append(Regex.escape(template.substring(offset)))
+        append('$')
+    }
+    val match = Regex(regex).matchEntire(raw.trim()) ?: return null
+    val values = fields.mapIndexed { index, field ->
+        val token = match.groupValues[index + 1]
+        val numeric = token.toLongOrNull() ?: return null
+        field to numeric
+    }.toMap()
+    if (values.keys != spec.fields.toSet()) return null
+    if (!validCalendarPatternFields(spec, values)) return null
+    return TemporalCoordinate.CalendarPattern(values)
+}
+
+private fun formatCalendarPattern(
+    spec: TemporalCoordinateSpec.CalendarPattern,
+    coordinate: TemporalCoordinate.CalendarPattern,
+): String {
+    require(coordinate.fields.keys == spec.fields.toSet()) { "calendar-pattern fields do not match the Timeline declaration" }
+    val template = spec.format ?: defaultCalendarPatternFormat(spec.fields)
+    return calendarPatternPlaceholder.replace(template) { match ->
+        val field = spec.fields.firstOrNull { calendarFieldName(it) == match.groupValues[1] }
+            ?: error("Unknown calendar-pattern format field: ${match.groupValues[1]}")
+        val value = coordinate.fields.getValue(field)
+        val width = match.groupValues[2].takeIf(String::isNotEmpty)?.toIntOrNull()
+            ?: defaultCalendarFieldWidth(field)
+        padCalendarField(value, width)
+    }
+}
+
+private fun defaultCalendarPatternFormat(fields: List<CalendarField>): String =
+    fields.sortedBy(CalendarField::ordinal).joinToString("-") { field ->
+        val name = calendarFieldName(field)
+        val width = defaultCalendarFieldWidth(field)
+        when (field) {
+            CalendarField.Quarter -> "Q{$name:$width}"
+            CalendarField.Week -> "W{$name:$width}"
+            else -> "{$name:$width}"
+        }
+    }
+
+private fun calendarFieldName(field: CalendarField): String = when (field) {
+    CalendarField.Year -> "year"
+    CalendarField.Month -> "month"
+    CalendarField.Day -> "day"
+    CalendarField.Quarter -> "quarter"
+    CalendarField.WeekYear -> "weekYear"
+    CalendarField.Week -> "week"
+}
+
+private fun defaultCalendarFieldWidth(field: CalendarField): Int = when (field) {
+    CalendarField.Year, CalendarField.WeekYear -> 4
+    CalendarField.Month, CalendarField.Day, CalendarField.Week -> 2
+    CalendarField.Quarter -> 1
+}
+
+private fun calendarFieldPattern(field: CalendarField, width: Int?): String {
+    val digits = when {
+        field == CalendarField.Year || field == CalendarField.WeekYear ->
+            if (width == null) "[+-]?\\d{4,}" else "[+-]?\\d{$width,}"
+        width == null -> "\\d{${defaultCalendarFieldWidth(field)}}"
+        else -> "\\d{$width}"
+    }
+    return "($digits)"
+}
+
+private fun padCalendarField(value: Long, width: Int): String {
+    if (value >= 0) return value.toString().padStart(width, '0')
+    return "-" + (-value).toString().padStart(width, '0')
+}
+
+private fun validCalendarPatternFields(
+    spec: TemporalCoordinateSpec.CalendarPattern,
+    fields: Map<CalendarField, Long>,
+): Boolean {
+    fields[CalendarField.Month]?.let { if (it !in 1..12) return false }
+    fields[CalendarField.Day]?.let { if (it !in 1..31) return false }
+    fields[CalendarField.Quarter]?.let { if (it !in 1..4) return false }
+    fields[CalendarField.Week]?.let { if (it !in 1..53) return false }
+    val year = fields[CalendarField.Year]
+    val month = fields[CalendarField.Month]
+    val day = fields[CalendarField.Day]
+    if (year != null && month != null && day != null) {
+        val astronomical = toAstronomicalYear(year, spec.numbering) ?: return false
+        if (!validDate(astronomical, month.toInt(), day.toInt(), spec.calendar)) return false
+    } else if (month != null && day != null && !validDate(2000, month.toInt(), day.toInt(), spec.calendar)) {
+        return false
+    }
+    val weekYear = fields[CalendarField.WeekYear]
+    val week = fields[CalendarField.Week]
+    if (weekYear != null && week != null) {
+        val astronomical = toAstronomicalYear(weekYear, spec.numbering) ?: return false
+        val first = isoWeekOneMonday(astronomical, spec.numbering) ?: return false
+        val next = isoWeekOneMonday(astronomical + 1, spec.numbering) ?: return false
+        val weeks = ((next - first).numerator / 7).toInt()
+        if (week !in 1L..weeks.toLong()) return false
+    }
+    return true
 }
 
 internal fun parseGenericTemporalCoordinate(raw: String): TemporalCoordinate {
@@ -667,6 +904,118 @@ private fun validDate(year: Long, month: Int, day: Int, calendar: CalendarKind):
         else -> 31
     }
     return day <= days
+}
+
+private fun resolveCalendarPattern(
+    spec: TemporalCoordinateSpec.CalendarPattern,
+    coordinate: TemporalCoordinate.CalendarPattern,
+    window: TemporalExpansionWindow?,
+    recurrenceContextYears: Int,
+): TemporalSelection? {
+    if (coordinate.fields.keys != spec.fields.toSet() || !validCalendarPatternFields(spec, coordinate.fields)) return null
+    if (spec.repeatsEvery == null) return resolveSingleCalendarPattern(spec, coordinate.fields)
+    val expansion = window ?: return null
+    if (expansion.start.denominator != 1L || expansion.endExclusive.denominator != 1L) return null
+    val calendar = TemporalCoordinateSpec.Calendar(spec.calendar, spec.numbering)
+    val from = dayIndexToCalendar(expansion.start.numerator, calendar) ?: return null
+    val to = dayIndexToCalendar(expansion.endExclusive.numerator - 1, calendar) ?: return null
+    val fromAstronomical = toAstronomicalYear(from.year, spec.numbering) ?: return null
+    val toAstronomical = toAstronomicalYear(to.year, spec.numbering) ?: return null
+    if (toAstronomical < fromAstronomical || toAstronomical - fromAstronomical > 10_000L) return null
+    val expansionMargin = recurrenceContextYears.toLong() + 2L
+    if (fromAstronomical < Long.MIN_VALUE + expansionMargin || toAstronomical > Long.MAX_VALUE - expansionMargin) {
+        return null
+    }
+    val firstExpansionYear = fromAstronomical - expansionMargin
+    val lastExpansionYear = toAstronomical + expansionMargin
+    val occurrences = mutableListOf<TemporalAxisPeriod>()
+    for (astronomicalYear in firstExpansionYear..lastExpansionYear) {
+        val authoredYear = fromAstronomicalYear(astronomicalYear, spec.numbering) ?: continue
+        val yearField = if (CalendarField.Week in spec.fields) CalendarField.WeekYear else CalendarField.Year
+        val expandedFields = coordinate.fields + (yearField to authoredYear)
+        val expandedSpec = spec.copy(
+            fields = (spec.fields + yearField).distinct().sortedBy(CalendarField::ordinal),
+            repeatsEvery = null,
+        )
+        val period = when (val selection = resolveSingleCalendarPattern(expandedSpec, expandedFields)) {
+            is TemporalSelection.Instant -> TemporalAxisPeriod(selection.value, selection.value + ExactRational.ONE)
+            is TemporalSelection.Period -> selection.value
+            else -> null
+        } ?: continue
+        val start = if (recurrenceContextYears == 0) maxOf(period.start, expansion.start) else period.start
+        val end = if (recurrenceContextYears == 0) minOf(period.endExclusive, expansion.endExclusive) else period.endExclusive
+        if (start < end) occurrences += TemporalAxisPeriod(start, end)
+    }
+    return TemporalSelection.Recurrence(spec.repeatsEvery, occurrences.distinct())
+}
+
+private fun resolveSingleCalendarPattern(
+    spec: TemporalCoordinateSpec.CalendarPattern,
+    fields: Map<CalendarField, Long>,
+): TemporalSelection? {
+    val calendar = TemporalCoordinateSpec.Calendar(spec.calendar, spec.numbering)
+    fields[CalendarField.Quarter]?.let { quarter ->
+        val authoredLabelYear = fields[CalendarField.Year] ?: return null
+        val labelAstronomical = toAstronomicalYear(authoredLabelYear, spec.numbering) ?: return null
+        val fiscalStartYear = if (
+            spec.quarterYearLabel == QuarterYearLabel.End && spec.quarterStartMonth != 1
+        ) labelAstronomical - 1 else labelAstronomical
+        val monthOffset = (quarter.toInt() - 1) * 3
+        val startMonthIndex = spec.quarterStartMonth - 1 + monthOffset
+        val startYear = fiscalStartYear + startMonthIndex / 12
+        val startMonth = startMonthIndex % 12 + 1
+        val endMonthIndex = startMonth - 1 + 3
+        val endYear = startYear + endMonthIndex / 12
+        val endMonth = endMonthIndex % 12 + 1
+        val startAuthored = fromAstronomicalYear(startYear, spec.numbering) ?: return null
+        val endAuthored = fromAstronomicalYear(endYear, spec.numbering) ?: return null
+        val start = calendarToDayIndex(TemporalCoordinate.CalendarDate(startAuthored, startMonth, 1), calendar) ?: return null
+        val end = calendarToDayIndex(TemporalCoordinate.CalendarDate(endAuthored, endMonth, 1), calendar) ?: return null
+        return TemporalSelection.Period(TemporalAxisPeriod(start, end))
+    }
+    if (CalendarField.WeekYear in fields || CalendarField.Week in fields) {
+        val authoredWeekYear = fields[CalendarField.WeekYear] ?: return null
+        val astronomicalWeekYear = toAstronomicalYear(authoredWeekYear, spec.numbering) ?: return null
+        val week = fields[CalendarField.Week]?.toInt()
+        val weekOne = isoWeekOneMonday(astronomicalWeekYear, spec.numbering) ?: return null
+        val nextWeekOne = isoWeekOneMonday(astronomicalWeekYear + 1, spec.numbering) ?: return null
+        if (week == null) return TemporalSelection.Period(TemporalAxisPeriod(weekOne, nextWeekOne))
+        val start = weekOne + ExactRational.of((week - 1L) * 7)
+        val end = start + ExactRational.of(7)
+        if (end > nextWeekOne) return null
+        return TemporalSelection.Period(TemporalAxisPeriod(start, end))
+    }
+    val year = fields[CalendarField.Year] ?: return null
+    val astronomicalYear = toAstronomicalYear(year, spec.numbering) ?: return null
+    val month = fields[CalendarField.Month]?.toInt()
+    val day = fields[CalendarField.Day]?.toInt()
+    if (month != null && day != null) {
+        val value = calendarToDayIndex(TemporalCoordinate.CalendarDate(year, month, day), calendar) ?: return null
+        return TemporalSelection.Instant(value)
+    }
+    if (month != null) {
+        val start = calendarToDayIndex(TemporalCoordinate.CalendarDate(year, month, 1), calendar) ?: return null
+        val nextAstronomicalYear = if (month == 12) astronomicalYear + 1 else astronomicalYear
+        val nextMonth = if (month == 12) 1 else month + 1
+        val nextYear = fromAstronomicalYear(nextAstronomicalYear, spec.numbering) ?: return null
+        val end = calendarToDayIndex(TemporalCoordinate.CalendarDate(nextYear, nextMonth, 1), calendar) ?: return null
+        return TemporalSelection.Period(TemporalAxisPeriod(start, end))
+    }
+    val start = calendarToDayIndex(TemporalCoordinate.CalendarDate(year, 1, 1), calendar) ?: return null
+    val nextYear = fromAstronomicalYear(astronomicalYear + 1, spec.numbering) ?: return null
+    val end = calendarToDayIndex(TemporalCoordinate.CalendarDate(nextYear, 1, 1), calendar) ?: return null
+    return TemporalSelection.Period(TemporalAxisPeriod(start, end))
+}
+
+private fun isoWeekOneMonday(
+    astronomicalWeekYear: Long,
+    numbering: YearNumbering,
+): ExactRational? {
+    val authoredYear = fromAstronomicalYear(astronomicalWeekYear, numbering) ?: return null
+    val calendar = TemporalCoordinateSpec.Calendar(CalendarKind.Gregorian, numbering)
+    val januaryFourth = calendarToDayIndex(TemporalCoordinate.CalendarDate(authoredYear, 1, 4), calendar) ?: return null
+    val weekday = floorMod(januaryFourth.numerator, 7).toInt() + 1
+    return januaryFourth - ExactRational.of((weekday - 1).toLong())
 }
 
 private fun eraToCalendarDate(
