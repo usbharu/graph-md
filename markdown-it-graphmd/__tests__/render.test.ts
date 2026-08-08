@@ -255,6 +255,23 @@ describe("embed blocks", () => {
     expect(html).not.toContain("old");
   });
 
+  it("renders an unresolved back-link id as plain text", () => {
+    const html = render('::: embed:back-link=friendOf\nold\n:::\n', {
+      hrefTransform: (target) => target,
+      embedHrefTransform: () => null,
+      embedResolver: () => ({
+        status: "ready",
+        table: {
+          columns: [{ name: "id", type: "string" }],
+          rows: [{ cells: [{ text: "missing", targetId: "missing" }] }],
+        },
+      }),
+    });
+
+    expect(html).toContain("<td>missing</td>");
+    expect(html).not.toContain("<a ");
+  });
+
   it("keeps fallback and prepends an escaped diagnostic on failure", () => {
     const html = render('::: embed:back-link=friendOf\nfallback\n:::\n', {
       embedResolver: () => ({ status: "error", message: "bad <query>" }),

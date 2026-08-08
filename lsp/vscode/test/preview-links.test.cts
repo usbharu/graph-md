@@ -5,6 +5,7 @@ const {
   parseFrontMatterScalar,
   parseMediaFrontMatter,
   relativeMarkdownHref,
+  resolveGraphMdDocumentHref,
   resolveGraphMdHref,
   resolveMediaHref,
 } = require("../src/preview-links.ts");
@@ -115,6 +116,18 @@ test("does not create a relative link across Windows drives", () => {
       String.raw`D:\people\bob.md`,
       path.win32,
     ),
+    null,
+  );
+});
+
+test("back-link document resolution returns null for unresolved and cross-authority targets", () => {
+  const current = uri("/workspace/alice.md");
+  const targets = new Map([["bob", uri("/workspace/people/bob.md")]]);
+
+  assert.equal(resolveGraphMdDocumentHref("bob", { currentDocument: current }, targets), "./people/bob.md");
+  assert.equal(resolveGraphMdDocumentHref("missing", { currentDocument: current }, targets), null);
+  assert.equal(
+    resolveGraphMdDocumentHref("bob", { currentDocument: uri("/workspace/alice.md", "file", "remote") }, targets),
     null,
   );
 });

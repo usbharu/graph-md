@@ -1656,13 +1656,22 @@ internal class GraphMdWorkspaceIndex(
         if (workspace.generation != synchronized(this) { workspaceGeneration }) {
             return embedError("GRAPHMD_EMBED_STALE", "The workspace changed while rendering the embed.")
         }
+        val compileDiagnostics = workspace.compilation.diagnostics
+            .filter { it.severity == Severity.Error }
+            .map {
+                GraphMdSearchDiagnostic(
+                    code = "GRAPHMD_COMPILE",
+                    kind = it.category.name.lowercase(),
+                    message = it.message,
+                )
+            }
         val result = runSearchSuspend { EmbedEngine(engine).render(directive, node.id) }
         return GraphMdEmbedResponse(
             columns = result.table?.columns.orEmpty().map { GraphMdEmbedColumn(it.name, it.type) },
             rows = result.table?.rows.orEmpty().map { row ->
                 GraphMdEmbedRow(row.cells.map { GraphMdEmbedCell(it.text, it.targetId) })
             },
-            diagnostics = result.diagnostics.map(EmbedDiagnostic::toSearchDiagnostic),
+            diagnostics = compileDiagnostics + result.diagnostics.map(EmbedDiagnostic::toSearchDiagnostic),
         )
     }
 

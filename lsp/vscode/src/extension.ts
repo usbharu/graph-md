@@ -7,7 +7,7 @@ import {
   type EmbedResolution,
   type EmbedTable,
 } from "markdown-it-graphmd";
-import { resolveGraphMdHref, resolveMediaHref } from "./preview-links";
+import { resolveGraphMdDocumentHref, resolveGraphMdHref, resolveMediaHref } from "./preview-links";
 import {
   isIndexedMarkdownPath,
   previewIndexAliases,
@@ -110,6 +110,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<GraphM
       md.use(graphMdPlugin, {
         hrefTransform: (target: string, _relType: string, env?: unknown) =>
           resolveGraphMdHrefFromIndex(target, env),
+        embedHrefTransform: resolveGraphMdEmbedHrefFromIndex,
         embedResolver: resolveEmbed,
       });
       const defaultLinkOpen = md.renderer.rules.link_open ?? ((tokens: any[], idx: number, options: any, _env: any, self: any) => self.renderToken(tokens, idx, options));
@@ -326,6 +327,18 @@ function resolveGraphMdHrefFromIndex(target: string, env?: unknown): string {
     target,
     env as { currentDocument?: vscode.Uri } | undefined,
     previewTargets.snapshot.media,
+    documentTargets,
+  );
+}
+
+function resolveGraphMdEmbedHrefFromIndex(target: string, env?: unknown): string | null {
+  const documentTargets = new Map<string, vscode.Uri>();
+  for (const [id, source] of previewTargets.snapshot.documents) {
+    documentTargets.set(id, vscode.Uri.parse(source.uri));
+  }
+  return resolveGraphMdDocumentHref(
+    target,
+    env as { currentDocument?: vscode.Uri } | undefined,
     documentTargets,
   );
 }

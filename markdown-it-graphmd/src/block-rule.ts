@@ -94,7 +94,7 @@ export function renderEmbedBlock(
   idx: number,
   md: any,
   resolver?: EmbedResolver,
-  hrefTransform?: (target: string, relType: string, env?: unknown) => string | null,
+  hrefTransform?: (target: string, env?: unknown) => string | null,
   env?: unknown,
 ): string {
   const meta = tokens[idx].meta as { directive: EmbedParts; fallbackSource: string };
@@ -118,7 +118,7 @@ export function renderEmbedBlock(
 export function renderEmbedTable(
   tokens: any[],
   idx: number,
-  hrefTransform?: (target: string, relType: string, env?: unknown) => string | null,
+  hrefTransform?: (target: string, env?: unknown) => string | null,
   env?: unknown,
 ): string {
   const meta = tokens[idx].meta as { directive: EmbedParts; table: EmbedTable };
@@ -126,7 +126,7 @@ export function renderEmbedTable(
     `<th title="${escapeHtml(column.type)}">${escapeHtml(column.name)}</th>`).join("");
   const body = meta.table.rows.map((row) => `<tr>${row.cells.map((cell) => {
     const text = escapeHtml(cell.text).replace(/\r\n|\r|\n/g, "<br>");
-    const href = cell.targetId == null ? null : hrefTransform?.(cell.targetId, "", env);
+    const href = cell.targetId == null ? null : hrefTransform?.(cell.targetId, env);
     return `<td>${href == null ? text : `<a href="${escapeHtml(href)}">${text}</a>`}</td>`;
   }).join("")}</tr>`).join("");
   return `<table class="graphmd-embed" data-embed-kind="${escapeHtml(meta.directive.kind)}"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>\n`;

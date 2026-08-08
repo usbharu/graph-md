@@ -94,6 +94,41 @@ class GraphMdCliTest {
     }
 
     @Test
+    fun `embed does not rewrite a compile-invalid file and continues with valid files`() {
+        val bad = node(
+            "bad",
+            "MissingType",
+            """
+            ::: embed:query="MATCH (n:Person) RETURN ID(n) AS id LIMIT 100"
+            keep invalid
+            :::
+            """.trimIndent(),
+        )
+        val fs = FakeFileSystem(
+            mapOf(
+                "/workspace/Person.md" to nodeType("Person"),
+                "/workspace/bad.md" to bad,
+                "/workspace/good.md" to node(
+                    "good",
+                    "Person",
+                    """
+                    ::: embed:query="MATCH (n:Person) RETURN ID(n) AS id LIMIT 100"
+                    replace valid
+                    :::
+                    """.trimIndent(),
+                ),
+            ),
+        )
+
+        val result = GraphMdCli(fs).run(listOf("embed", "/workspace"))
+
+        assertEquals(1, result.exitCode)
+        assertEquals(bad, fs.contentsUnder("/workspace").getValue("/workspace/bad.md"))
+        assertFalse(fs.contentsUnder("/workspace").getValue("/workspace/good.md").contains("replace valid"))
+        assertTrue(result.stderr.contains("Skipped /workspace/bad.md"))
+    }
+
+    @Test
     fun `demo generates a valid minimum dataset and reports its seed`() {
         val fs = FakeFileSystem(emptyMap())
 

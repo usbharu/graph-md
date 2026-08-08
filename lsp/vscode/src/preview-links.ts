@@ -46,6 +46,25 @@ export function resolveGraphMdHref(
   ) ?? target;
 }
 
+export function resolveGraphMdDocumentHref(
+  target: string,
+  env: PreviewEnvironment | undefined,
+  documentTargets: ReadonlyMap<string, PreviewDocumentUri>,
+  pathImplementation: PathImplementation = path,
+): string | null {
+  const targetUri = documentTargets.get(target);
+  const currentDocument = env?.currentDocument;
+  if (
+    !targetUri ||
+    !currentDocument ||
+    targetUri.scheme !== currentDocument.scheme ||
+    targetUri.authority !== currentDocument.authority
+  ) {
+    return null;
+  }
+  return relativeMarkdownHref(currentDocument.fsPath, targetUri.fsPath, pathImplementation);
+}
+
 export function resolveMediaHref(
   href: string,
   mediaTargets: ReadonlyMap<string, string>,

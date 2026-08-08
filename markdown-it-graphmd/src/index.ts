@@ -21,6 +21,8 @@ export interface GraphMdOptions {
    * relation metadata and label without an `href`.
    */
   hrefTransform?: (target: string, relType: string, env?: unknown) => string | null;
+  /** Resolve back-link IDs to their source document. Return null when unresolved. */
+  embedHrefTransform?: (target: string, env?: unknown) => string | null;
   embedResolver?: EmbedResolver;
 }
 
@@ -35,6 +37,8 @@ export type { EmbedParts } from "./core-bindings";
  * - `@props{ ... }`                                       -> visible bound property values
  */
 export function graphMdPlugin(md: MarkdownIt, options: GraphMdOptions = {}): void {
+  const embedHrefTransform = options.embedHrefTransform
+    ?? ((target: string, env?: unknown) => options.hrefTransform?.(target, "", env) ?? null);
   md.inline.ruler.push("graphmd_relation", relationInlineRule);
   md.inline.ruler.push("graphmd_props_inline", propsInlineRule);
   md.block.ruler.before(
@@ -51,9 +55,16 @@ export function graphMdPlugin(md: MarkdownIt, options: GraphMdOptions = {}): voi
   md.renderer.rules["graphmd_body_block_open"] = renderBodyBlockBoundary;
   md.renderer.rules["graphmd_body_block_close"] = renderBodyBlockBoundary;
   md.renderer.rules["graphmd_embed_block"] = (tokens, idx, _renderOptions, env) =>
-    renderEmbedBlock(tokens, idx, md, options.embedResolver, options.hrefTransform, env);
+    renderEmbedBlock(
+      tokens,
+      idx,
+      md,
+      options.embedResolver,
+      embedHrefTransform,
+      env,
+    );
   md.renderer.rules["graphmd_embed_table"] = (tokens, idx, _renderOptions, env) =>
-    renderEmbedTable(tokens, idx, options.hrefTransform, env);
+    renderEmbedTable(tokens, idx, embedHrefTransform, env);
 }
 
 export default graphMdPlugin;

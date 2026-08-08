@@ -88,9 +88,13 @@ class GraphMdCli internal constructor(
             val extraction = BodySyntaxExtractor().extract(document.body, source.sourcePath, document.id)
             val blocks = extraction.blocks.filter { it.embed != null }
             if (blocks.isEmpty()) return@forEach
-            val errors = extraction.diagnostics
+            val fileDiagnostics = parsed.diagnostics +
+                compilation.diagnostics.filter { it.source?.path == source.sourcePath } +
+                extraction.diagnostics
+            val errors = fileDiagnostics
                 .filter { it.severity == Severity.Error }
                 .map { it.message }
+                .distinct()
                 .toMutableList()
             val replacements = mutableListOf<Pair<SourceRange, String>>()
             val bodyStart = markdownBodyStart(normalized)

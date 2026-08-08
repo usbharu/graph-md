@@ -391,6 +391,36 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `render embed reports workspace compilation errors`() {
+        val root = Files.createTempDirectory("graphmd-embed-compile-error")
+        try {
+            Files.writeString(root.resolve("Person.md"), "---\nid: Person\nkind: NodeType\n---")
+            val node = root.resolve("node.md")
+            Files.writeString(node, "---\nid: node\nkind: Node\ntype: Person\n---")
+            Files.writeString(
+                root.resolve("broken.md"),
+                "---\nid: broken\nkind: Node\ntype: MissingType\n---",
+            )
+            val server = GraphMdLanguageServer()
+            server.initialize(
+                InitializeParams().apply {
+                    workspaceFolders = listOf(WorkspaceFolder(root.toUri().toString(), "embed"))
+                },
+            ).get()
+
+            val result = server.renderEmbed(
+                GraphMdEmbedParams(node.toUri().toString(), "query", "MATCH (n:Person) RETURN ID(n) AS id"),
+            ).get()
+
+            assertTrue(result.diagnostics.any {
+                it.code == "GRAPHMD_COMPILE" && it.message.contains("MissingType")
+            })
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `search keeps working when a document references an unknown validTime timeline`() {
         val root = Files.createTempDirectory("graphmd-search-invalid-timeline")
         try {
