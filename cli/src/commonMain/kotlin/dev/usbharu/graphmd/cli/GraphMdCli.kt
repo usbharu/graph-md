@@ -2,14 +2,14 @@ package dev.usbharu.graphmd.cli
 
 import dev.usbharu.graphmd.core.GraphCompiler
 import dev.usbharu.graphmd.core.BodySyntaxExtractor
+import dev.usbharu.graphmd.core.TemporalEngine
 import dev.usbharu.graphmd.core.model.*
 import dev.usbharu.graphmd.query.GraphSearchEngine
 import dev.usbharu.graphmd.query.embed.*
 import dev.usbharu.graphmd.query.gmql.*
-import dev.usbharu.graphmd.query.model.IntervalBoundary
 import dev.usbharu.graphmd.query.model.IntervalSet
-import dev.usbharu.graphmd.query.model.TemporalInterval
 import dev.usbharu.graphmd.query.model.TimelineId
+import dev.usbharu.graphmd.query.model.TimelineCatalog
 import kotlin.coroutines.*
 
 data class CliResult(
@@ -562,12 +562,23 @@ private class TemporalView(
     private val requestedTimeline: NormalizedTimeline,
 ) {
     private val requestedTimelineId = TimelineId(requested.timeline)
-    private val requestedWindow = IntervalSet.of(
-        TemporalInterval(
-            timelineId = requestedTimelineId,
-            start = requested.from?.let { IntervalBoundary(it, inclusive = true) },
-            end = requested.to?.let { IntervalBoundary(it, inclusive = true) },
-        ),
+    private val engine = TemporalEngine(graph.temporalModel)
+    private val catalog = TimelineCatalog.from(graph.timelines)
+    private val parsedFrom = requested.from?.let { engine.parse(requested.timeline, it).coordinate }
+    private val parsedTo = requested.to?.let { engine.parse(requested.timeline, it).coordinate }
+
+    init {
+        val normalizedFrom = parsedFrom?.let { engine.normalizeToAxis(requested.timeline, it) }
+        val normalizedTo = parsedTo?.let { engine.normalizeToAxis(requested.timeline, it) }
+        require(normalizedFrom == null || normalizedTo == null || normalizedFrom <= normalizedTo) {
+            "--valid-time from must not exceed to"
+        }
+    }
+
+    private val requestedWindow = catalog.searchIntervals(
+        timelineId = requestedTimelineId,
+        start = parsedFrom?.let { it to true },
+        end = parsedTo?.let { it to true },
     )
     private val nodesById = graph.nodes.associateBy { it.id }
     private val visibleRelations = graph.relations.filter { assertedAt(it.validTime) }
@@ -660,24 +671,7 @@ private class TemporalView(
     private fun assertedAt(validTimes: List<ValidTime>): Boolean =
         !(requestedIntervals(validTimes) intersect requestedWindow).isEmpty
 
-    private fun requestedIntervals(validTimes: List<ValidTime>): IntervalSet = IntervalSet.of(
-        validTimes.mapNotNull { validTime ->
-            if (
-                validTime.timeline != requested.timeline &&
-                validTime.timeline !in requestedTimeline.ancestorIds
-            ) {
-                return@mapNotNull null
-            }
-            val from = validTime.from?.timecode
-            val to = validTime.to?.timecode
-            if (from != null && to != null && from > to) return@mapNotNull null
-            TemporalInterval(
-                timelineId = requestedTimelineId,
-                start = from?.let { IntervalBoundary(it, inclusive = true) },
-                end = to?.let { IntervalBoundary(it, inclusive = true) },
-            )
-        },
-    )
+    private fun requestedIntervals(validTimes: List<ValidTime>): IntervalSet = catalog.fromValidTimes(validTimes)
 }
 
 private data class FilteredValue(
@@ -828,12 +822,11 @@ private data class TimelineItem(val timeline: NormalizedTimeline) : GraphItem {
     override fun detailJson(graph: GraphCompilationResult, view: TemporalView?): JsonValue = jsonObject(
         "kind" to jsonString(kind.wireName),
         "id" to jsonString(id),
-        "timecode" to (timeline.timecode?.let {
-            jsonObject("type" to jsonString(it.type.name))
-        } ?: JsonValue.Null),
-        "mappings" to jsonArray(timeline.mappings.map(TimelineMapping::toJson)),
-        "mappedOffsets" to JsonValue.Object(timeline.mappedOffsets.sortedByKey().mapValues { jsonNumber(it.value) }),
-        "ancestors" to jsonArray(timeline.ancestorIds.sorted().map(::jsonString)),
+        "domain" to jsonString(timeline.domainId),
+        "axis" to jsonString(timeline.axisId),
+        "coordinate" to timeline.coordinate.toJson(),
+        "lineage" to (timeline.lineage?.toJson() ?: JsonValue.Null),
+        "mappings" to jsonArray(timeline.temporalMappings.map(TemporalMappingInstance::toJson)),
         "props" to JsonValue.Object(timeline.props.sortedByKey().mapValues { it.value.toJson() }),
         "source" to timeline.source.toJson(),
     )
@@ -927,7 +920,7 @@ private fun renderSearchResult(result: GmqlQueryResult): String {
 private fun renderSearchValue(value: GmqlValue): String = when (value) {
     is GmqlValue.StringValue -> value.value.replace("\t", "\\t").replace("\n", "\\n")
     is GmqlValue.IntegerValue -> value.value.toString()
-    is GmqlValue.DecimalValue -> stableNumberText(value.value)
+    is GmqlValue.DecimalValue -> value.value.graphNumberText()
     is GmqlValue.BooleanValue -> value.value.toString()
     GmqlValue.NullValue -> "null"
     is GmqlValue.NodeValue -> value.id.value
@@ -1089,9 +1082,11 @@ private fun renderShow(item: GraphItem, graph: GraphCompilationResult, view: Tem
         }
         is TimelineItem -> {
             append("Source: ").append(item.sourcePath).append('\n')
-            append("Timecode: ").append(item.timeline.timecode?.type?.name ?: "-").append('\n')
-            append("Ancestors: ").append(item.timeline.ancestorIds.sorted().joinToString()).append('\n')
-            append("Mappings: ").append(item.timeline.mappings.size).append('\n')
+            append("Domain: ").append(item.timeline.domainId).append('\n')
+            append("Axis: ").append(item.timeline.axisId).append('\n')
+            append("Coordinate: ").append(renderCoordinateSpec(item.timeline.coordinate)).append('\n')
+            append("Lineage: ").append(item.timeline.lineage?.kind?.name?.lowercase() ?: "-").append('\n')
+            append("Mappings: ").append(item.timeline.temporalMappings.size).append('\n')
         }
         is RelationItem -> Unit
     }
@@ -1128,7 +1123,7 @@ private fun renderProperties(
 private fun renderPropertyValue(value: NormalizedValue): String = when (value) {
     is StringValue -> renderTabularText(value.value)
     is IntegerValue -> value.value.toString()
-    is dev.usbharu.graphmd.core.model.NumberValue -> stableNumberText(value.value)
+    is dev.usbharu.graphmd.core.model.NumberValue -> value.value.graphNumberText()
     is BooleanValue -> value.value.toString()
     NullValue -> "null"
     is TextValue -> renderNestedEntries("text", value.memberEntries)
@@ -1139,7 +1134,7 @@ private fun renderPropertyValue(value: NormalizedValue): String = when (value) {
         listOf(
             "timeline" to renderNullableText(value.timeline),
             "value" to renderNullableText(value.value),
-            "timecode" to renderTimecode(value.timecode),
+            "coordinate" to renderCoordinate(value.coordinate),
         ),
     )
     is DurationValue -> renderFields(
@@ -1208,16 +1203,12 @@ private fun renderField(name: String, value: String, indent: String): String {
 
 private fun renderNullableText(value: String?): String = value?.let(::renderTabularText) ?: "null"
 
-private fun renderTimecode(value: TimecodeValue): String = when (value) {
-    is NumberTimecode -> stableNumberText(value.value)
-}
-
 private fun renderTemporalPoint(value: TemporalPoint): String = renderFields(
     "timePoint",
     listOf(
         "timeline" to renderNullableText(value.timeline),
         "value" to renderNullableText(value.value),
-        "timecode" to stableNumberText(value.timecode),
+        "coordinate" to renderCoordinate(value.coordinate),
     ),
 )
 
@@ -1238,8 +1229,26 @@ private fun renderValidTimes(validTimes: List<ValidTime>): String =
     }
 
 private fun renderValidTimePoint(value: TimePoint): String =
-    value.value?.let { "${renderTabularText(it)} (${stableNumberText(value.timecode)})" }
-        ?: stableNumberText(value.timecode)
+    value.value?.let { "${renderTabularText(it)} (${renderCoordinate(value.coordinate)})" }
+        ?: renderCoordinate(value.coordinate)
+
+private fun renderCoordinate(value: TemporalCoordinate): String = when (value) {
+    is TemporalCoordinate.Rational -> value.value.toString()
+    is TemporalCoordinate.CalendarDate -> "${value.year}-${value.month.toString().padStart(2, '0')}-${value.day.toString().padStart(2, '0')}"
+    is TemporalCoordinate.EraDate -> "${value.era} ${value.year}-${value.month.toString().padStart(2, '0')}-${value.day.toString().padStart(2, '0')}"
+    is TemporalCoordinate.FrameIndex -> value.value.toString()
+    is TemporalCoordinate.Timecode -> "${value.hours.toString().padStart(2, '0')}:${value.minutes.toString().padStart(2, '0')}:" +
+        "${value.seconds.toString().padStart(2, '0')}:${value.frames.toString().padStart(2, '0')}"
+    is TemporalCoordinate.Label -> value.value
+}
+
+private fun renderCoordinateSpec(value: TemporalCoordinateSpec): String = when (value) {
+    TemporalCoordinateSpec.Number -> "number"
+    is TemporalCoordinateSpec.Calendar -> "calendar:${value.calendar.name.lowercase()}"
+    is TemporalCoordinateSpec.Frame -> "frame"
+    is TemporalCoordinateSpec.Timecode -> "timecode:${value.actualFps}"
+    is TemporalCoordinateSpec.Era -> "era"
+}
 
 private fun renderRelations(relations: List<NormalizedRelation>, view: TemporalView? = null): String = buildString {
     append("TYPE\tFROM\tFROM_VISIBILITY\tTO\tTO_VISIBILITY\tLABEL\tVALID_TIME\tSOURCE\n")

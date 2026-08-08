@@ -22,6 +22,19 @@ data class GraphCompilationResult(
     val relTypes: List<NormalizedRelType>,
     val timelines: List<NormalizedTimeline>,
     val diagnostics: List<Diagnostic>,
+    val temporalModel: TemporalModel = TemporalModel(
+        domains = timelines.map { TemporalDomain(it.domainId) }.distinctBy { it.id },
+        axes = timelines.map {
+            TemporalAxis(
+                id = it.axisId,
+                domainId = it.domainId,
+                unit = it.axisUnit,
+                lineage = it.lineage,
+            )
+        }.distinctBy { it.id },
+        coordinateSystems = timelines.map { it.coordinateSystem },
+        mappings = timelines.flatMap { it.temporalMappings },
+    ),
 )
 
 data class ParsedGraphDocumentResult(

@@ -226,12 +226,10 @@ class GraphDocumentParserTest {
                 ---
                 id: CommonEra
                 kind: Timeline
-                timecode:
-                  type: number
-                mappings:
-                  - kind: offset
-                    to: Other
-                    offset: 1.5
+                coordinate: gregorian
+                mapsTo:
+                  timeline: Other
+                  scale: 3/2
                 ---
             """.trimIndent(),
             "/tmp/timeline.md",
@@ -244,13 +242,57 @@ class GraphDocumentParserTest {
         assertEquals(listOf("Person"), relType.from)
         assertEquals(TimelineSelector.Id("CommonEra"), relType.props.getValue("since").timeline)
         assertNotNull(timeline)
-        assertEquals(TimecodeType.number, timeline.timecode?.type)
-        assertEquals(1, timeline.mappings.size)
-        assertEquals(1.5, (timeline.mappings.single() as OffsetTimelineMapping).offset)
+        assertEquals(TemporalCoordinateSpec.Calendar(CalendarKind.Gregorian), timeline.coordinate)
+        assertEquals(ExactRational.of(3, 2), timeline.mapsTo.single().scale)
     }
 
     @Test
-    fun `parses timeline selector string and legacy mapped forms`() {
+    fun `parses scientific notation in temporal yaml fields`() {
+        val timeline = compiler.parseDocument(
+            """
+                ---
+                id: TinyScale
+                kind: Timeline
+                sameAxisAs: Base
+                scale: 1e-6
+                offset: -2.5E3
+                mapsTo:
+                  timeline: Other
+                  scale: 1.25e2
+                ---
+            """.trimIndent(),
+            "/tmp/tiny-scale.md",
+        ).document as TimelineDocument
+        val node = compiler.parseDocument(
+            """
+                ---
+                id: event
+                kind: Node
+                type: Event
+                validTime:
+                  - timeline: TinyScale
+                    from: 1e-6
+                    to: 2E-6
+                ---
+            """.trimIndent(),
+            "/tmp/event.md",
+        ).document as NodeDocument
+
+        assertEquals(ExactRational.of(1, 1_000_000), timeline.scale)
+        assertEquals(ExactRational.of(-2_500), timeline.offset)
+        assertEquals(ExactRational.of(125), timeline.mapsTo.single().scale)
+        assertEquals(
+            TemporalCoordinate.Rational(ExactRational.of(1, 1_000_000)),
+            node.validTime.single().from?.coordinate,
+        )
+        assertEquals(
+            TemporalCoordinate.Rational(ExactRational.of(1, 500_000)),
+            node.validTime.single().to?.coordinate,
+        )
+    }
+
+    @Test
+    fun `reports removed mapped selectors and retains their Timeline ids for recovery`() {
         val nodeType = compiler.parseDocument(
             """
                 ---
@@ -317,15 +359,15 @@ class GraphDocumentParserTest {
 
         assertNotNull(nodeType)
         assertEquals(TimelineSelector.Id("CommonEra"), nodeType.props.getValue("byId").timeline)
-        assertEquals(listOf(TimelineSelector.Mapped("CommonEra")), nodeType.props.getValue("mapped").timelines)
-        assertEquals(TimelineSelector.Mapped("Singular"), nodeType.props.getValue("singularCanonical").timeline)
+        assertEquals(listOf(TimelineSelector.Id("CommonEra")), nodeType.props.getValue("mapped").timelines)
+        assertEquals(TimelineSelector.Id("Singular"), nodeType.props.getValue("singularCanonical").timeline)
         assertEquals(TimelineSelector.Id("Legacy.Single"), nodeType.props.getValue("singularLegacy").timeline)
-        assertEquals(TimelineSelector.Mapped("Nested"), nodeType.props.getValue("overlappingLegacy").timeline)
+        assertEquals(TimelineSelector.Id("Nested"), nodeType.props.getValue("overlappingLegacy").timeline)
         assertEquals(
             listOf(TimelineSelector.Id("Listed")),
             nodeType.props.getValue("overlappingLegacyList").timelines,
         )
-        assertEquals(TimelineSelector.Mapped("Canonical"), nodeType.props.getValue("canonicalExtra").timeline)
+        assertEquals(TimelineSelector.Id("Canonical"), nodeType.props.getValue("canonicalExtra").timeline)
         assertEquals(
             listOf(TimelineSelector.Id("CanonicalList")),
             nodeType.props.getValue("canonicalListExtra").timelines,
@@ -333,8 +375,8 @@ class GraphDocumentParserTest {
         assertEquals(
             listOf(
                 TimelineSelector.Id("ThirdAge"),
-                TimelineSelector.Mapped("CommonEra"),
-                TimelineSelector.Mapped("Third.Age"),
+                TimelineSelector.Id("CommonEra"),
+                TimelineSelector.Id("Third.Age"),
                 TimelineSelector.Id("_Leading"),
             ),
             nodeType.props.getValue("mixed").timelines,
@@ -381,13 +423,16 @@ class GraphDocumentParserTest {
             "/tmp/invalid.md",
         )
 
-        assertTrue(parsed.diagnostics.count { "selector MUST" in it.message } == 5, parsed.diagnostics.joinToString())
+        assertTrue(parsed.diagnostics.count { "mapped selectors were removed" in it.message } == 6, parsed.diagnostics.joinToString())
         val document = parsed.document as NodeTypeDocument
-        assertEquals(emptyList(), document.props.getValue("missing").timelines)
-        assertEquals(emptyList(), document.props.getValue("nonBoolean").timelines)
-        assertEquals(emptyList(), document.props.getValue("deepCanonical").timelines)
-        assertEquals(emptyList(), document.props.getValue("deepLegacy").timelines)
-        assertEquals(listOf(TimelineSelector.Mapped("Other")), document.props.getValue("neighbor").timelines)
+        assertEquals(listOf(TimelineSelector.Id("Missing")), document.props.getValue("missing").timelines)
+        assertEquals(listOf(TimelineSelector.Id("Legacy")), document.props.getValue("nonBoolean").timelines)
+        assertEquals(listOf(TimelineSelector.Id("DeepCanonical")), document.props.getValue("deepCanonical").timelines)
+        assertEquals(listOf(TimelineSelector.Id("DeepLegacy")), document.props.getValue("deepLegacy").timelines)
+        assertEquals(
+            listOf(TimelineSelector.Id("Neighbor"), TimelineSelector.Id("Other")),
+            document.props.getValue("neighbor").timelines,
+        )
     }
 
     @Test
@@ -419,7 +464,7 @@ class GraphDocumentParserTest {
     }
 
     @Test
-    fun `treats empty optional mappings as omitted`() {
+    fun `reports removed empty mappings with its replacement`() {
         val timeline = compiler.parseDocument(
             """
                 ---
@@ -431,7 +476,7 @@ class GraphDocumentParserTest {
             "/tmp/third-age.md",
         )
 
-        assertTrue(timeline.diagnostics.isEmpty(), timeline.diagnostics.joinToString("\n") { it.message })
+        assertTrue(timeline.diagnostics.any { it.message == "Timeline.mappings was removed; use mapsTo" })
         assertTrue((timeline.document as? TimelineDocument)?.mappings?.isEmpty() == true)
     }
 
@@ -455,7 +500,7 @@ class GraphDocumentParserTest {
     }
 
     @Test
-    fun `missing timecode metadata fields are allowed`() {
+    fun `removed timecode metadata reports coordinate replacement`() {
         val timeline = compiler.parseDocument(
             """
                 ---
@@ -468,7 +513,7 @@ class GraphDocumentParserTest {
             "/tmp/common-era.md",
         )
 
-        assertTrue(timeline.diagnostics.isEmpty(), timeline.diagnostics.joinToString("\n") { it.message })
+        assertTrue(timeline.diagnostics.any { it.message == "Timeline.timecode was removed; use coordinate" })
     }
 
     @Test
@@ -502,8 +547,6 @@ class GraphDocumentParserTest {
                         ---
                         id: CommonEra
                         kind: Timeline
-                        timecode:
-                          type: number
                         ---
                     """.trimIndent(),
                     sourcePath = "/tmp/timeline.md",
@@ -559,8 +602,7 @@ class GraphDocumentParserTest {
                           name: Alice
                           birthDate:
                             timeline: CommonEra
-                            value: "AD 2001-04-12"
-                            timecode: 978307200
+                            value: 978307200
                         ---
                         Alice knows @link{}[Bob](bob "friendOf")
                     """.trimIndent(),
@@ -746,6 +788,90 @@ class GraphDocumentParserTest {
         val document = parsed.document as? NodeTypeDocument
         assertNotNull(document)
         assertEquals(PropType.string, document.props.getValue("name").type)
+    }
+
+    @Test
+    fun `parses raw enum values in property schemas`() {
+        val parsed = compiler.parseDocument(
+            """
+                ---
+                id: Choice
+                kind: NodeType
+                props:
+                  value:
+                    type: string
+                    enum:
+                      - alpha
+                      - 1
+                      - true
+                      - null
+                      - [nested]
+                ---
+            """.trimIndent(),
+            "/tmp/choice.md",
+        )
+
+        val schema = (parsed.document as NodeTypeDocument).props.getValue("value")
+        assertEquals(
+            listOf<RawValue>(
+                RawString("alpha"),
+                RawInteger(1),
+                RawBoolean(true),
+                RawNull,
+                RawArray(listOf(RawString("nested"))),
+            ),
+            schema.enumValues,
+        )
+        assertTrue(parsed.diagnostics.none { "Unknown property schema field" in it.message })
+    }
+
+    @Test
+    fun `validates property enum shape and duplicate values`() {
+        val scalar = compiler.parseDocument(
+            """
+                ---
+                id: Scalar
+                kind: NodeType
+                props:
+                  value:
+                    type: string
+                    enum: alpha
+                ---
+            """.trimIndent(),
+            "/tmp/scalar-enum.md",
+        )
+        val empty = compiler.parseDocument(
+            """
+                ---
+                id: Empty
+                kind: NodeType
+                props:
+                  value:
+                    type: string
+                    enum: []
+                ---
+            """.trimIndent(),
+            "/tmp/empty-enum.md",
+        )
+        val duplicate = compiler.parseDocument(
+            """
+                ---
+                id: Duplicate
+                kind: NodeType
+                props:
+                  value:
+                    type: string
+                    enum:
+                      - 1
+                      - 1.0
+                ---
+            """.trimIndent(),
+            "/tmp/duplicate-enum.md",
+        )
+
+        assertTrue(scalar.diagnostics.any { "props.value.enum MUST be a non-empty list" in it.message })
+        assertTrue(empty.diagnostics.any { "props.value.enum MUST be a non-empty list" in it.message })
+        assertTrue(duplicate.diagnostics.any { "props.value.enum values MUST be unique" in it.message })
     }
 
     @Test
@@ -983,7 +1109,7 @@ class GraphDocumentParserTest {
             """.trimIndent(),
             "/tmp/e.md",
         )
-        assertTrue(mappedMissingField.diagnostics.any { "selector MUST be" in it.message })
+        assertTrue(mappedMissingField.diagnostics.any { "mapped selectors were removed" in it.message })
 
         val singleTimelines = compiler.parseDocument(
             """

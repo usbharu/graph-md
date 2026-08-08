@@ -36,8 +36,20 @@ private fun canonicalRawValue(value: RawValue): CanonicalRawValue = when (value)
     is RawBoolean -> CanonicalBoolean(value.value)
     RawNull -> CanonicalNull
     is RawArray -> CanonicalArray(value.values.map(::canonicalRawValue))
-    is RawObject -> CanonicalObject(value.values.mapValues { canonicalRawValue(it.value) })
+    is RawObject -> if (value.values.keys == setOf("timecode")) {
+        canonicalRawValue(value.values.getValue("timecode"))
+    } else {
+        CanonicalObject(value.values.mapValues { canonicalRawValue(it.value) })
+    }
 }
 
 private fun canonicalNumber(value: Double): CanonicalNumber =
     CanonicalNumber(if (value == 0.0) 0.0 else value)
+
+internal fun rawValuesEqual(left: RawValue, right: RawValue): Boolean =
+    canonicalRawValue(left) == canonicalRawValue(right)
+
+internal fun rawValuesAreUnique(values: List<RawValue>): Boolean =
+    values.indices.all { index ->
+        values.subList(0, index).none { rawValuesEqual(it, values[index]) }
+    }

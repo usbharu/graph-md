@@ -41,10 +41,30 @@ data class NormalizedRelType(
 
 data class NormalizedTimeline(
     val id: String,
+    @Deprecated("Use coordinate")
     val timecode: TimecodeSchema?,
+    @Deprecated("Use temporalMappings")
     val mappings: List<TimelineMapping>,
     val props: Map<String, NormalizedValue>,
+    @Deprecated("Timeline inheritance no longer defines temporal semantics")
     val ancestorIds: Set<String>,
+    @Deprecated("Use TemporalEngine")
     val mappedOffsets: Map<String, Double> = emptyMap(),
     val source: SourceInfo,
+    val domainId: String = id,
+    val axisId: String = id,
+    val coordinate: TemporalCoordinateSpec = TemporalCoordinateSpec.Number,
+    val coordinateSystem: TemporalCoordinateSystem = TemporalCoordinateSystem(
+        id = id,
+        axisId = axisId,
+        domainId = domainId,
+        coordinate = coordinate,
+    ),
+    val lineage: AxisLineage? = null,
+    val temporalMappings: List<TemporalMappingInstance> = emptyList(),
+    val axisUnit: TemporalAxisUnit = when (coordinate) {
+        is TemporalCoordinateSpec.Calendar, is TemporalCoordinateSpec.Era -> TemporalAxisUnit.Day
+        is TemporalCoordinateSpec.Frame, is TemporalCoordinateSpec.Timecode -> TemporalAxisUnit.Frame
+        TemporalCoordinateSpec.Number -> TemporalAxisUnit.Tick
+    },
 )

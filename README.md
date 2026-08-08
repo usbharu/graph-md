@@ -18,6 +18,12 @@ This is the suggested way to use Gradle in production projects.
 
 The Gradle build consists of the `core`, `query`, `lsp`, and `cli` subprojects.
 
+## Documentation
+
+- [Timeline guide](docs/timeline-guide.md) explains the temporal model with practical GraphMD examples.
+- [GraphMD specification](docs/spec.md) defines the normative syntax and semantics.
+- [Query module guide](query/README.md) covers search, GMQL, and static indexes.
+
 ## Graph search engine
 
 The `query` Kotlin Multiplatform module turns `GraphCompilationResult` into an
@@ -43,7 +49,7 @@ val result = engine.search(
 )
 ```
 
-The index supports typed property lookup, relation traversal, mapped timelines,
+The index supports typed property lookup, relation traversal, exact temporal mappings,
 Japanese N-grams, identifier terms, BM25 scoring, deterministic JSON sharding,
 and checksum-verified static loading. See [the query module guide](query/README.md)
 for its query and distribution APIs.
@@ -89,9 +95,10 @@ Discovered `.md` files are treated as GraphMD only when their first line is
 
 `--valid-time` is available on every operation. It accepts GraphMD ValidTime
 syntax such as `CommonEra`, `CommonEra(from=10)`, or
-`CommonEra(from=10,to=20)`, and only includes overlapping assertions on that
-Timeline or the ancestor Timelines it `extends`. A Timeline `mapping` alone
-does not make assertions visible. When a Property or Link matches but its
+`CommonEra(from=2020-01-01,to=2026-12-31)`. Numbers, dates, and quoted
+timecodes are parsed using that Timeline's coordinate. Timelines related by
+`sameAxisAs` share one assertion scope; cross-Axis search only follows unique,
+exact, order-preserving `mapsTo` paths. When a Property or Link matches but its
 Document does not, the CLI returns an `assertion-only` entity containing only
 its ID and the matching assertions. A matching Link also exposes out-of-range
 endpoints as `assertion-only` ID references.
@@ -101,9 +108,11 @@ stderr while still reporting validation errors; `stats` retains the warning
 count as an aggregate.
 
 `demo DIR --count N` generates a compact, randomized GraphMD dataset containing
-Nodes, Media, links, properties, NodeType and RelType hierarchies, and Timeline
-hierarchies. The output directory must be new or empty. Counts below eight are
-expanded to the minimum complete eight-document dataset. Omit `--seed` for a
+Nodes, Media, links, properties, NodeType and RelType hierarchies, and a
+feature-complete set of Timeline coordinates, lineages, and mappings. The 18 core
+Timeline roles are shuffled and their parameters are varied by the seed; additional
+Timelines draw from the same feature set. The output directory must be new or empty.
+Counts below 24 are expanded to the minimum complete 24-document dataset. Omit `--seed` for a
 new dataset on each run, or provide an integer seed to reproduce the exact same
 files and relationships. The seed used is always included in command output.
 Documents are generated and written one at a time, so memory use does not grow

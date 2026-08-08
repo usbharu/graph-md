@@ -41,10 +41,7 @@ val query = GraphQuery(
         typeId = NodeTypeId("Person"),
         includeDerivedTypes = true,
     ),
-    temporalWindow = TemporalWindow.At(
-        timelineId = TimelineId("TimelineA"),
-        instant = 150.0,
-    ),
+    temporalWindow = TemporalWindow.At(TimelineId("CommonEra"), TemporalCoordinate.CalendarDate(2026, 1, 1)),
     expression = GraphQueryExpression.And(
         listOf(
             GraphQueryExpression.Property(
@@ -111,17 +108,17 @@ is a structured, temporal member map: compare `person.biography.default`, or
 pass `person.biography` to `FULLTEXT` to search all of its members.
 
 `VALID ANYTIME` may omit a timeline. `AT`, `OVERLAPS`, `CONTAINS`, and `DURING`
-require `VALID ON <timeline>` so numeric bounds are never compared across
-timeline domains implicitly.
+require `VALID ON <timeline>`. Bounds may be numbers or quoted date/timecode
+strings and are parsed using that Timeline's coordinate.
 
 ## Temporal behavior
 
 GraphMD source `validTime.from` and `validTime.to` remain inclusive.
 `TemporalWindow.Range` is explicitly half-open, while
-`TemporalWindow.ClosedRange` has inclusive endpoints. Timeline inheritance
-shares one search assertion scope, while offset mappings only convert timecode
-coordinates onto a comparable canonical axis. A mapping by itself therefore
-does not make an assertion valid on the other Timeline.
+`TemporalWindow.ClosedRange` has inclusive endpoints. `sameAxisAs` Timeline
+representations share an Axis and search assertion scope. Cross-Axis search
+uses only unique, exact, order-preserving `mapsTo` paths; approximate,
+ambiguous, and non-monotonic paths remain available only to conversion APIs.
 
 The internal temporal operators have explicit direction:
 
@@ -157,6 +154,5 @@ all shard names. The bundle stores logical assertions and the physical property,
 relation, interval, and full-text posting lists. Loading validates the format,
 analyzer version, referenced shards, checksum, and assertion references before
 the index can execute.
-Bundles created before assertion scopes distinguished Timeline inheritance from
-offset mappings remain readable, but must be regenerated to receive the new
-matching semantics.
+The current bundle format is v4 and serializes temporal rationals as
+`{numerator, denominator}`. Older bundle versions are rejected and must be regenerated.

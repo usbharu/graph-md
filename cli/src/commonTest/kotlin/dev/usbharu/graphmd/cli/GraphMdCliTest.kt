@@ -136,17 +136,56 @@ class GraphMdCliTest {
 
         assertEquals(0, result.exitCode, result.stderr)
         assertTrue(result.stdout.contains("\"requestedCount\":3"))
-        assertTrue(result.stdout.contains("\"generatedCount\":8"))
+        assertTrue(result.stdout.contains("\"generatedCount\":24"))
         assertTrue(result.stdout.contains("\"seed\":42"))
-        assertEquals(8, fs.contentsUnder("/demo").size)
+        assertEquals(24, fs.contentsUnder("/demo").size)
         val generated = fs.contentsUnder("/demo").values
-        assertTrue(generated.count { "kind: Timeline" in it } >= 2)
+        assertEquals(18, generated.count { "kind: Timeline" in it })
         assertTrue(generated.count { "kind: NodeType" in it } >= 2)
         assertTrue(generated.count { "kind: RelType" in it } >= 2)
         assertTrue(generated.any { "kind: Media" in it })
         assertTrue(generated.any { "@link(" in it })
         assertTrue(generated.any { "この" in it })
         assertTrue(generated.any { "This " in it })
+    }
+
+    @Test
+    fun `demo timelines cover the complete temporal authoring surface`() {
+        val plan = DemoGenerator.plan(requestedCount = 24, requestedSeed = 42)
+        val timelines = plan.documents().filter { it.kind == CliKind.Timeline }.map { it.text }.toList()
+        val generated = timelines.joinToString("\n")
+
+        assertEquals(18, timelines.size)
+        listOf("sameAxisAs:", "scale:", "offset:", "aliases:", "props:", "domain:").forEach {
+            assertTrue(it in generated, "Missing Timeline field: $it")
+        }
+        listOf("gregorian", "julian", "kind: era", "kind: frame", "kind: timecode").forEach {
+            assertTrue(it in generated, "Missing coordinate feature: $it")
+        }
+        listOf("fork", "simulation", "recording", "edit", "resample", "copy", "derived").forEach {
+            val present = if (it == "derived") {
+                Regex("derivedFrom: Timeline_[0-9]+").containsMatchIn(generated)
+            } else {
+                "kind: $it" in generated
+            }
+            assertTrue(present, "Missing lineage kind: $it")
+        }
+        listOf("isomorphism", "alignment", "correspondence", "projection", "embedding", "coercion").forEach {
+            assertTrue("kind: $it" in generated, "Missing Mapping kind: $it")
+        }
+        listOf(
+            "mapsTo: Timeline_",
+            "    id: DemoMap_",
+            "segments:",
+            "pairs:",
+            "approximate",
+            "uncertain",
+            "traits:",
+            "requiredContext:",
+            "provenance:",
+        ).forEach {
+            assertTrue(it in generated, "Missing Mapping feature: $it")
+        }
     }
 
     @Test
@@ -408,19 +447,15 @@ class GraphMdCliTest {
                       count: 2
                       enabled: true
                       happenedAt:
-                        value: Today
-                        timecode: 3
+                        timeline: CommonEra
+                        value: 3
                       items:
                         - alpha
                         - value: beta
                           validTime:
                             - timeline: Branch
-                              from:
-                                value: Open
-                                timecode: 1
-                              to:
-                                value: Close
-                                timecode: 2
+                              from: 1
+                              to: 2
                       label:
                         default: Display name
                         ja: 表示名
@@ -430,14 +465,8 @@ class GraphMdCliTest {
                       nothing:
                       period:
                         timeline: CommonEra
-                        from:
-                          timeline: CommonEra
-                          value: Start
-                          timecode: 1
-                        to:
-                          timeline: CommonEra
-                          value: End
-                          timecode: 2
+                        from: 1
+                        to: 2
                     ---
                     @props{
                       anytime(validTime=CommonEra) = "anytime",
@@ -461,7 +490,7 @@ class GraphMdCliTest {
         assertEquals(0, props.exitCode, props.stderr)
         assertTrue(props.stdout.startsWith("OWNER_ID\tOWNER_VISIBILITY\tNAME\tVALUE\tVALID_TIME\tFALLBACK\n"))
         assertTrue(props.stdout.contains("anytime\tanytime\tCommonEra\tfalse\n"))
-        assertTrue(props.stdout.contains("bounded\tbounded\tCommonEra: 10.0 – 20.0\tfalse\n"))
+        assertTrue(props.stdout.contains("bounded\tbounded\tCommonEra: 10 – 20\tfalse\n"))
         assertTrue(props.stdout.contains("count\t2.0\t-\ttrue\n"))
         assertTrue(props.stdout.contains("enabled\ttrue\t-\ttrue\n"))
         assertTrue(props.stdout.contains("escaped\ta\\\\b\\tc\\nd\t-\ttrue\n"))
@@ -474,9 +503,9 @@ class GraphMdCliTest {
                 tableBlock(
                     """
                     happenedAt→instant {→-→true
-                    →  timeline: null
-                    →  value: Today
-                    →  timecode: 3.0
+                    →  timeline: CommonEra
+                    →  value: null
+                    →  coordinate: 3
                     →}
                     """,
                 ),
@@ -494,7 +523,7 @@ class GraphMdCliTest {
                     →    fallback: true
                     →  [1]:
                     →    value: beta
-                    →    validTime: Branch: Open (1.0) – Close (2.0)
+                    →    validTime: Branch: 1 – 2
                     →    fallback: false
                     →]
                     """,
@@ -537,10 +566,10 @@ class GraphMdCliTest {
                 ),
             ),
         )
-        assertTrue(props.stdout.contains("multiple\tmultiple\tCommonEra, Branch: 1.0 – 2.0\tfalse\n"))
+        assertTrue(props.stdout.contains("multiple\tmultiple\tCommonEra, Branch: 1 – 2\tfalse\n"))
         assertTrue(props.stdout.contains("nothing\tnull\t-\ttrue\n"))
-        assertTrue(props.stdout.contains("openFrom\topen-from\tCommonEra: 10.0 –\tfalse\n"))
-        assertTrue(props.stdout.contains("openTo\topen-to\tBranch: – 20.0\tfalse\n"))
+        assertTrue(props.stdout.contains("openFrom\topen-from\tCommonEra: 10 –\tfalse\n"))
+        assertTrue(props.stdout.contains("openTo\topen-to\tBranch: – 20\tfalse\n"))
         assertTrue(
             shown.stdout.contains(
                 tableBlock(
@@ -550,14 +579,14 @@ class GraphMdCliTest {
                     →  from:
                     →    timePoint {
                     →      timeline: CommonEra
-                    →      value: Start
-                    →      timecode: 1.0
+                    →      value: null
+                    →      coordinate: 1
                     →    }
                     →  to:
                     →    timePoint {
                     →      timeline: CommonEra
-                    →      value: End
-                    →      timecode: 2.0
+                    →      value: null
+                    →      coordinate: 2
                     →    }
                     →}
                     """,
@@ -567,7 +596,7 @@ class GraphMdCliTest {
         assertTrue(props.stdout.contains("plain\tplain\t-\ttrue\n"))
         assertFalse(props.stdout.contains("[{\"timeline\""))
 
-        assertTrue(shown.stdout.contains("bounded\tbounded\tCommonEra: 10.0 – 20.0\tfalse\n"))
+        assertTrue(shown.stdout.contains("bounded\tbounded\tCommonEra: 10 – 20\tfalse\n"))
         assertFalse(shown.stdout.contains("[{\"timeline\""))
 
         assertEquals(0, json.exitCode, json.stderr)
@@ -714,8 +743,8 @@ class GraphMdCliTest {
         val links = temporalCli.run(listOf("links", "alice", "/workspace"))
         val timeless = GraphMdCli(linkFixture()).run(listOf("links", "alice", "/workspace"))
         val header = "TYPE\tFROM\tFROM_VISIBILITY\tTO\tTO_VISIBILITY\tLABEL\tVALID_TIME\tSOURCE\n"
-        val direct = "related\talice\tfull\terin\tfull\tErin\tCommonEra: 12.0 – 18.0\t/workspace/alice.md\n"
-        val inherited = "related\talice\tfull\tbob\tfull\tBob\tCommonEra: 10.0 – 20.0\t/workspace/alice.md\n"
+        val direct = "related\talice\tfull\terin\tfull\tErin\tCommonEra: 12 – 18\t/workspace/alice.md\n"
+        val inherited = "related\talice\tfull\tbob\tfull\tBob\tCommonEra: 10 – 20\t/workspace/alice.md\n"
         val absent = "friend\talice\tfull\tbob\tfull\tBob\t-\t/workspace/alice.md\n"
 
         assertEquals(0, shown.exitCode, shown.stderr)
@@ -801,14 +830,65 @@ class GraphMdCliTest {
         assertTrue(listed.stdout.contains("\"id\":\"alice\""))
         assertTrue(listed.stdout.contains("\"id\":\"erin\""))
         assertFalse(listed.stdout.contains("\"id\":\"carol\""))
-        assertFalse(listed.stdout.contains("\"id\":\"dave\""))
-        assertTrue(listed.stdout.contains("\"id\":\"bob\",\"visibility\":\"assertion-only\""))
+        assertTrue(listed.stdout.contains("\"id\":\"dave\""))
+        assertTrue(listed.stdout.contains("\"id\":\"bob\",\"visibility\":\"full\""))
         assertTrue(listed.stdout.contains("\"id\":\"frank\",\"visibility\":\"assertion-only\""))
         assertTrue(props.stdout.contains("\"value\":\"old\""))
         assertTrue(props.stdout.contains("\"value\":\"new\""))
         assertTrue(links.stdout.contains("\"to\":\"erin\""))
         assertTrue(links.stdout.contains("\"to\":\"bob\""))
-        assertTrue(links.stdout.contains("\"toVisibility\":\"assertion-only\""))
+        assertFalse(links.stdout.contains("\"toVisibility\":\"assertion-only\""))
+    }
+
+    @Test
+    fun `valid time keeps timeless documents nested properties and links visible`() {
+        val fs = FakeFileSystem(
+            files = mapOf(
+                "/workspace/Timeline.md" to timeline("Timeline"),
+                "/workspace/Person.md" to """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    props:
+                      tags:
+                        type: array
+                        items:
+                          type: string
+                    ---
+                """.trimIndent(),
+                "/workspace/related.md" to """
+                    ---
+                    id: related
+                    kind: RelType
+                    ---
+                """.trimIndent(),
+                "/workspace/alice.md" to """
+                    ---
+                    id: alice
+                    kind: Node
+                    type: Person
+                    props:
+                      tags: [timeless]
+                    ---
+                    @link[Bob](bob related)
+                """.trimIndent(),
+                "/workspace/bob.md" to node("bob", "Person"),
+            ),
+        )
+        val cli = GraphMdCli(fs)
+        val validTime = listOf("--valid-time", "Timeline(from=10,to=20)", "--json")
+
+        val listed = cli.run(listOf("list", "/workspace") + validTime)
+        val props = cli.run(listOf("props", "alice", "/workspace") + validTime)
+        val links = cli.run(listOf("links", "alice", "/workspace") + validTime)
+
+        assertEquals(0, listed.exitCode, listed.stderr)
+        assertTrue(listed.stdout.contains("\"id\":\"alice\""))
+        assertFalse(listed.stdout.contains("\"id\":\"alice\",\"visibility\":\"assertion-only\""))
+        assertEquals(0, props.exitCode, props.stderr)
+        assertTrue(props.stdout.contains("\"value\":\"timeless\""))
+        assertEquals(0, links.exitCode, links.stderr)
+        assertTrue(links.stdout.contains("\"to\":\"bob\""))
     }
 
     @Test
@@ -834,7 +914,7 @@ class GraphMdCliTest {
     }
 
     @Test
-    fun `matching property exposes only assertions and id when document is outside valid time`() {
+    fun `matching property is assertion-only while a timeless linked target remains full`() {
         val cli = GraphMdCli(validTimeFixture())
 
         val shown = cli.run(
@@ -856,9 +936,9 @@ class GraphMdCliTest {
         assertTrue(props.stdout.contains("\"ownerId\":\"frank\""))
         assertTrue(props.stdout.contains("\"ownerVisibility\":\"assertion-only\""))
         assertEquals("", props.stderr)
-        assertTrue(linkedTarget.stdout.contains("\"visibility\":\"assertion-only\""))
+        assertTrue(linkedTarget.stdout.contains("\"visibility\":\"full\""))
         assertTrue(linkedTarget.stdout.contains("\"incomingLinks\""))
-        assertFalse(linkedTarget.stdout.contains("\"type\":\"Person\""))
+        assertTrue(linkedTarget.stdout.contains("\"type\":\"Person\""))
     }
 
     @Test
@@ -869,16 +949,12 @@ class GraphMdCliTest {
                     ---
                     id: TimelineA
                     kind: Timeline
-                    timecode:
-                      type: number
                     ---
                 """.trimIndent(),
                 "/workspace/TimelineB.md" to """
                     ---
                     id: TimelineB
                     kind: Timeline
-                    timecode:
-                      type: number
                     ---
                 """.trimIndent(),
                 "/workspace/SampleType.md" to """
@@ -935,14 +1011,64 @@ class GraphMdCliTest {
         val invalid = cli.run(
             listOf("list", "/workspace", "--valid-time", "CommonEra(from=20,to=10)", "--json"),
         )
+        val scientific = cli.run(
+            listOf("list", "/workspace", "--valid-time", "CommonEra(from=1e1,to=2E1)", "--json"),
+        )
+        val reversedScientific = cli.run(
+            listOf("list", "/workspace", "--valid-time", "CommonEra(from=2e1,to=1E1)", "--json"),
+        )
         val unknown = cli.run(
             listOf("list", "/workspace", "--valid-time", "Missing(from=1)", "--json"),
         )
 
         assertEquals(2, invalid.exitCode)
         assertTrue(invalid.stderr.contains("from must not exceed to"))
+        assertEquals(0, scientific.exitCode, scientific.stderr)
+        assertTrue(scientific.stdout.contains("\"id\":\"alice\""))
+        assertEquals(2, reversedScientific.exitCode)
+        assertTrue(reversedScientific.stderr.contains("from must not exceed to"))
         assertEquals(1, unknown.exitCode)
         assertTrue(unknown.stderr.contains("Unknown Timeline"))
+    }
+
+    @Test
+    fun `valid time parses calendar boundaries and rejects reversed dates`() {
+        val fs = FakeFileSystem(
+            files = mapOf(
+                "/workspace/CommonEra.md" to """
+                    ---
+                    id: CommonEra
+                    kind: Timeline
+                    coordinate: gregorian
+                    ---
+                """.trimIndent(),
+                "/workspace/Person.md" to nodeType("Person"),
+                "/workspace/alice.md" to """
+                    ---
+                    id: alice
+                    kind: Node
+                    type: Person
+                    validTime:
+                      - timeline: CommonEra
+                        from: 2026-01-01
+                        to: 2026-12-31
+                    ---
+                """.trimIndent(),
+            ),
+        )
+        val cli = GraphMdCli(fs)
+
+        val matching = cli.run(
+            listOf("list", "/workspace", "--valid-time", "CommonEra(from=2026-06-01,to=2026-06-30)", "--json"),
+        )
+        val reversed = cli.run(
+            listOf("list", "/workspace", "--valid-time", "CommonEra(from=2027-01-01,to=2026-01-01)", "--json"),
+        )
+
+        assertEquals(0, matching.exitCode, matching.stderr)
+        assertTrue(matching.stdout.contains("\"id\":\"alice\""))
+        assertEquals(2, reversed.exitCode)
+        assertTrue(reversed.stderr.contains("from must not exceed to"))
     }
 
     @Test
@@ -983,15 +1109,13 @@ class GraphMdCliTest {
     }
 
     @Test
-    fun `lint with valid time only reports visible documents`() {
+    fun `lint with valid time includes timeless documents`() {
         val fs = FakeFileSystem(
             files = mapOf(
                 "/workspace/Timeline.md" to """
                     ---
                     id: CommonEra
                     kind: Timeline
-                    timecode:
-                      type: number
                     ---
                 """.trimIndent(),
                 "/workspace/Person.md" to nodeType("Person"),
@@ -1014,9 +1138,9 @@ class GraphMdCliTest {
             listOf("lint", "/workspace", "--valid-time", "CommonEra(from=1,to=2)", "--json"),
         )
 
-        assertEquals(0, result.exitCode)
+        assertEquals(1, result.exitCode)
         assertTrue(result.stdout.contains("Unknown property unexpected"))
-        assertFalse(result.stdout.contains("Unknown NodeType"))
+        assertTrue(result.stdout.contains("Unknown NodeType"))
     }
 
     @Test
@@ -1193,11 +1317,12 @@ class GraphMdCliTest {
                 ---
                 id: CommonEra
                 kind: Timeline
-                timecode:
-                  type: number
-                mappings:
-                  - kind: offset
-                    to: ProjectEra
+                mapsTo:
+                  - timeline: ProjectEra
+                    kind: alignment
+                    precision:
+                      kind: approximate
+                      error: 1
                     offset: 100
                 ---
             """.trimIndent(),
@@ -1205,17 +1330,13 @@ class GraphMdCliTest {
                 ---
                 id: ProjectEra
                 kind: Timeline
-                timecode:
-                  type: number
                 ---
             """.trimIndent(),
             "/workspace/Branch.md" to """
                 ---
                 id: Branch
                 kind: Timeline
-                extends: [CommonEra]
-                timecode:
-                  type: number
+                sameAxisAs: CommonEra
                 ---
             """.trimIndent(),
             "/workspace/related.md" to """
@@ -1231,10 +1352,8 @@ class GraphMdCliTest {
                 type: Person
                 validTime:
                   - timeline: CommonEra
-                    from:
-                      timecode: 10
-                    to:
-                      timecode: 20
+                    from: 10
+                    to: 20
                 ---
                 @props{
                   name(validTime=CommonEra(from=10,to=14)) = "old",
@@ -1251,10 +1370,8 @@ class GraphMdCliTest {
                 type: Person
                 validTime:
                   - timeline: ProjectEra
-                    from:
-                      timecode: 110
-                    to:
-                      timecode: 120
+                    from: 110
+                    to: 120
                 ---
             """.trimIndent(),
             "/workspace/dave.md" to """
@@ -1264,10 +1381,8 @@ class GraphMdCliTest {
                 type: Person
                 validTime:
                   - timeline: Branch
-                    from:
-                      timecode: 10
-                    to:
-                      timecode: 20
+                    from: 10
+                    to: 20
                 ---
             """.trimIndent(),
             "/workspace/erin.md" to """
@@ -1277,10 +1392,8 @@ class GraphMdCliTest {
                 type: Person
                 validTime:
                   - timeline: CommonEra
-                    from:
-                      timecode: 10
-                    to:
-                      timecode: 20
+                    from: 10
+                    to: 20
                 ---
             """.trimIndent(),
             "/workspace/frank.md" to """
@@ -1307,8 +1420,6 @@ class GraphMdCliTest {
         ---
         id: $id
         kind: Timeline
-        timecode:
-          type: number
         ---
     """.trimIndent()
 
@@ -1396,6 +1507,6 @@ private class FakeFileSystem(
         return mutableFiles.entries
             .filter { it.key.startsWith(prefix) }
             .sortedBy { it.key }
-            .associateTo(linkedMapOf()) { it.key to it.value }
+            .associateTo(linkedMapOf()) { it.toPair() }
     }
 }

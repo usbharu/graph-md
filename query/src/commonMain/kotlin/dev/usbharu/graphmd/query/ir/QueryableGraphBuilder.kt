@@ -302,8 +302,8 @@ class QueryableGraphBuilder(
         intervalSet.isUniversal -> "*"
         else -> intervalSet.intervals.joinToString("|") {
             "${escape(it.timelineId.value)}:" +
-                "${it.start?.value ?: "*"}:${it.start?.inclusive ?: false}:" +
-                "${it.end?.value ?: "*"}:${it.end?.inclusive ?: false}"
+                "${it.start?.exactValue ?: "*"}:${it.start?.inclusive ?: false}:" +
+                "${it.end?.exactValue ?: "*"}:${it.end?.inclusive ?: false}"
         }
     }
 
@@ -320,7 +320,7 @@ class QueryableGraphBuilder(
         is ObjectValue -> "o:{${value.members.entries.sortedBy { it.key }.joinToString(",") {
             "${escape(it.key)}=${valueSignature(it.value.value)}"
         }}}"
-        is InstantValue -> "instant:${escape(value.timeline.orEmpty())}:${value.timecode}"
+        is InstantValue -> "instant:${escape(value.timeline.orEmpty())}:${value.coordinate}"
         is DurationValue -> "duration:${escape(value.timeline.orEmpty())}:${value.from}:${value.to}"
     }
 
