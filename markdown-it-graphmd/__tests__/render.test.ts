@@ -264,6 +264,29 @@ describe("embed blocks", () => {
     expect(html).toContain("bad &lt;query&gt;");
     expect(html).toContain("fallback");
   });
+
+  it("resolves again when a cached token stream is rendered", () => {
+    let resolution: ReturnType<NonNullable<GraphMdOptions["embedResolver"]>> = { status: "pending" };
+    const md = new MarkdownIt();
+    md.use(graphMdPlugin, { embedResolver: () => resolution });
+    const env = {};
+    const tokens = md.parse('::: embed:query="MATCH (n) RETURN n"\nfallback\n:::\n', env);
+
+    expect(md.renderer.render(tokens, md.options, env)).toContain("fallback");
+
+    resolution = {
+      status: "ready",
+      table: {
+        columns: [{ name: "id", type: "string" }],
+        rows: [{ cells: [{ text: "alice" }] }],
+      },
+    };
+    const refreshed = md.renderer.render(tokens, md.options, env);
+
+    expect(refreshed).toContain('data-embed-kind="query"');
+    expect(refreshed).toContain("alice");
+    expect(refreshed).not.toContain("fallback");
+  });
 });
 
 describe("named body blocks", () => {

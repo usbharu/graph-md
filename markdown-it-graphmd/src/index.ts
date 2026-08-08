@@ -2,6 +2,7 @@ import type MarkdownIt from "markdown-it";
 import {
   bodyBlockRule,
   renderBodyBlockBoundary,
+  renderEmbedBlock,
   renderEmbedTable,
   type EmbedResolver,
   type EmbedResolution,
@@ -34,7 +35,6 @@ export type { EmbedParts } from "./core-bindings";
  * - `@props{ ... }`                                       -> visible bound property values
  */
 export function graphMdPlugin(md: MarkdownIt, options: GraphMdOptions = {}): void {
-  (md as any).__graphmdEmbedResolver = options.embedResolver;
   md.inline.ruler.push("graphmd_relation", relationInlineRule);
   md.inline.ruler.push("graphmd_props_inline", propsInlineRule);
   md.block.ruler.before(
@@ -50,6 +50,8 @@ export function graphMdPlugin(md: MarkdownIt, options: GraphMdOptions = {}): voi
   md.renderer.rules["graphmd_props_inline"] = renderPropsInline;
   md.renderer.rules["graphmd_body_block_open"] = renderBodyBlockBoundary;
   md.renderer.rules["graphmd_body_block_close"] = renderBodyBlockBoundary;
+  md.renderer.rules["graphmd_embed_block"] = (tokens, idx, _renderOptions, env) =>
+    renderEmbedBlock(tokens, idx, md, options.embedResolver, options.hrefTransform, env);
   md.renderer.rules["graphmd_embed_table"] = (tokens, idx, _renderOptions, env) =>
     renderEmbedTable(tokens, idx, options.hrefTransform, env);
 }

@@ -51,25 +51,29 @@ export function bodyBlockRule(state: any, startLine: number, endLine: number, si
 
   const { opening, closeLine } = block;
   const embed = parseEmbedHeader(opening.header);
-  const resolution = embed === null
-    ? undefined
-    : (state.md.__graphmdEmbedResolver as EmbedResolver | undefined)?.(embed, state.env);
+  if (embed !== null) {
+    const token = state.push("graphmd_embed_block", "", 0);
+    token.block = true;
+    token.map = [startLine, closeLine + 1];
+    token.markup = ":".repeat(opening.fenceLength);
+    token.meta = {
+      directive: embed,
+      fallbackSource: state.getLines(startLine + 1, closeLine, 0, false),
+    };
+    state.line = closeLine + 1;
+    return true;
+  }
+
   const openToken = state.push("graphmd_body_block_open", "", 1);
   openToken.block = true;
   openToken.map = [startLine, closeLine + 1];
   openToken.markup = ":".repeat(opening.fenceLength);
-  openToken.meta = { header: opening.header, fenceLength: opening.fenceLength, embed, resolution };
+  openToken.meta = { header: opening.header, fenceLength: opening.fenceLength };
 
   const previousParent = state.parentType;
   state.parentType = "graphmd_block";
   try {
-    if (resolution?.status === "ready") {
-      const table = state.push("graphmd_embed_table", "", 0);
-      table.block = true;
-      table.meta = { directive: embed, table: resolution.table };
-    } else {
-      state.md.block.tokenize(state, startLine + 1, closeLine);
-    }
+    state.md.block.tokenize(state, startLine + 1, closeLine);
   } finally {
     state.parentType = previousParent;
   }
@@ -81,10 +85,34 @@ export function bodyBlockRule(state: any, startLine: number, endLine: number, si
   return true;
 }
 
-export function renderBodyBlockBoundary(tokens?: any[], idx?: number): string {
-  const resolution = tokens?.[idx ?? 0]?.meta?.resolution as EmbedResolution | undefined;
-  if (resolution?.status !== "error") return "";
-  return `<div class="graphmd-embed-error" role="alert">${escapeHtml(resolution.message)}</div>`;
+export function renderBodyBlockBoundary(): string {
+  return "";
+}
+
+export function renderEmbedBlock(
+  tokens: any[],
+  idx: number,
+  md: any,
+  resolver?: EmbedResolver,
+  hrefTransform?: (target: string, relType: string, env?: unknown) => string | null,
+  env?: unknown,
+): string {
+  const meta = tokens[idx].meta as { directive: EmbedParts; fallbackSource: string };
+  // Resolve during rendering, not tokenization. VS Code caches markdown-it's
+  // token stream for an unchanged document, so a tokenization-time `pending`
+  // result would otherwise remain pending after the async request completes.
+  const resolution = resolver?.(meta.directive, env);
+  if (resolution?.status === "ready") {
+    return renderEmbedTable(
+      [{ meta: { directive: meta.directive, table: resolution.table } }],
+      0,
+      hrefTransform,
+      env,
+    );
+  }
+  const fallback = md.render(meta.fallbackSource, env);
+  if (resolution?.status !== "error") return fallback;
+  return `<div class="graphmd-embed-error" role="alert">${escapeHtml(resolution.message)}</div>${fallback}`;
 }
 
 export function renderEmbedTable(
