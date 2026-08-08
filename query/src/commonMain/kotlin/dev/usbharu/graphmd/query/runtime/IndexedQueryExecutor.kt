@@ -33,12 +33,13 @@ private class IndexedQueryDataSource(
     private val propertyById = graph.propertyAssertions.associateBy { it.id }
     private val relationById = graph.relationAssertions.associateBy { it.id }
     private val textById = graph.textAssertions.associateBy { it.id }
+    private val expansionWindow = query.expansionWindow?.let(graph.timelineCatalog::expansionWindow)
     private val temporalCandidates: Set<AssertionId>? = query.temporalWindow?.let { window ->
         if (window.timelineId !in graph.timelineCatalog) {
             emptySet()
         } else {
             index.intervalIndex.candidates(
-                window.toIntervalSet(graph.timelineCatalog),
+                window.toIntervalSet(graph.timelineCatalog, expansionWindow),
                 query.temporalOperator,
             )
         }

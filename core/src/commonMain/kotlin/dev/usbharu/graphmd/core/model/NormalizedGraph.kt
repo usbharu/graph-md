@@ -63,7 +63,8 @@ data class NormalizedTimeline(
     val lineage: AxisLineage? = null,
     val temporalMappings: List<TemporalMappingInstance> = emptyList(),
     val axisUnit: TemporalAxisUnit = when (coordinate) {
-        is TemporalCoordinateSpec.Calendar, is TemporalCoordinateSpec.Era -> TemporalAxisUnit.Day
+        is TemporalCoordinateSpec.Calendar, is TemporalCoordinateSpec.CalendarPattern,
+        is TemporalCoordinateSpec.Era -> TemporalAxisUnit.Day
         is TemporalCoordinateSpec.Frame, is TemporalCoordinateSpec.Timecode -> TemporalAxisUnit.Frame
         TemporalCoordinateSpec.Number -> TemporalAxisUnit.Tick
     },

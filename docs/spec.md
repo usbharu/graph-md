@@ -627,6 +627,38 @@ coordinate:
 
 calendar値は`YYYY-MM-DD`形式で記述し、存在しない月日や、0年を持たないnumberingでの0年はエラーとする。GregorianとJulianは`sameAxisAs`を使い、同じday Axis上の異なる表記として使用できる。
 
+部分日付、粒度付き期間、周期日付には`calendar-pattern`を使用する。これは表記ごとのpresetではなく、使用するcalendar fieldと自然粒度、必要なら周期を宣言するCoordinateSystemである。
+
+```yaml
+coordinate:
+  kind: calendar-pattern
+  calendar: gregorian
+  numbering: common-era
+  fields: [month, day]
+  granularity: day
+  repeatsEvery: year
+```
+
+初期fieldは`year`、`month`、`day`、`quarter`、`weekYear`、`week`である。`granularity`を省略した場合は最下位fieldから推論する。`year`または`weekYear`を省略する宣言は`repeatsEvery: year`を必要とし、年を含む宣言と`repeatsEvery`は同時に指定できない。`day`は`month`を必要とし、ISO週fieldはGregorianでのみ使用できる。不正な組み合わせ、重複field、値域外の値はSchemaErrorとする。
+
+標準表記はfield定義から生成され、例として`08-08`、`2026-08`、`2026`、`2026-Q3`、`2020-W53`となる。任意の`format`で表記を上書きできる。
+
+```yaml
+coordinate:
+  kind: calendar-pattern
+  fields: [month, day]
+  repeatsEvery: year
+  format: "{day:02}/{month:02}"
+```
+
+`format`は宣言fieldをそれぞれ一度だけ参照しなければならない。`{field}`または`{field:width}`を使用し、parseと表示の両方に適用する。
+
+`year/month/day`が揃う値はinstant、それより細かいfieldを省略した値は自然期間、上位fieldを省略して`repeatsEvery`を持つ値は周期集合になる。自然期間と周期の各occurrenceは半開区間`[start, end)`へ正規化する。patternを`validTime`の片方の境界だけに記述した場合は、その値の自然期間を意味する。両境界を記述した場合は各周期内の範囲になり、年末をまたいでもよい。
+
+周期展開には有限の半開探索窓を必須とし、1回の窓は最大10,000 calendar yearsとする。
+
+四半期は`quarterStartMonth`（1から12、既定1）と`quarterYearLabel: start | end`（既定`start`）を指定できる。ISO週は月曜日開始とし、`weekYear`は暦年ではなくISO週年を表す。`02-29`は該当calendarで実在する年だけに展開し、`02-28`や`03-01`へ丸めない。
+
 `frame`は整数のFrameIndexを表し、`start`で表示上の開始番号を変更できる。
 
 ```yaml

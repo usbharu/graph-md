@@ -459,6 +459,16 @@ private fun rawTimePoint(point: TimePoint): RawValue = when (val coordinate = po
         RawString(coordinate.value.toString())
     }
     is TemporalCoordinate.CalendarDate -> RawString("${coordinate.year}-${coordinate.month.toString().padStart(2, '0')}-${coordinate.day.toString().padStart(2, '0')}")
+    is TemporalCoordinate.CalendarPattern -> RawString(
+        coordinate.fields.entries.sortedBy { it.key.ordinal }.joinToString("-") { (field, value) ->
+            when (field) {
+                CalendarField.Year, CalendarField.WeekYear -> value.toString().padStart(4, '0')
+                CalendarField.Month, CalendarField.Day -> value.toString().padStart(2, '0')
+                CalendarField.Quarter -> "Q$value"
+                CalendarField.Week -> "W${value.toString().padStart(2, '0')}"
+            }
+        },
+    )
     is TemporalCoordinate.EraDate -> RawString("${coordinate.era}-${coordinate.year}-${coordinate.month.toString().padStart(2, '0')}-${coordinate.day.toString().padStart(2, '0')}")
     is TemporalCoordinate.FrameIndex -> RawInteger(coordinate.value)
     is TemporalCoordinate.Timecode -> RawString(

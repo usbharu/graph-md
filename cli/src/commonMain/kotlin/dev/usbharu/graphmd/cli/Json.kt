@@ -149,6 +149,7 @@ internal fun TemporalCoordinate.toJson(): JsonValue = when (this) {
     is TemporalCoordinate.CalendarDate -> jsonString(
         "${year.toString().padStart(4, '0')}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}",
     )
+    is TemporalCoordinate.CalendarPattern -> jsonString(calendarPatternText(fields))
     is TemporalCoordinate.EraDate -> jsonString(
         "$era $year-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}",
     )
@@ -264,6 +265,16 @@ internal fun TemporalCoordinateSpec.toJson(): JsonValue = when (this) {
         "kind" to jsonString("calendar"),
         "calendar" to jsonString(calendar.name.lowercase()),
     )
+    is TemporalCoordinateSpec.CalendarPattern -> jsonObject(
+        "kind" to jsonString("calendar-pattern"),
+        "calendar" to jsonString(calendar.name.lowercase()),
+        "fields" to jsonArray(fields.map { jsonString(it.name.replaceFirstChar(Char::lowercase)) }),
+        "granularity" to jsonString(granularity.name.lowercase()),
+        "repeatsEvery" to (repeatsEvery?.let { jsonString(it.name.lowercase()) } ?: JsonValue.Null),
+        "format" to (format?.let(::jsonString) ?: JsonValue.Null),
+        "quarterStartMonth" to jsonNumber(quarterStartMonth),
+        "quarterYearLabel" to jsonString(quarterYearLabel.name.lowercase()),
+    )
     is TemporalCoordinateSpec.Frame -> jsonObject("kind" to jsonString("frame"), "start" to jsonNumber(start))
     is TemporalCoordinateSpec.Timecode -> jsonObject(
         "kind" to jsonString("timecode"),
@@ -277,6 +288,16 @@ internal fun TemporalCoordinateSpec.toJson(): JsonValue = when (this) {
         "periods" to jsonArray(periods.map { jsonString(it.name) }),
     )
 }
+
+private fun calendarPatternText(fields: Map<CalendarField, Long>): String =
+    fields.entries.sortedBy { it.key.ordinal }.joinToString("-") { (field, value) ->
+        when (field) {
+            CalendarField.Year, CalendarField.WeekYear -> value.toString().padStart(4, '0')
+            CalendarField.Month, CalendarField.Day -> value.toString().padStart(2, '0')
+            CalendarField.Quarter -> "Q$value"
+            CalendarField.Week -> "W${value.toString().padStart(2, '0')}"
+        }
+    }
 
 internal fun AxisLineage.toJson(): JsonValue = jsonObject(
     "sourceAxis" to jsonString(sourceAxisId),

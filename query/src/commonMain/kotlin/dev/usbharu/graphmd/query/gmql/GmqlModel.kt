@@ -135,6 +135,7 @@ internal data class GmqlValid(
     val operator: GmqlValidOperator,
     val instant: GmqlExpression? = null,
     val interval: GmqlIntervalExpression? = null,
+    val expansionWindow: GmqlIntervalExpression? = null,
     val range: GmqlSourceRange,
 )
 

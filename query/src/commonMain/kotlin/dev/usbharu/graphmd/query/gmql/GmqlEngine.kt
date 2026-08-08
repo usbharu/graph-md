@@ -67,14 +67,31 @@ internal class GmqlCompiler(private val graph: QueryableGraph) {
                 }
             }
             valid.instant?.let {
-                if (!checker.typeOf(it).isNumeric()) diagnostics += diagnostic(
-                    "GMQL3002", "VALID AT requires a numeric instant.", it.range, GmqlDiagnosticKind.TYPE,
+                if (!checker.typeOf(it).isTemporalBoundary()) diagnostics += diagnostic(
+                    "GMQL3002", "VALID AT requires a numeric or string temporal value.", it.range, GmqlDiagnosticKind.TYPE,
                 )
             }
             valid.interval?.let { interval ->
                 listOfNotNull(interval.start, interval.end).forEach {
-                    if (!checker.typeOf(it).isNumeric()) diagnostics += diagnostic(
-                        "GMQL3002", "Interval bounds must be numeric.", it.range, GmqlDiagnosticKind.TYPE,
+                    if (!checker.typeOf(it).isTemporalBoundary()) diagnostics += diagnostic(
+                        "GMQL3002", "Interval bounds must be numeric or string temporal values.", it.range, GmqlDiagnosticKind.TYPE,
+                    )
+                }
+            }
+            valid.expansionWindow?.let { interval ->
+                if (valid.timeline == null) diagnostics += diagnostic(
+                    "GMQL4001", "WITHIN requires ON Timeline.", valid.range, GmqlDiagnosticKind.TEMPORAL,
+                )
+                if (interval.start == null || interval.end == null || !interval.includeStart || interval.includeEnd) {
+                    diagnostics += diagnostic(
+                        "GMQL4005", "WITHIN must be a finite half-open interval [start, end).",
+                        valid.range,
+                        GmqlDiagnosticKind.TEMPORAL,
+                    )
+                }
+                listOfNotNull(interval.start, interval.end).forEach {
+                    if (checker.typeOf(it).unwrapTemporal() != GmqlType.String) diagnostics += diagnostic(
+                        "GMQL3002", "WITHIN bounds must be complete date strings.", it.range, GmqlDiagnosticKind.TYPE,
                     )
                 }
             }
@@ -399,6 +416,7 @@ internal class GmqlExecutor(
             .map(::TemporalInterval),
     )
     private lateinit var expressionTypes: Map<GmqlExpression, GmqlType>
+    private var expansionWindow: TemporalExpansionWindow? = null
     private var operations = 0L
 
     fun execute(query: GmqlCompiledQuery, parameters: Map<String, GmqlValue>): GmqlQueryResult {
@@ -428,6 +446,20 @@ internal class GmqlExecutor(
     }
 
     private fun executeChecked(query: GmqlCompiledQuery, parameters: Map<String, GmqlValue>): GmqlQueryResult {
+        expansionWindow = resolveExpansionWindow(query.ast.valid, parameters)
+        val queryUsesRecurrence = query.ast.valid?.timeline
+            ?.let(::TimelineId)
+            ?.let(graph.timelineCatalog::requiresExpansion) == true
+        if ((graph.hasDeferredValidity() || queryUsesRecurrence) && expansionWindow == null) {
+            throw GmqlEvaluationException(
+                diagnostic(
+                    "GMQL4004",
+                    "Recurring calendar-pattern validity requires WITHIN [start, end).",
+                    query.ast.valid?.range,
+                    GmqlDiagnosticKind.TEMPORAL,
+                ),
+            )
+        }
         var bindings = listOf(RuntimeBinding(emptyMap(), IntervalSet.universal()))
         query.ast.patterns.forEach { pattern ->
             bindings = bindings.flatMap { matchPattern(pattern, it) }
@@ -603,14 +635,14 @@ internal class GmqlExecutor(
             .mapNotNull { assertion ->
                 tick()
                 if (assertion.owner != owner || assertion.path != path) return@mapNotNull null
-                val time = binding.validity intersect assertion.validTime
+                val time = binding.validity intersect materialize(assertion.validTime)
                 if (time.isEmpty) null else GmqlValue.TemporalEntry(assertion.value.toGmqlValue(), time)
             }.toList()
         if (entries.isNotEmpty()) return Eval(GmqlValue.TemporalValue(entries), entries.unionTime())
         val pseudoEntries = graph.textAssertions.asSequence()
             .filter { it.owner == owner && it.matchesPseudoField(path) }
             .mapNotNull { assertion ->
-                val time = binding.validity intersect assertion.validTime
+                val time = binding.validity intersect materialize(assertion.validTime)
                 if (time.isEmpty) null else GmqlValue.TemporalEntry(GmqlValue.StringValue(assertion.text), time)
             }.toList()
         return if (pseudoEntries.isEmpty()) Eval(GmqlValue.NullValue, IntervalSet.empty(), missing = true)
@@ -809,7 +841,7 @@ internal class GmqlExecutor(
                 tick()
                 val assertionScore = textQueryScore(assertion.text, query)
                 if (assertionScore > 0) {
-                    val overlap = binding.validity intersect assertion.validTime
+                    val overlap = binding.validity intersect materialize(assertion.validTime)
                     if (!overlap.isEmpty) {
                         time = time union overlap
                         score = maxOf(score, assertionScore)
@@ -847,7 +879,7 @@ internal class GmqlExecutor(
                     evaluate(expression, binding, parameters),
                     expression.range,
                 )
-                graph.timelineCatalog.searchIntervals(timeline, instant to true, instant to true)
+                graph.timelineCatalog.searchIntervals(timeline, instant to true, instant to true, expansionWindow)
             }
             else -> {
                 val interval = checkNotNull(valid.interval)
@@ -857,7 +889,7 @@ internal class GmqlExecutor(
                 val end = interval.end?.let {
                     temporalBoundary(timeline, evaluate(it, binding, parameters), it.range) to interval.includeEnd
                 }
-                graph.timelineCatalog.searchIntervals(timeline, start, end)
+                graph.timelineCatalog.searchIntervals(timeline, start, end, expansionWindow)
             }
         }
         val windowAxes = window.intervals.mapTo(hashSetOf()) { it.timelineId }
@@ -899,6 +931,43 @@ internal class GmqlExecutor(
                 ),
             )
         }
+    }
+
+    private fun resolveExpansionWindow(
+        valid: GmqlValid?,
+        parameters: Map<String, GmqlValue>,
+    ): TemporalExpansionWindow? {
+        val interval = valid?.expansionWindow ?: return null
+        val timeline = TimelineId(valid.timeline ?: return null)
+        fun date(expression: GmqlExpression?): TemporalCoordinate.CalendarDate {
+            val value = expression?.let { evaluate(it, RuntimeBinding.EMPTY, parameters).value }
+            val text = (value as? GmqlValue.StringValue)?.value
+                ?: throw GmqlEvaluationException(
+                    diagnostic("GMQL4005", "WITHIN bounds must be complete date strings.", expression?.range, GmqlDiagnosticKind.TEMPORAL),
+                )
+            val match = Regex("""^([+-]?\d+)-(\d{1,2})-(\d{1,2})$""").matchEntire(text)
+                ?: throw GmqlEvaluationException(
+                    diagnostic("GMQL4005", "WITHIN bounds must use YYYY-MM-DD.", expression.range, GmqlDiagnosticKind.TEMPORAL),
+                )
+            return TemporalCoordinate.CalendarDate(
+                match.groupValues[1].toLong(),
+                match.groupValues[2].toInt(),
+                match.groupValues[3].toInt(),
+            )
+        }
+        return graph.timelineCatalog.expansionWindow(
+            CalendarExpansionWindow(timeline, date(interval.start), date(interval.end)),
+        ) ?: throw GmqlEvaluationException(
+            diagnostic("GMQL4005", "WITHIN is not valid for Timeline '${timeline.value}'.", valid.range, GmqlDiagnosticKind.TEMPORAL),
+        )
+    }
+
+    private fun materialize(value: IntervalSet): IntervalSet =
+        graph.timelineCatalog.materialize(value, expansionWindow)
+
+    private fun join(binding: RuntimeBinding, time: IntervalSet): RuntimeBinding? {
+        val joined = materialize(binding.validity) intersect materialize(time)
+        return joined.takeUnless { it.isEmpty }?.let { binding.copy(validity = it) }
     }
 
     private fun tick() {
@@ -1105,6 +1174,16 @@ private fun TemporalCoordinate.toGmqlValue(): GmqlValue = when (this) {
     is TemporalCoordinate.CalendarDate -> GmqlValue.StringValue(
         "$year-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}",
     )
+    is TemporalCoordinate.CalendarPattern -> GmqlValue.StringValue(
+        fields.entries.sortedBy { it.key.ordinal }.joinToString("-") { (field, fieldValue) ->
+            when (field) {
+                CalendarField.Year, CalendarField.WeekYear -> fieldValue.toString().padStart(4, '0')
+                CalendarField.Month, CalendarField.Day -> fieldValue.toString().padStart(2, '0')
+                CalendarField.Quarter -> "Q$fieldValue"
+                CalendarField.Week -> "W${fieldValue.toString().padStart(2, '0')}"
+            }
+        },
+    )
     is TemporalCoordinate.EraDate -> GmqlValue.StringValue(
         "$era $year-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}",
     )
@@ -1119,8 +1198,15 @@ private fun TemporalCoordinate.toGmqlValue(): GmqlValue = when (this) {
 private fun List<GmqlValue.TemporalEntry>.unionTime(): IntervalSet =
     fold(IntervalSet.empty()) { result, entry -> result union entry.validTime }
 
+private fun QueryableGraph.hasDeferredValidity(): Boolean =
+    nodes.any { it.validTime.deferred != null } ||
+        propertyAssertions.any { it.validTime.deferred != null } ||
+        relationAssertions.any { it.validTime.deferred != null } ||
+        textAssertions.any { it.validTime.deferred != null }
+
 private fun GmqlType.unwrapTemporal(): GmqlType = if (this is GmqlType.Temporal) valueType else this
 private fun GmqlType.isNumeric() = unwrapTemporal() == GmqlType.Integer || unwrapTemporal() == GmqlType.Decimal
+private fun GmqlType.isTemporalBoundary() = isNumeric() || unwrapTemporal() == GmqlType.String
 private fun GmqlType.isOrderable() =
     this == GmqlType.String || this == GmqlType.Integer || this == GmqlType.Decimal || this == GmqlType.Boolean
 private fun GmqlType.assignableTo(target: GmqlType) =

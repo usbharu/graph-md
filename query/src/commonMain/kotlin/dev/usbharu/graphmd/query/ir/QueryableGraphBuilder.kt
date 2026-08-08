@@ -300,6 +300,7 @@ class QueryableGraphBuilder(
 
     private fun intervalSignature(intervalSet: IntervalSet): String = when {
         intervalSet.isUniversal -> "*"
+        intervalSet.deferred != null -> "deferred:${intervalSet.deferred}"
         else -> intervalSet.intervals.joinToString("|") {
             "${escape(it.timelineId.value)}:" +
                 "${it.start?.exactValue ?: "*"}:${it.start?.inclusive ?: false}:" +

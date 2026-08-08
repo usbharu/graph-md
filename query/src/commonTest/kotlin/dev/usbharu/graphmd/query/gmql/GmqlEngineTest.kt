@@ -1,7 +1,7 @@
 package dev.usbharu.graphmd.query.gmql
 
 import dev.usbharu.graphmd.core.GraphCompiler
-import dev.usbharu.graphmd.core.model.SourceDocument
+import dev.usbharu.graphmd.core.model.*
 import dev.usbharu.graphmd.query.GraphSearchEngine
 import dev.usbharu.graphmd.query.ir.AssertionOwner
 import dev.usbharu.graphmd.query.model.*
@@ -312,6 +312,179 @@ class GmqlEngineTest {
             val reference = runSuspend { engine.scanGmql(compiled.query!!) }
             assertEquals(reference, indexed, text)
         }
+    }
+
+    @Test
+    fun `existing GMQL temporal results remain stable across parser and AST changes`() {
+        val cases = listOf(
+            "AT includes the authored lower boundary" to (
+                """MATCH (n:Person) VALID ON MainStory AT 100 RETURN ID(n) AS id ORDER BY id""" to
+                    listOf("alice", "bob")
+                ),
+            "AT includes the authored upper boundary" to (
+                """MATCH (n:Person) VALID ON MainStory AT 300 RETURN ID(n) AS id ORDER BY id""" to
+                    listOf("alice", "bob")
+                ),
+            "AT excludes a point after the authored upper boundary" to (
+                """MATCH (n:Person) VALID ON MainStory AT 301 RETURN ID(n) AS id ORDER BY id""" to
+                    emptyList()
+                ),
+            "OVERLAPS keeps the existing inclusive source boundary behavior" to (
+                """MATCH (n:Person) VALID ON MainStory OVERLAPS [300, 301)
+                   RETURN ID(n) AS id ORDER BY id""" to listOf("alice", "bob")
+                ),
+            "OVERLAPS rejects a disjoint interval" to (
+                """MATCH (n:Person) VALID ON MainStory OVERLAPS [301, 302)
+                   RETURN ID(n) AS id ORDER BY id""" to emptyList()
+                ),
+            "CONTAINS means assertion contains query" to (
+                """MATCH (n:Person) VALID ON MainStory CONTAINS [100, 300]
+                   RETURN ID(n) AS id ORDER BY id""" to listOf("alice", "bob")
+                ),
+            "CONTAINS rejects a query wider than the assertion" to (
+                """MATCH (n:Person) VALID ON MainStory CONTAINS [99, 300]
+                   RETURN ID(n) AS id ORDER BY id""" to emptyList()
+                ),
+            "DURING means query contains assertion" to (
+                """MATCH (n:Person) VALID ON MainStory DURING [100, 300]
+                   RETURN ID(n) AS id ORDER BY id""" to listOf("alice", "bob")
+                ),
+            "DURING rejects an assertion wider than the query" to (
+                """MATCH (n:Person) VALID ON MainStory DURING [101, 300]
+                   RETURN ID(n) AS id ORDER BY id""" to emptyList()
+                ),
+            "scoped ANYTIME keeps only assertions on the selected timeline" to (
+                """MATCH (n:Person) VALID ON MainStory ANYTIME RETURN ID(n) AS id ORDER BY id""" to
+                    listOf("alice", "bob")
+                ),
+        )
+
+        cases.forEach { (description, queryAndExpected) ->
+            val (query, expected) = queryAndExpected
+            val result = runSuspend { engine.queryGmql(query) }
+
+            assertTrue(result.isSuccess, "$description: ${result.diagnostics}")
+            assertEquals(expected, result.stringColumn(), description)
+        }
+    }
+
+    @Test
+    fun `calendar pattern validity expands only inside an explicit GMQL window`() {
+        val localSources = sources + listOf(
+            source(
+                "/common-era.md",
+                """
+                ---
+                id: CommonEra
+                kind: Timeline
+                coordinate: gregorian
+                ---
+                """,
+            ),
+            source(
+                "/birthday.md",
+                """
+                ---
+                id: Birthday
+                kind: Timeline
+                sameAxisAs: CommonEra
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [month, day]
+                  repeatsEvery: year
+                ---
+                """,
+            ),
+            source(
+                "/leapling.md",
+                """
+                ---
+                id: leapling
+                kind: Node
+                type: Person
+                validTime:
+                  - timeline: Birthday
+                    from: "02-29"
+                props:
+                  name: Leapling
+                ---
+                """,
+            ),
+        )
+        val compilation = GraphCompiler().compileSources(localSources)
+        val newDocumentDiagnostics = compilation.diagnostics.filter {
+            it.source?.path in setOf("/common-era.md", "/birthday.md", "/leapling.md")
+        }
+        assertTrue(newDocumentDiagnostics.isEmpty(), newDocumentDiagnostics.toString())
+        val localEngine = GraphSearchEngine.build(compilation, localSources)
+
+        val leapDay = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person)
+                   VALID ON Birthday AT "02-29"
+                   WITHIN ["2023-01-01", "2025-01-01")
+                   RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
+        val ordinaryDay = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person)
+                   VALID ON Birthday AT "02-28"
+                   WITHIN ["2023-01-01", "2025-01-01")
+                   RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
+        val rangeOperators = listOf("OVERLAPS", "CONTAINS", "DURING").associateWith { operator ->
+            runSuspend {
+                localEngine.queryGmql(
+                    """MATCH (n:Person)
+                       VALID ON Birthday $operator ["02-29", "02-29"]
+                       WITHIN ["2023-01-01", "2025-01-01")
+                       RETURN ID(n) AS id ORDER BY id""",
+                )
+            }
+        }
+        val missingWindow = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person) VALID ON Birthday AT "02-29" RETURN ID(n) AS id""",
+            )
+        }
+        val reloaded = GraphSearchEngine.loadStatic(localEngine.exportStatic())
+        val reloadedLeapDay = runSuspend {
+            reloaded.queryGmql(
+                """MATCH (n:Person)
+                   VALID ON Birthday AT "02-29"
+                   WITHIN ["2023-01-01", "2025-01-01")
+                   RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
+        val apiQuery = GraphQuery(
+            root = NodePattern(typeId = NodeTypeId("Person")),
+            temporalWindow = TemporalWindow.At(
+                TimelineId("Birthday"),
+                TemporalCoordinate.CalendarPattern(
+                    mapOf(CalendarField.Month to 2L, CalendarField.Day to 29L),
+                ),
+            ),
+            expansionWindow = CalendarExpansionWindow(
+                TimelineId("Birthday"),
+                TemporalCoordinate.CalendarDate(2023, 1, 1),
+                TemporalCoordinate.CalendarDate(2025, 1, 1),
+            ),
+        )
+        val indexedApi = runSuspend { localEngine.search(apiQuery) }
+        val referenceApi = runSuspend { localEngine.scan(apiQuery) }
+
+        assertEquals(listOf("leapling"), leapDay.stringColumn())
+        rangeOperators.forEach { (operator, result) ->
+            assertEquals(listOf("leapling"), result.stringColumn(), operator)
+        }
+        assertEquals(leapDay, reloadedLeapDay)
+        assertEquals(referenceApi, indexedApi)
+        assertEquals(listOf("leapling"), indexedApi.matches.map { it.nodeId.value })
+        assertTrue(ordinaryDay.rows.isEmpty(), ordinaryDay.toString())
+        assertFalse(missingWindow.isSuccess)
+        assertEquals("GMQL4004", missingWindow.diagnostics.single().code)
     }
 
     @Test

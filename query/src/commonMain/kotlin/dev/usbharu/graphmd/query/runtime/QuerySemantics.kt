@@ -72,9 +72,12 @@ internal class QuerySemantics(
 ) {
     private val graph = source.graph
     private val nodeById = graph.nodes.associateBy { it.id }
+    private val expansionWindow by lazy {
+        query.expansionWindow?.let(graph.timelineCatalog::expansionWindow)
+    }
     private val queryWindow by lazy {
         query.temporalWindow
-            ?.toIntervalSet(graph.timelineCatalog)
+            ?.toIntervalSet(graph.timelineCatalog, expansionWindow)
             ?: IntervalSet.universal()
     }
     private val timelineUniverse by lazy {
@@ -115,6 +118,19 @@ internal class QuerySemantics(
     }
 
     private fun validate(): List<QueryDiagnostic> = buildList {
+        val hasDeferredValidity = graph.nodes.any { it.validTime.deferred != null } ||
+            graph.propertyAssertions.any { it.validTime.deferred != null } ||
+            graph.relationAssertions.any { it.validTime.deferred != null } ||
+            graph.textAssertions.any { it.validTime.deferred != null }
+        val queryUsesRecurrence = query.temporalWindow?.timelineId?.let(graph.timelineCatalog::requiresExpansion) == true
+        if ((hasDeferredValidity || queryUsesRecurrence) && expansionWindow == null) {
+            add(
+                QueryDiagnostic(
+                    QueryDiagnosticCode.MISSING_TEMPORAL_EXPANSION_WINDOW,
+                    "Recurring calendar-pattern validity requires a finite expansion window",
+                ),
+            )
+        }
         query.temporalWindow?.let { window ->
             if (window.timelineId !in graph.timelineCatalog) {
                 add(
@@ -329,14 +345,16 @@ internal class QuerySemantics(
         bindingTime: IntervalSet,
         assertionTime: IntervalSet,
     ): IntervalSet {
-        if (assertionTime.isUniversal) return bindingTime
-        if (query.temporalWindow == null) return bindingTime intersect assertionTime
+        val materializedBinding = graph.timelineCatalog.materialize(bindingTime, expansionWindow)
+        val materializedAssertion = graph.timelineCatalog.materialize(assertionTime, expansionWindow)
+        if (materializedAssertion.isUniversal) return materializedBinding
+        if (query.temporalWindow == null) return materializedBinding intersect materializedAssertion
         return when (query.temporalOperator) {
-            TemporalOperator.AT, TemporalOperator.OVERLAPS -> bindingTime intersect assertionTime
+            TemporalOperator.AT, TemporalOperator.OVERLAPS -> materializedBinding intersect materializedAssertion
             TemporalOperator.ASSERTION_CONTAINS_QUERY ->
-                if (assertionTime.contains(queryWindow)) bindingTime intersect assertionTime else IntervalSet.empty()
+                if (materializedAssertion.contains(queryWindow)) materializedBinding intersect materializedAssertion else IntervalSet.empty()
             TemporalOperator.QUERY_CONTAINS_ASSERTION ->
-                if (queryWindow.contains(assertionTime)) bindingTime intersect assertionTime else IntervalSet.empty()
+                if (queryWindow.contains(materializedAssertion)) materializedBinding intersect materializedAssertion else IntervalSet.empty()
         }
     }
 }

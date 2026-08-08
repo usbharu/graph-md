@@ -384,6 +384,57 @@ RETURN release
 
 同じAxisの別表記は自動的に正規化されます。異なるAxis間では、一意・exact・順序保存の`mapsTo`経路だけが通常検索に使用されます。詳しいquery semanticsは[query module guide](../query/README.md#temporal-behavior)を参照してください。
 
+## 部分日付・周期日付を宣言する
+
+誕生日のような毎年の月日は、ダミー年を使わずfieldと周期を宣言します。
+
+```yaml
+---
+id: Birthday
+kind: Timeline
+sameAxisAs: CommonEra
+coordinate:
+  kind: calendar-pattern
+  calendar: gregorian
+  fields: [month, day]
+  repeatsEvery: year
+---
+```
+
+このTimelineでは`08-08`が毎年8月8日の1日を表します。`validTime`で片方だけを指定すると値の自然期間になります。
+
+```yaml
+validTime:
+  - timeline: Birthday
+    from: "08-08"
+```
+
+月・年・四半期・ISO週もfieldから構成します。
+
+```yaml
+# YYYY-MM
+fields: [year, month]
+
+# YYYY-Qn（4月開始、終了年で年度を表示）
+fields: [year, quarter]
+quarterStartMonth: 4
+quarterYearLabel: end
+
+# YYYY-Www
+fields: [weekYear, week]
+```
+
+周期値の検索は無限展開を避けるため、完全日付による半開の`WITHIN`窓を必須とします。
+
+```gmql
+MATCH (person:Person)
+VALID ON Birthday AT "02-29"
+WITHIN ["2000-01-01", "2031-01-01")
+RETURN person
+```
+
+`AT`と`OVERLAPS`は探索窓内での交差、`CONTAINS`はassertionがquery範囲を包含すること、`DURING`はquery範囲がassertionを包含することを意味します。`02-29`はうるう年だけに一致します。
+
 ## よくある間違い
 
 ### 続編やIF世界に`sameAxisAs`を使う

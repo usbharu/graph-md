@@ -35,7 +35,7 @@ data class StaticSearchBundle(
 }
 
 object StaticSearchIndexCodec {
-    const val FORMAT_VERSION: Int = 4
+    const val FORMAT_VERSION: Int = 5
 
     fun encode(
         index: SearchIndex,
@@ -576,14 +576,79 @@ private fun decodeOwner(json: Json): AssertionOwner {
 private fun encodeIntervalSet(set: IntervalSet): Json = jsonObject(
     "universal" to jsonBoolean(set.isUniversal),
     "intervals" to jsonArray(set.intervals.map(::encodeInterval)),
+    "deferred" to (set.deferred?.let(::encodeDeferredTemporalSet) ?: Json.Null),
 )
 
 private fun decodeIntervalSet(json: Json): IntervalSet {
     val value = json.objectValue()
-    return if (value.required("universal").booleanValue()) {
+    val deferred = value.required("deferred")
+    return if (deferred !== Json.Null) {
+        IntervalSet.fromDeferred(decodeDeferredTemporalSet(deferred))
+    } else if (value.required("universal").booleanValue()) {
         IntervalSet.universal()
     } else {
         IntervalSet.of(value.required("intervals").arrayValue().map(::decodeInterval))
+    }
+}
+
+private fun encodeDeferredTemporalSet(value: DeferredTemporalSet): Json = when (value) {
+    is DeferredTemporalSet.Finite -> jsonObject(
+        "kind" to jsonString("finite"),
+        "universal" to jsonBoolean(value.isUniversal),
+        "intervals" to jsonArray(value.intervals.map(::encodeInterval)),
+    )
+    is DeferredTemporalSet.Pattern -> jsonObject(
+        "kind" to jsonString("pattern"),
+        "timelineId" to jsonString(value.extent.timelineId.value),
+        "assertionTimelineId" to jsonString(value.extent.assertionTimelineId.value),
+        "from" to (value.extent.from?.let(::encodeCoordinate) ?: Json.Null),
+        "to" to (value.extent.to?.let(::encodeCoordinate) ?: Json.Null),
+    )
+    is DeferredTemporalSet.Intersection -> encodeDeferredBinary("intersection", value.left, value.right)
+    is DeferredTemporalSet.Union -> encodeDeferredBinary("union", value.left, value.right)
+    is DeferredTemporalSet.Difference -> encodeDeferredBinary("difference", value.left, value.right)
+}
+
+private fun encodeDeferredBinary(
+    kind: String,
+    left: DeferredTemporalSet,
+    right: DeferredTemporalSet,
+): Json = jsonObject(
+    "kind" to jsonString(kind),
+    "left" to encodeDeferredTemporalSet(left),
+    "right" to encodeDeferredTemporalSet(right),
+)
+
+private fun decodeDeferredTemporalSet(json: Json): DeferredTemporalSet {
+    val value = json.objectValue()
+    return when (value.required("kind").stringValue()) {
+        "finite" -> DeferredTemporalSet.Finite(
+            value.required("intervals").arrayValue().map(::decodeInterval),
+            value.required("universal").booleanValue(),
+        )
+        "pattern" -> DeferredTemporalSet.Pattern(
+            CalendarPatternExtent(
+                TimelineId(value.required("timelineId").stringValue()),
+                TimelineId(value.required("assertionTimelineId").stringValue()),
+                value.required("from").takeUnless { it === Json.Null }?.let(::decodeCoordinate)
+                    as? TemporalCoordinate.CalendarPattern,
+                value.required("to").takeUnless { it === Json.Null }?.let(::decodeCoordinate)
+                    as? TemporalCoordinate.CalendarPattern,
+            ),
+        )
+        "intersection" -> DeferredTemporalSet.Intersection(
+            decodeDeferredTemporalSet(value.required("left")),
+            decodeDeferredTemporalSet(value.required("right")),
+        )
+        "union" -> DeferredTemporalSet.Union(
+            decodeDeferredTemporalSet(value.required("left")),
+            decodeDeferredTemporalSet(value.required("right")),
+        )
+        "difference" -> DeferredTemporalSet.Difference(
+            decodeDeferredTemporalSet(value.required("left")),
+            decodeDeferredTemporalSet(value.required("right")),
+        )
+        else -> error("Unknown deferred temporal set kind")
     }
 }
 
@@ -805,6 +870,12 @@ private fun encodeCoordinate(value: TemporalCoordinate): Json = when (value) {
         "month" to jsonNumber(value.month),
         "day" to jsonNumber(value.day),
     )
+    is TemporalCoordinate.CalendarPattern -> jsonObject(
+        "kind" to jsonString("calendarPattern"),
+        "fields" to jsonArray(value.fields.entries.sortedBy { it.key.ordinal }.map { (field, fieldValue) ->
+            jsonObject("field" to jsonString(field.name), "value" to jsonNumber(fieldValue))
+        }),
+    )
     is TemporalCoordinate.EraDate -> jsonObject(
         "kind" to jsonString("era"),
         "era" to jsonString(value.era),
@@ -838,6 +909,12 @@ private fun decodeCoordinate(json: Json): TemporalCoordinate {
             value.required("month").intValue(),
             value.required("day").intValue(),
         )
+        "calendarPattern" -> TemporalCoordinate.CalendarPattern(
+            value.required("fields").arrayValue().associate { encoded ->
+                val field = encoded.objectValue()
+                CalendarField.valueOf(field.required("field").stringValue()) to field.required("value").longValue()
+            },
+        )
         "era" -> TemporalCoordinate.EraDate(
             value.required("era").stringValue(),
             value.required("year").longValue(),
@@ -862,6 +939,17 @@ private fun encodeCoordinateSpec(spec: TemporalCoordinateSpec): Json = when (spe
         "kind" to jsonString("calendar"),
         "calendar" to jsonString(spec.calendar.name),
         "numbering" to encodeYearNumbering(spec.numbering),
+    )
+    is TemporalCoordinateSpec.CalendarPattern -> jsonObject(
+        "kind" to jsonString("calendarPattern"),
+        "calendar" to jsonString(spec.calendar.name),
+        "fields" to jsonArray(spec.fields.map { jsonString(it.name) }),
+        "numbering" to encodeYearNumbering(spec.numbering),
+        "granularity" to jsonString(spec.granularity.name),
+        "repeatsEvery" to (spec.repeatsEvery?.let { jsonString(it.name) } ?: Json.Null),
+        "format" to jsonNullableString(spec.format),
+        "quarterStartMonth" to jsonNumber(spec.quarterStartMonth),
+        "quarterYearLabel" to jsonString(spec.quarterYearLabel.name),
     )
     is TemporalCoordinateSpec.Frame -> jsonObject(
         "kind" to jsonString("frame"),
@@ -894,6 +982,16 @@ private fun decodeCoordinateSpec(json: Json): TemporalCoordinateSpec {
         "calendar" -> TemporalCoordinateSpec.Calendar(
             CalendarKind.valueOf(value.required("calendar").stringValue()),
             decodeYearNumbering(value.required("numbering")),
+        )
+        "calendarPattern" -> TemporalCoordinateSpec.CalendarPattern(
+            calendar = CalendarKind.valueOf(value.required("calendar").stringValue()),
+            fields = value.required("fields").arrayValue().map { CalendarField.valueOf(it.stringValue()) },
+            numbering = decodeYearNumbering(value.required("numbering")),
+            granularity = CalendarGranularity.valueOf(value.required("granularity").stringValue()),
+            repeatsEvery = value.required("repeatsEvery").nullableStringValue()?.let(CalendarRepeat::valueOf),
+            format = value.required("format").nullableStringValue(),
+            quarterStartMonth = value.required("quarterStartMonth").intValue(),
+            quarterYearLabel = QuarterYearLabel.valueOf(value.required("quarterYearLabel").stringValue()),
         )
         "frame" -> TemporalCoordinateSpec.Frame(value.required("start").longValue())
         "timecode" -> TemporalCoordinateSpec.Timecode(

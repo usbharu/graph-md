@@ -17,6 +17,7 @@ enum class QueryDiagnosticCode {
     UNKNOWN_NODE_TYPE,
     UNKNOWN_RELATION_TYPE,
     INVALID_TEMPORAL_WINDOW,
+    MISSING_TEMPORAL_EXPANSION_WINDOW,
 }
 
 data class QueryDiagnostic(
