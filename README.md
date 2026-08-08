@@ -71,6 +71,14 @@ The `graphmd` CLI is implemented in the `cli` multiplatform module.
 ```
 
 `search` executes GMQL against the documents found at the supplied paths.
+
+`embed` materializes dynamic query and backlink blocks as ordinary Markdown tables:
+
+```bash
+./gradlew :cli:run --args='embed ./documents'
+```
+
+Each successfully processed file is rewritten only after all of its embed blocks have rendered. `--json` returns a structured update/skip summary.
 Inline queries and `--query-file` are supported. Repeat `--param NAME=VALUE`
 for prepared-query parameters; `null`, booleans, integers, decimals, and
 quoted JSON strings are inferred, while other values are strings. Results are

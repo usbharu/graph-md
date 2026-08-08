@@ -9,11 +9,17 @@ export interface RelationParts {
   readonly relType: string;
 }
 
+export interface EmbedParts {
+  readonly kind: "query" | "back-link";
+  readonly value: string;
+}
+
 interface GraphMdInlineApi {
   parseRelationTargetAndType(inside: string): RelationParts | null;
   parseInlineObjectJson(content: string): string;
   parsePropsDirectiveJson(content: string): string;
   isValidBlockHeader(content: string): boolean;
+  parseEmbedHeader(content: string): EmbedParts | null;
 }
 
 interface CoreModule {
@@ -57,4 +63,12 @@ export function parsePropsDirectiveJson(content: string): string {
 
 export function isValidBlockHeader(content: string): boolean {
   return inline.isValidBlockHeader(content);
+}
+
+export function parseEmbedHeader(content: string): EmbedParts | null {
+  try {
+    return inline.parseEmbedHeader(content);
+  } catch {
+    return null;
+  }
 }

@@ -1,4 +1,14 @@
-import { isValidBlockHeader } from "./core-bindings";
+import { isValidBlockHeader, parseEmbedHeader, type EmbedParts } from "./core-bindings";
+
+export interface EmbedColumn { name: string; type: string }
+export interface EmbedCell { text: string; targetId?: string | null }
+export interface EmbedRow { cells: EmbedCell[] }
+export interface EmbedTable { columns: EmbedColumn[]; rows: EmbedRow[] }
+export type EmbedResolution =
+  | { status: "pending" }
+  | { status: "ready"; table: EmbedTable }
+  | { status: "error"; message: string };
+export type EmbedResolver = (directive: EmbedParts, env?: unknown) => EmbedResolution;
 
 const COLON = 0x3a;
 const SPACE = 0x20;
@@ -40,6 +50,20 @@ export function bodyBlockRule(state: any, startLine: number, endLine: number, si
   if (silent) return true;
 
   const { opening, closeLine } = block;
+  const embed = parseEmbedHeader(opening.header);
+  if (embed !== null) {
+    const token = state.push("graphmd_embed_block", "", 0);
+    token.block = true;
+    token.map = [startLine, closeLine + 1];
+    token.markup = ":".repeat(opening.fenceLength);
+    token.meta = {
+      directive: embed,
+      fallbackSource: state.getLines(startLine + 1, closeLine, 0, false),
+    };
+    state.line = closeLine + 1;
+    return true;
+  }
+
   const openToken = state.push("graphmd_body_block_open", "", 1);
   openToken.block = true;
   openToken.map = [startLine, closeLine + 1];
@@ -63,6 +87,54 @@ export function bodyBlockRule(state: any, startLine: number, endLine: number, si
 
 export function renderBodyBlockBoundary(): string {
   return "";
+}
+
+export function renderEmbedBlock(
+  tokens: any[],
+  idx: number,
+  md: any,
+  resolver?: EmbedResolver,
+  hrefTransform?: (target: string, env?: unknown) => string | null,
+  env?: unknown,
+): string {
+  const meta = tokens[idx].meta as { directive: EmbedParts; fallbackSource: string };
+  // Resolve during rendering, not tokenization. VS Code caches markdown-it's
+  // token stream for an unchanged document, so a tokenization-time `pending`
+  // result would otherwise remain pending after the async request completes.
+  const resolution = resolver?.(meta.directive, env);
+  if (resolution?.status === "ready") {
+    return renderEmbedTable(
+      [{ meta: { directive: meta.directive, table: resolution.table } }],
+      0,
+      hrefTransform,
+      env,
+    );
+  }
+  const fallback = md.render(meta.fallbackSource, env);
+  if (resolution?.status !== "error") return fallback;
+  return `<div class="graphmd-embed-error" role="alert">${escapeHtml(resolution.message)}</div>${fallback}`;
+}
+
+export function renderEmbedTable(
+  tokens: any[],
+  idx: number,
+  hrefTransform?: (target: string, env?: unknown) => string | null,
+  env?: unknown,
+): string {
+  const meta = tokens[idx].meta as { directive: EmbedParts; table: EmbedTable };
+  const head = meta.table.columns.map((column) =>
+    `<th title="${escapeHtml(column.type)}">${escapeHtml(column.name)}</th>`).join("");
+  const body = meta.table.rows.map((row) => `<tr>${row.cells.map((cell) => {
+    const text = escapeHtml(cell.text).replace(/\r\n|\r|\n/g, "<br>");
+    const href = cell.targetId == null ? null : hrefTransform?.(cell.targetId, env);
+    return `<td>${href == null ? text : `<a href="${escapeHtml(href)}">${text}</a>`}</td>`;
+  }).join("")}</tr>`).join("");
+  return `<table class="graphmd-embed" data-embed-kind="${escapeHtml(meta.directive.kind)}"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>\n`;
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 function validBodyBlocks(state: any): Map<number, ValidBodyBlock> {
