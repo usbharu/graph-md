@@ -368,7 +368,9 @@ class TemporalModelTest {
                 type: Person
                 props:
                   birthday: { timeline: Birthday, value: "08-08" }
-                  celebration: { timeline: Birthday, from: "08-08", to: "08-10" }
+                  celebration:
+                    from: { timeline: Birthday, value: "08-08" }
+                    to: { timeline: Birthday, value: "08-10" }
                 ---
                 """.trimIndent(),
                 "/alice.md",
@@ -383,6 +385,47 @@ class TemporalModelTest {
         val duration = assertIs<DurationValue>(node.props.getValue("celebration"))
         assertIs<TemporalCoordinate.CalendarPattern>(duration.from?.coordinate)
         assertIs<TemporalCoordinate.CalendarPattern>(duration.to?.coordinate)
+    }
+
+    @Test
+    fun `non recurring calendar pattern validTime retains reversed range diagnostics`() {
+        val result = compile(
+            timeline(
+                "PublicationMonth",
+                """
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [year, month]
+                """.trimIndent(),
+            ),
+            SourceDocument(
+                """
+                ---
+                id: Item
+                kind: NodeType
+                ---
+                """.trimIndent(),
+                "/item-type.md",
+            ),
+            SourceDocument(
+                """
+                ---
+                id: reversed
+                kind: Node
+                type: Item
+                validTime:
+                  - timeline: PublicationMonth
+                    from: "2026-12"
+                    to: "2026-01"
+                ---
+                """.trimIndent(),
+                "/reversed.md",
+            ),
+        )
+
+        assertTrue(result.diagnostics.any {
+            it.message == "validTime.from is after validTime.to on PublicationMonth"
+        }, result.diagnostics.toString())
     }
 
     @Test

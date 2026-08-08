@@ -473,8 +473,13 @@ class TimelineCatalog private constructor(
         extent: CalendarPatternExtent,
         window: TemporalExpansionWindow?,
     ): IntervalSet {
+        val rangeContextYears = if (extent.from != null && extent.to != null && window != null) {
+            CALENDAR_PATTERN_RANGE_CONTEXT_YEARS
+        } else {
+            0
+        }
         fun resolve(coordinate: TemporalCoordinate.CalendarPattern): TemporalSelection? =
-            engine.resolveToAxis(extent.timelineId.value, coordinate, window)
+            engine.resolveToAxis(extent.timelineId.value, coordinate, window, rangeContextYears)
 
         fun periods(selection: TemporalSelection?): List<TemporalAxisPeriod> = when (selection) {
             is TemporalSelection.Instant -> listOf(
@@ -497,11 +502,13 @@ class TimelineCatalog private constructor(
             else -> emptyList()
         }
         return IntervalSet.of(ranges.mapNotNull { period ->
-            if (period.start >= period.endExclusive) return@mapNotNull null
+            val start = window?.let { maxOf(period.start, it.start) } ?: period.start
+            val end = window?.let { minOf(period.endExclusive, it.endExclusive) } ?: period.endExclusive
+            if (start >= end) return@mapNotNull null
             TemporalInterval(
                 extent.assertionTimelineId,
-                IntervalBoundary(period.start, inclusive = true),
-                IntervalBoundary(period.endExclusive, inclusive = false),
+                IntervalBoundary(start, inclusive = true),
+                IntervalBoundary(end, inclusive = false),
             )
         })
     }
@@ -562,3 +569,7 @@ class TimelineCatalog private constructor(
             TimelineCatalog(timelines)
     }
 }
+
+// Gregorian leap-day and ISO week-53 patterns repeat within at most eight years.
+// Two extra years keep endpoint pairing explicit without expanding an unbounded recurrence.
+private const val CALENDAR_PATTERN_RANGE_CONTEXT_YEARS = 10

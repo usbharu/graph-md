@@ -380,12 +380,14 @@ class TemporalEngine(
         timeline: String,
         coordinate: TemporalCoordinate,
         window: TemporalExpansionWindow? = null,
+        recurrenceContextYears: Int = 0,
     ): TemporalSelection? {
+        require(recurrenceContextYears >= 0) { "recurrence context years must not be negative" }
         val system = coordinateSystems[timeline] ?: return null
         val spec = system.coordinate as? TemporalCoordinateSpec.CalendarPattern
             ?: return normalizeToAxis(timeline, coordinate)?.let(TemporalSelection::Instant)
         val pattern = coerceCoordinate(timeline, coordinate) as? TemporalCoordinate.CalendarPattern ?: return null
-        return resolveCalendarPattern(spec, pattern, window)
+        return resolveCalendarPattern(spec, pattern, window, recurrenceContextYears)
     }
 
     fun expansionWindow(
@@ -908,6 +910,7 @@ private fun resolveCalendarPattern(
     spec: TemporalCoordinateSpec.CalendarPattern,
     coordinate: TemporalCoordinate.CalendarPattern,
     window: TemporalExpansionWindow?,
+    recurrenceContextYears: Int,
 ): TemporalSelection? {
     if (coordinate.fields.keys != spec.fields.toSet() || !validCalendarPatternFields(spec, coordinate.fields)) return null
     if (spec.repeatsEvery == null) return resolveSingleCalendarPattern(spec, coordinate.fields)
@@ -919,8 +922,14 @@ private fun resolveCalendarPattern(
     val fromAstronomical = toAstronomicalYear(from.year, spec.numbering) ?: return null
     val toAstronomical = toAstronomicalYear(to.year, spec.numbering) ?: return null
     if (toAstronomical < fromAstronomical || toAstronomical - fromAstronomical > 10_000L) return null
+    val expansionMargin = recurrenceContextYears.toLong() + 2L
+    if (fromAstronomical < Long.MIN_VALUE + expansionMargin || toAstronomical > Long.MAX_VALUE - expansionMargin) {
+        return null
+    }
+    val firstExpansionYear = fromAstronomical - expansionMargin
+    val lastExpansionYear = toAstronomical + expansionMargin
     val occurrences = mutableListOf<TemporalAxisPeriod>()
-    for (astronomicalYear in (fromAstronomical - 2)..(toAstronomical + 2)) {
+    for (astronomicalYear in firstExpansionYear..lastExpansionYear) {
         val authoredYear = fromAstronomicalYear(astronomicalYear, spec.numbering) ?: continue
         val yearField = if (CalendarField.Week in spec.fields) CalendarField.WeekYear else CalendarField.Year
         val expandedFields = coordinate.fields + (yearField to authoredYear)
@@ -933,8 +942,8 @@ private fun resolveCalendarPattern(
             is TemporalSelection.Period -> selection.value
             else -> null
         } ?: continue
-        val start = maxOf(period.start, expansion.start)
-        val end = minOf(period.endExclusive, expansion.endExclusive)
+        val start = if (recurrenceContextYears == 0) maxOf(period.start, expansion.start) else period.start
+        val end = if (recurrenceContextYears == 0) minOf(period.endExclusive, expansion.endExclusive) else period.endExclusive
         if (start < end) occurrences += TemporalAxisPeriod(start, end)
     }
     return TemporalSelection.Recurrence(spec.repeatsEvery, occurrences.distinct())

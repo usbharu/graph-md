@@ -410,10 +410,52 @@ class GmqlEngineTest {
                 ---
                 """,
             ),
+            source(
+                "/new-year.md",
+                """
+                ---
+                id: new-year
+                kind: Node
+                type: Person
+                validTime:
+                  - timeline: Birthday
+                    from: "12-31"
+                    to: "01-01"
+                props:
+                  name: New Year
+                ---
+                """,
+            ),
+            source(
+                "/place-type.md",
+                """
+                ---
+                id: Place
+                kind: NodeType
+                props:
+                  name:
+                    type: string
+                ---
+                """,
+            ),
+            source(
+                "/tokyo.md",
+                """
+                ---
+                id: tokyo
+                kind: Node
+                type: Place
+                props:
+                  name: Tokyo
+                ---
+                """,
+            ),
         )
         val compilation = GraphCompiler().compileSources(localSources)
         val newDocumentDiagnostics = compilation.diagnostics.filter {
-            it.source?.path in setOf("/common-era.md", "/birthday.md", "/leapling.md")
+            it.source?.path in setOf(
+                "/common-era.md", "/birthday.md", "/leapling.md", "/new-year.md", "/place-type.md", "/tokyo.md",
+            )
         }
         assertTrue(newDocumentDiagnostics.isEmpty(), newDocumentDiagnostics.toString())
         val localEngine = GraphSearchEngine.build(compilation, localSources)
@@ -449,6 +491,32 @@ class GmqlEngineTest {
                 """MATCH (n:Person) VALID ON Birthday AT "02-29" RETURN ID(n) AS id""",
             )
         }
+        val windowStartTail = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person)
+                   VALID ON Birthday AT "01-01"
+                   WITHIN ["2024-01-01", "2025-01-01")
+                   RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
+        val windowEndHead = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person)
+                   VALID ON Birthday AT "12-31"
+                   WITHIN ["2024-01-01", "2025-01-01")
+                   RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
+        val unrelatedWithoutWindow = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Place) RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
+        val participatingWithoutWindow = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person) RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
         val reloaded = GraphSearchEngine.loadStatic(localEngine.exportStatic())
         val reloadedLeapDay = runSuspend {
             reloaded.queryGmql(
@@ -474,6 +542,12 @@ class GmqlEngineTest {
         )
         val indexedApi = runSuspend { localEngine.search(apiQuery) }
         val referenceApi = runSuspend { localEngine.scan(apiQuery) }
+        val unrelatedApiQuery = GraphQuery(root = NodePattern(typeId = NodeTypeId("Place")))
+        val unrelatedIndexedApi = runSuspend { localEngine.search(unrelatedApiQuery) }
+        val unrelatedReferenceApi = runSuspend { localEngine.scan(unrelatedApiQuery) }
+        val participatingApiQuery = GraphQuery(root = NodePattern(id = NodeId("leapling")))
+        val participatingIndexedApi = runSuspend { localEngine.search(participatingApiQuery) }
+        val participatingReferenceApi = runSuspend { localEngine.scan(participatingApiQuery) }
 
         assertEquals(listOf("leapling"), leapDay.stringColumn())
         rangeOperators.forEach { (operator, result) ->
@@ -485,6 +559,19 @@ class GmqlEngineTest {
         assertTrue(ordinaryDay.rows.isEmpty(), ordinaryDay.toString())
         assertFalse(missingWindow.isSuccess)
         assertEquals("GMQL4004", missingWindow.diagnostics.single().code)
+        assertEquals(listOf("new-year"), windowStartTail.stringColumn())
+        assertEquals(listOf("new-year"), windowEndHead.stringColumn())
+        assertTrue(unrelatedWithoutWindow.isSuccess, unrelatedWithoutWindow.diagnostics.toString())
+        assertEquals(listOf("tokyo"), unrelatedWithoutWindow.stringColumn())
+        assertEquals(unrelatedReferenceApi, unrelatedIndexedApi)
+        assertEquals(listOf("tokyo"), unrelatedIndexedApi.matches.map { it.nodeId.value })
+        assertFalse(participatingWithoutWindow.isSuccess)
+        assertEquals("GMQL4004", participatingWithoutWindow.diagnostics.single().code)
+        assertEquals(participatingReferenceApi, participatingIndexedApi)
+        assertEquals(
+            QueryDiagnosticCode.MISSING_TEMPORAL_EXPANSION_WINDOW,
+            participatingIndexedApi.diagnostics.single().code,
+        )
     }
 
     @Test

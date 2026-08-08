@@ -93,18 +93,22 @@ internal class QuerySemantics(
         val diagnostics = validate()
         if (diagnostics.isNotEmpty() || queryWindow.isEmpty) return QueryResult(emptyList(), diagnostics)
 
-        val matches = source.rootNodes(query.root).flatMap { root ->
-            val rootTime = joinTime(queryWindow, root.validTime)
-            if (rootTime.isEmpty) {
-                emptyList()
-            } else {
-                val initial = QueryBinding(
-                    variables = mapOf(query.rootVariable to root.id),
-                    validTime = rootTime,
-                )
-                evaluate(query.expression, listOf(initial), root.id)
-                    .map { QueryMatch(root.id, it) }
+        val matches = try {
+            source.rootNodes(query.root).flatMap { root ->
+                val rootTime = joinTime(queryWindow, root.validTime)
+                if (rootTime.isEmpty) {
+                    emptyList()
+                } else {
+                    val initial = QueryBinding(
+                        variables = mapOf(query.rootVariable to root.id),
+                        validTime = rootTime,
+                    )
+                    evaluate(query.expression, listOf(initial), root.id)
+                        .map { QueryMatch(root.id, it) }
+                }
             }
+        } catch (_: MissingTemporalExpansionWindowException) {
+            return QueryResult(emptyList(), listOf(missingExpansionWindowDiagnostic()))
         }
         val merged = mergeMatches(matches, query.rootVariable)
             .sortedWith(
@@ -118,18 +122,9 @@ internal class QuerySemantics(
     }
 
     private fun validate(): List<QueryDiagnostic> = buildList {
-        val hasDeferredValidity = graph.nodes.any { it.validTime.deferred != null } ||
-            graph.propertyAssertions.any { it.validTime.deferred != null } ||
-            graph.relationAssertions.any { it.validTime.deferred != null } ||
-            graph.textAssertions.any { it.validTime.deferred != null }
         val queryUsesRecurrence = query.temporalWindow?.timelineId?.let(graph.timelineCatalog::requiresExpansion) == true
-        if ((hasDeferredValidity || queryUsesRecurrence) && expansionWindow == null) {
-            add(
-                QueryDiagnostic(
-                    QueryDiagnosticCode.MISSING_TEMPORAL_EXPANSION_WINDOW,
-                    "Recurring calendar-pattern validity requires a finite expansion window",
-                ),
-            )
+        if (queryUsesRecurrence && expansionWindow == null) {
+            add(missingExpansionWindowDiagnostic())
         }
         query.temporalWindow?.let { window ->
             if (window.timelineId !in graph.timelineCatalog) {
@@ -345,8 +340,8 @@ internal class QuerySemantics(
         bindingTime: IntervalSet,
         assertionTime: IntervalSet,
     ): IntervalSet {
-        val materializedBinding = graph.timelineCatalog.materialize(bindingTime, expansionWindow)
-        val materializedAssertion = graph.timelineCatalog.materialize(assertionTime, expansionWindow)
+        val materializedBinding = materialize(bindingTime)
+        val materializedAssertion = materialize(assertionTime)
         if (materializedAssertion.isUniversal) return materializedBinding
         if (query.temporalWindow == null) return materializedBinding intersect materializedAssertion
         return when (query.temporalOperator) {
@@ -357,7 +352,21 @@ internal class QuerySemantics(
                 if (queryWindow.contains(materializedAssertion)) materializedBinding intersect materializedAssertion else IntervalSet.empty()
         }
     }
+
+    private fun materialize(value: IntervalSet): IntervalSet {
+        if (value.deferred != null && expansionWindow == null) {
+            throw MissingTemporalExpansionWindowException()
+        }
+        return graph.timelineCatalog.materialize(value, expansionWindow)
+    }
 }
+
+private class MissingTemporalExpansionWindowException : RuntimeException()
+
+private fun missingExpansionWindowDiagnostic(): QueryDiagnostic = QueryDiagnostic(
+    QueryDiagnosticCode.MISSING_TEMPORAL_EXPANSION_WINDOW,
+    "Recurring calendar-pattern validity requires a finite expansion window",
+)
 
 internal fun QueryNode.matches(pattern: NodePattern): Boolean =
     (pattern.id == null || id == pattern.id) &&

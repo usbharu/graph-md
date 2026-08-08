@@ -450,12 +450,12 @@ internal class GmqlExecutor(
         val queryUsesRecurrence = query.ast.valid?.timeline
             ?.let(::TimelineId)
             ?.let(graph.timelineCatalog::requiresExpansion) == true
-        if ((graph.hasDeferredValidity() || queryUsesRecurrence) && expansionWindow == null) {
+        if (queryUsesRecurrence && expansionWindow == null) {
             throw GmqlEvaluationException(
                 diagnostic(
                     "GMQL4004",
                     "Recurring calendar-pattern validity requires WITHIN [start, end).",
-                    query.ast.valid?.range,
+                    query.ast.valid.range,
                     GmqlDiagnosticKind.TEMPORAL,
                 ),
             )
@@ -962,8 +962,19 @@ internal class GmqlExecutor(
         )
     }
 
-    private fun materialize(value: IntervalSet): IntervalSet =
-        graph.timelineCatalog.materialize(value, expansionWindow)
+    private fun materialize(value: IntervalSet): IntervalSet {
+        if (value.deferred != null && expansionWindow == null) {
+            throw GmqlEvaluationException(
+                diagnostic(
+                    "GMQL4004",
+                    "Recurring calendar-pattern validity requires WITHIN [start, end).",
+                    null,
+                    GmqlDiagnosticKind.TEMPORAL,
+                ),
+            )
+        }
+        return graph.timelineCatalog.materialize(value, expansionWindow)
+    }
 
     private fun join(binding: RuntimeBinding, time: IntervalSet): RuntimeBinding? {
         val joined = materialize(binding.validity) intersect materialize(time)
@@ -1197,12 +1208,6 @@ private fun TemporalCoordinate.toGmqlValue(): GmqlValue = when (this) {
 
 private fun List<GmqlValue.TemporalEntry>.unionTime(): IntervalSet =
     fold(IntervalSet.empty()) { result, entry -> result union entry.validTime }
-
-private fun QueryableGraph.hasDeferredValidity(): Boolean =
-    nodes.any { it.validTime.deferred != null } ||
-        propertyAssertions.any { it.validTime.deferred != null } ||
-        relationAssertions.any { it.validTime.deferred != null } ||
-        textAssertions.any { it.validTime.deferred != null }
 
 private fun GmqlType.unwrapTemporal(): GmqlType = if (this is GmqlType.Temporal) valueType else this
 private fun GmqlType.isNumeric() = unwrapTemporal() == GmqlType.Integer || unwrapTemporal() == GmqlType.Decimal
