@@ -66,6 +66,20 @@ class GraphMdLanguageServer : LanguageServer, LanguageClientAware, GraphMdSearch
                             resolveProvider = false
                         },
                     )
+                    workspace = WorkspaceServerCapabilities().apply {
+                        fileOperations = FileOperationsServerCapabilities().apply {
+                            didRename = FileOperationOptions(
+                                listOf(
+                                    FileOperationFilter(
+                                        FileOperationPattern("**/*.md").apply {
+                                            matches = FileOperationPatternKind.File
+                                        },
+                                        "file",
+                                    ),
+                                ),
+                            )
+                        }
+                    }
                 },
             ),
         )
@@ -190,6 +204,11 @@ private class GraphMdWorkspaceService(
         params.changes.forEach(index::updateFromDisk)
         server.publishDiagnostics()
     }
+
+    override fun didRenameFiles(params: RenameFilesParams) {
+        index.rename(params.files)
+        server.publishDiagnostics()
+    }
 }
 
 internal class GraphMdWorkspaceIndex(
@@ -281,6 +300,40 @@ internal class GraphMdWorkspaceIndex(
         synchronized(this) {
             if (normalizedUri in openDocuments) return
             replaceNormalized(normalizedUri, document)
+        }
+    }
+
+    fun rename(files: List<FileRename>) {
+        val renames = files
+            .map { normalizeUri(it.oldUri) to normalizeUri(it.newUri) }
+            .filter { (oldUri, newUri) -> oldUri != newUri }
+        synchronized(this) {
+            val sourceUris = renames.mapTo(mutableSetOf()) { it.first }
+            val sourceDocuments = sourceUris.associateWith(documents::get)
+            val openSourceUris = sourceUris.intersect(openDocuments)
+            sourceUris.forEach {
+                documents.remove(it)
+                openDocuments.remove(it)
+            }
+
+            renames.forEach { (oldUri, newUri) ->
+                val source = sourceDocuments[oldUri]
+                val sourceWasOpen = oldUri in openSourceUris
+                val destinationIsOpen = newUri !in sourceUris && newUri in openDocuments
+                val replacement = when {
+                    destinationIsOpen -> documents[newUri]
+                    sourceWasOpen && source != null -> indexedDocument(newUri, source.text)
+                    else -> readDocument(newUri) ?: source?.let { indexedDocument(newUri, it.text) }
+                }
+
+                if (replacement == null) {
+                    documents.remove(newUri)
+                } else {
+                    documents[newUri] = replacement
+                }
+                if (sourceWasOpen) openDocuments += newUri
+            }
+            if (renames.isNotEmpty()) invalidateCompilation()
         }
     }
 
@@ -2270,6 +2323,12 @@ internal class FrontMatterCompletionResolver(
     private val timelineIds: List<String>,
     private val nodePropsSchema: Map<String, ResolvedPropSchema> = emptyMap(),
 ) {
+    private val lineSeparator = when {
+        "\r\n" in text -> "\r\n"
+        '\r' in text -> "\r"
+        else -> "\n"
+    }
+
     fun resolve(): List<CompletionEntry>? {
         val normalizedText = text.replace("\r\n", "\n").replace('\r', '\n')
         val normalizedOffset = text
@@ -2378,7 +2437,8 @@ internal class FrontMatterCompletionResolver(
                 enumCompletions(valuePrefix, listOf("number", "string", "text", "instant", "duration", "array"), "prop type")
             hasColon && path.lastOrNull() == "timeline" && isPropSchemaPath(path.dropLast(1), documentKind) ->
                 timelineSelectorCompletions(valuePrefix)
-            hasColon && valuePrefix.isEmpty() -> nestedKeyCompletions(path, "", lines, lineIndex, documentKind)
+            hasColon && valuePrefix.isEmpty() ->
+                nestedKeyCompletions(path, "", lines, lineIndex, documentKind, insertOnNextLine = true)
             indent == 0 -> topLevelKeyCompletions(keyCandidate, usedTopLevelKeys, documentKind)
             else -> nestedKeyCompletions(path, currentKeyPrefix, lines, lineIndex, documentKind)
         }
@@ -2490,6 +2550,7 @@ internal class FrontMatterCompletionResolver(
         lines: List<String>,
         lineIndex: Int,
         documentKind: DocumentKind?,
+        insertOnNextLine: Boolean = false,
     ): List<CompletionEntry>? {
         if (
             path.lastOrNull() == "validTime" &&
@@ -2529,11 +2590,16 @@ internal class FrontMatterCompletionResolver(
             .filter { it.startsWith(prefix) && (it !in usedKeys || it == prefix) }
             .map { key ->
                 val schemaField = isPropSchemaPath(path, documentKind)
-                val insertText = when {
+                val fieldText = when {
                     schemaField && key == "type" -> "type: \${1:string}"
                     schemaField && key == "required" -> "required: \${1:false}"
                     schemaField && key == "items" -> "items: \${1:string}"
                     else -> "$key: "
+                }
+                val insertText = if (schemaField && insertOnNextLine) {
+                    lineSeparator + " ".repeat(indentOf(lines[lineIndex]) + 2) + fieldText
+                } else {
+                    fieldText
                 }
                 CompletionEntry(
                     key,
