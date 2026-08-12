@@ -11,7 +11,7 @@ import kotlin.test.assertTrue
 
 class GraphMdCliTest {
     @Test
-    fun `site generates a self contained Astro project with document routes and search index`() {
+    fun `site generates a self contained Astro project with live Markdown sources`() {
         val fileSystem = FakeFileSystem(
             mapOf(
                 "/workspace/person.md" to nodeType("Person"),
@@ -33,20 +33,24 @@ class GraphMdCliTest {
         val generated = fileSystem.contentsUnder("/site")
         assertTrue("/site/astro.config.mjs" in generated)
         assertTrue("/site/src/pages/documents/[slug].astro" in generated)
-        assertTrue("/site/public/search-index/manifest.json" in generated)
+        assertTrue("/site/documents/alice.md" in generated)
+        assertTrue("/site/vendor/graph-md-astro/integration.mjs" in generated)
         assertTrue("/site/runtime-encoded/graph-md-query-runtime.js.gz.b64" in generated)
         assertTrue("/site/runtime-encoded/markdown-it-graphmd.js.gz.b64" in generated)
         assertTrue(generated.getValue("/site/astro.config.mjs").contains("gunzipSync"))
         assertTrue(generated.getValue("/site/src/lib/markdown.ts").contains("graphMdPlugin"))
         assertTrue(generated.getValue("/site/src/components/SearchApp.tsx").contains("GraphMdWebSearch"))
-        assertTrue(generated.getValue("/site/src/generated/site.json").contains("/wiki/documents/alice/"))
+        assertTrue(generated.getValue("/site/graphmd.config.mjs").contains("base: \"/wiki"))
+        assertTrue(generated.getValue("/site/src/lib/site.ts").contains("virtual:graphmd/site"))
+        assertFalse("/site/src/generated/site.json" in generated)
         assertFalse(generated.getValue("/site/package.json").contains("workspace:"))
+        assertTrue(generated.getValue("/site/package.json").contains("file:./vendor/graph-md-astro"))
         assertTrue(generated.getValue("/site/package.json").contains("\"@astrojs/react\": \"5.0.7\""))
         assertTrue(generated.getValue("/site/package.json").contains("\"astro\": \"6.4.8\""))
     }
 
     @Test
-    fun `site emits structured document metadata for wiki type views`() {
+    fun `site preserves structured Markdown for Astro compilation`() {
         val fileSystem = FakeFileSystem(
             mapOf(
                 "/workspace/Person.md" to """
@@ -110,17 +114,10 @@ class GraphMdCliTest {
         val result = GraphMdCli(fileSystem).run(listOf("site", "/site", "/workspace", "--json"))
 
         assertEquals(0, result.exitCode, result.stderr)
-        val site = fileSystem.contentsUnder("/site").getValue("/site/src/generated/site.json")
-        assertTrue(site.contains("\"schema\":[{\"name\":\"name\""))
-        assertTrue(site.contains("\"nodeType\":{\"parents\":[{\"id\":\"Living\""))
-        assertTrue(site.contains("\"children\":[{\"id\":\"Idol\""))
-        assertTrue(site.contains("\"usage\":[{\"id\":\"alice\""))
-        assertTrue(site.contains("\"properties\":[{\"name\":\"name\",\"value\":\"Alice\""))
-        assertTrue(site.contains("\"relationUsage\":[{\"from\":\"alice\""))
-        assertTrue(site.contains("\"sourceTimeline\":\"Reality\",\"kind\":\"fork\""))
-        assertTrue(site.contains("\"direction\":\"outgoing\",\"source\":\"IfWorld\",\"sourceRoute\""))
-        assertTrue(site.contains("\"timelineGraph\":{\"nodes\":"))
-        assertTrue(site.contains("\"kind\":\"mapping\""))
+        val generated = fileSystem.contentsUnder("/site")
+        assertTrue(generated.getValue("/site/documents/Person.md").contains("name: { type: string, required: true }"))
+        assertTrue(generated.getValue("/site/documents/alice.md").contains("name: Alice"))
+        assertTrue(generated.getValue("/site/documents/IfWorld.md").contains("mapsTo: Reality"))
     }
 
     @Test

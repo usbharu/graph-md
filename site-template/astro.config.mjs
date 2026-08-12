@@ -2,6 +2,8 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import { defineConfig } from "astro/config";
 import react from "@astrojs/react";
+import graphMd from "graph-md-astro/integration.mjs";
+import graphMdConfig from "./graphmd.config.mjs";
 
 function materialize(input, output) {
   const outputUrl = new URL(output, import.meta.url);
@@ -23,13 +25,9 @@ materialize(
   "./public/runtime/graph-md-query-runtime.js",
 );
 
-const site = JSON.parse(
-  readFileSync(new URL("./src/generated/site.json", import.meta.url), "utf8"),
-);
-
 export default defineConfig({
   output: "static",
-  base: site.base,
+  base: graphMdConfig.base,
   build: { format: "directory" },
-  integrations: [react()],
+  integrations: [graphMd({ roots: graphMdConfig.roots }), react()],
 });

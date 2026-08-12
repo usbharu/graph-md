@@ -64,6 +64,7 @@ val generatedVersionSource = resources.text.fromString(
 )
 
 val siteTemplateDirectory = rootProject.layout.projectDirectory.dir("site-template")
+val stagedSiteTemplateDirectory = layout.buildDirectory.dir("generated/siteTemplateFiles")
 val embeddedWebRuntimeDirectory = siteTemplateDirectory.dir("runtime-encoded")
 val generatedSiteTemplateDirectory = layout.buildDirectory.dir("generated/siteTemplate")
 val generatedSiteTemplateSource = generatedSiteTemplateDirectory.map {
@@ -133,12 +134,33 @@ val updateEmbeddedWebRuntime by tasks.registering(Exec::class) {
 }
 
 val siteTemplateFiles = fileTree(siteTemplateDirectory) {
-    exclude("node_modules/**", "dist/**", ".astro/**", "public/runtime/**", "src/vendor/**")
+    exclude(
+        "node_modules/**", "dist/**", ".astro/**", "public/runtime/**", "public/search-index/**",
+        "src/vendor/**", "vendor/**",
+    )
+}
+
+val stageSiteTemplate by tasks.registering(Sync::class) {
+    dependsOn(":astro:jsNodeProductionLibraryDistribution")
+    from(siteTemplateFiles)
+    filesMatching(listOf("package.json", "pnpm-lock.yaml")) {
+        filter { line ->
+            line.replace(
+                "file:../astro/build/dist/js/productionLibrary",
+                "file:./vendor/graph-md-astro",
+            )
+        }
+    }
+    from(rootProject.layout.projectDirectory.dir("astro/build/dist/js/productionLibrary")) {
+        into("vendor/graph-md-astro")
+    }
+    into(stagedSiteTemplateDirectory)
 }
 
 val generateSiteTemplate by tasks.registering(GenerateSiteTemplateTask::class) {
-    sourceRoot.set(siteTemplateDirectory)
-    templateFiles.from(siteTemplateFiles)
+    dependsOn(stageSiteTemplate)
+    sourceRoot.set(stagedSiteTemplateDirectory)
+    templateFiles.from(stagedSiteTemplateDirectory.map { it.asFileTree })
     outputFile.set(generatedSiteTemplateSource)
 }
 

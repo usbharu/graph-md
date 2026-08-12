@@ -39,6 +39,9 @@ importers:
       '@types/react-dom':
         specifier: ^19.2.0
         version: 19.2.4(@types/react@19.2.18)
+      graph-md-astro:
+        specifier: file:../astro/build/dist/js/productionLibrary
+        version: file:../astro/build/dist/js/productionLibrary
       typescript:
         specifier: ^5.9.0
         version: 5.9.3
@@ -1292,6 +1295,9 @@ packages:
 
   github-slugger@2.0.0:
     resolution: {integrity: sha512-IaOQ9puYtjrkq7Y0Ygl9KDZnrf/aiUJYUpVf89y8kyaxbRG7Y1SrX/jaumrv81vc61+kiMempujsM3Yw7w5qcw==}
+
+  graph-md-astro@file:../astro/build/dist/js/productionLibrary:
+    resolution: {directory: ../astro/build/dist/js/productionLibrary, type: directory}
 
   h3@1.15.11:
     resolution: {integrity: sha512-L3THSe2MPeBwgIZVSH5zLdBBU90TOxarvhK9d04IDY2AmVS8j2Jz2LIWtwsGOU3lu2I5jCN7FNvVfY2+XyF+mg==}
@@ -3362,6 +3368,8 @@ snapshots:
       resolve-pkg-maps: 1.0.0
 
   github-slugger@2.0.0: {}
+
+  graph-md-astro@file:../astro/build/dist/js/productionLibrary: {}
 
   h3@1.15.11:
     dependencies:

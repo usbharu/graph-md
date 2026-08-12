@@ -1,8 +1,8 @@
 package dev.usbharu.graphmd.cli
 
 import dev.usbharu.graphmd.core.GraphCompiler
-import dev.usbharu.graphmd.core.model.*
-import dev.usbharu.graphmd.query.GraphSearchEngine
+import dev.usbharu.graphmd.core.model.Diagnostic
+import dev.usbharu.graphmd.core.model.Severity
 
 internal fun GraphMdCli.site(command: CliCommand.Site, json: Boolean): CliResult {
     val sources = WorkspaceLoader(fileSystem).load(command.paths)
@@ -16,17 +16,10 @@ internal fun GraphMdCli.site(command: CliCommand.Site, json: Boolean): CliResult
         return CliResult(stderr = stderr, exitCode = 1)
     }
 
-    val output = if (fileSystem.kind(command.outputDirectory) == null) {
-        val normalized = command.outputDirectory.replace('\\', '/').trimEnd('/')
-        val parent = normalized.substringBeforeLast('/', missingDelimiterValue = ".").ifEmpty { "/" }
-        val name = normalized.substringAfterLast('/')
-        if (name.isEmpty() || fileSystem.kind(parent) != FileKind.Directory) {
-            return CliResult(stderr = "Output parent directory does not exist: $parent\n", exitCode = 2)
-        }
-        fileSystem.child(fileSystem.canonical(parent), name)
-    } else {
-        fileSystem.canonical(command.outputDirectory)
-    }
+    val output = resolveSiteOutput(command) ?: return CliResult(
+        stderr = "Output parent directory does not exist: ${command.outputDirectory}\n",
+        exitCode = 2,
+    )
     val current = fileSystem.canonical(".")
     if (output == "/" || output == current || sources.any { fileSystem.canonical(it.sourcePath) == output }) {
         return CliResult(stderr = "Refusing unsafe site output directory: ${command.outputDirectory}\n", exitCode = 2)
@@ -40,18 +33,22 @@ internal fun GraphMdCli.site(command: CliCommand.Site, json: Boolean): CliResult
     }
 
     val documents = parsed.mapNotNull { it.document }.sortedBy { it.id }
-    val generator = AstroSiteGenerator(command.base, documents, compilation)
-    val files = generator.files().toMutableMap()
-    val search = GraphSearchEngine.build(compilation, sources).exportStatic()
-    search.files().forEach { (name, content) -> files["public/search-index/$name"] = content }
+    val files = generatedSiteTemplateFiles.toMutableMap().apply {
+        put(
+            "graphmd.config.mjs",
+            "export default { base: ${jsonString(command.base).encode()}, roots: [\"documents\"] };\n",
+        )
+        parsed.zip(sources).forEach { (result, source) ->
+            result.document?.let { document -> put("documents/${safeSlug(document.id)}.md", source.text) }
+        }
+    }
 
     try {
         if (fileSystem.kind(output) == FileKind.Directory && command.force) clearOutput(fileSystem, output)
         fileSystem.createDirectories(output)
         files.forEach { (relative, content) ->
             val target = relative.split('/').fold(output) { parent, child -> fileSystem.child(parent, child) }
-            val parent = target.substringBeforeLast('/', output)
-            fileSystem.createDirectories(parent)
+            fileSystem.createDirectories(target.substringBeforeLast('/', output))
             fileSystem.writeText(target, content)
         }
     } catch (exception: Throwable) {
@@ -63,7 +60,6 @@ internal fun GraphMdCli.site(command: CliCommand.Site, json: Boolean): CliResult
         "outputDirectory" to jsonString(output),
         "documents" to jsonNumber(documents.size),
         "routes" to jsonNumber(documents.size + 3),
-        "searchIndexFiles" to jsonNumber(search.files().size),
         "diagnostics" to jsonArray(warnings.map(Diagnostic::toJson)),
     )
     return if (json) CliResult(stdout = summary.encode() + "\n") else CliResult(
@@ -72,12 +68,18 @@ internal fun GraphMdCli.site(command: CliCommand.Site, json: Boolean): CliResult
     )
 }
 
+private fun GraphMdCli.resolveSiteOutput(command: CliCommand.Site): String? {
+    if (fileSystem.kind(command.outputDirectory) != null) return fileSystem.canonical(command.outputDirectory)
+    val normalized = command.outputDirectory.replace('\\', '/').trimEnd('/')
+    val parent = normalized.substringBeforeLast('/', missingDelimiterValue = ".").ifEmpty { "/" }
+    val name = normalized.substringAfterLast('/')
+    if (name.isEmpty() || fileSystem.kind(parent) != FileKind.Directory) return null
+    return fileSystem.child(fileSystem.canonical(parent), name)
+}
+
 private fun clearOutput(fileSystem: CliFileSystem, output: String) {
     fileSystem.children(output).forEach { child ->
         val name = child.replace('\\', '/').substringAfterLast('/')
-        // Dependency installs can contain symlink forests that kotlinx-io cannot
-        // portably unlink. Keep node_modules, but discard the lockfile so a
-        // regenerated package.json cannot remain pinned to an incompatible set.
         if (name != "node_modules") deleteTree(fileSystem, child)
     }
 }
@@ -87,9 +89,7 @@ private fun deleteTree(fileSystem: CliFileSystem, path: String) {
         val canonical = runCatching { fileSystem.canonical(child) }.getOrNull()
         if (canonical != null && canonical.replace('\\', '/') != child.replace('\\', '/')) {
             fileSystem.delete(child, mustExist = false)
-        } else {
-            deleteTree(fileSystem, child)
-        }
+        } else deleteTree(fileSystem, child)
     }
     try {
         fileSystem.delete(path, mustExist = false)
@@ -98,190 +98,12 @@ private fun deleteTree(fileSystem: CliFileSystem, path: String) {
     }
 }
 
-private class AstroSiteGenerator(
-    private val base: String,
-    private val documents: List<GraphDocument>,
-    private val graph: GraphCompilationResult,
-) {
-    private val routes = documents.associate { it.id to "${base}documents/${safeSlug(it.id)}/" }
-
-    fun files(): Map<String, String> = generatedSiteTemplateFiles.toMutableMap().apply {
-        put("src/generated/site.json", siteJson())
-    }
-
-    private fun siteJson(): String {
-        val incoming = graph.relations.groupBy { it.to }
-        val docs = documents.map { document ->
-            val node = graph.nodes.firstOrNull { it.id == document.id }
-            val nodeType = graph.nodeTypes.firstOrNull { it.id == document.id }
-            val nodeTypeDocument = document as? NodeTypeDocument
-            val relType = graph.relTypes.firstOrNull { it.id == document.id }
-            val timeline = graph.timelines.firstOrNull { it.id == document.id }
-            val propertyEntries = node?.propEntries?.let(::propertyEntriesToJson)
-                ?: timeline?.props?.entries?.map { (name, value) ->
-                    jsonObject(
-                        "name" to jsonString(name),
-                        "value" to value.toJson(),
-                        "validTime" to jsonArray(emptyList()),
-                        "fallback" to jsonBoolean(false),
-                    )
-                }?.let(::jsonArray)
-                ?: jsonArray(emptyList())
-            val schema = (nodeType?.props ?: relType?.props).orEmpty().entries.map { (name, prop) ->
-                jsonObject("name" to jsonString(name), "schema" to prop.toJson())
-            }
-            val relationUsage = if (document.kind == DocumentKind.RelType) {
-                graph.relations.filter { it.type == document.id }.map { relation ->
-                    jsonObject(
-                        "from" to jsonString(relation.from),
-                        "fromRoute" to jsonNullableString(routes[relation.from]),
-                        "to" to jsonString(relation.to),
-                        "toRoute" to jsonNullableString(routes[relation.to]),
-                        "label" to jsonString(relation.sourceLabel),
-                        "properties" to propertyEntriesToJson(relation.propEntries),
-                    )
-                }
-            } else emptyList()
-            val nodeTypeDetails = nodeTypeDocument?.let { current ->
-                fun typeLink(id: String): JsonValue {
-                    val target = documents.firstOrNull { it.id == id }
-                    return jsonObject(
-                        "id" to jsonString(id),
-                        "title" to jsonString(firstHeading(target?.body.orEmpty()) ?: id),
-                        "route" to jsonNullableString(routes[id]),
-                    )
-                }
-                val children = documents.filterIsInstance<NodeTypeDocument>()
-                    .filter { current.id in it.extends }
-                    .sortedBy { it.id }
-                val usage = graph.nodes.filter { it.type == current.id }.sortedBy { it.id }.map { usedBy ->
-                    val target = documents.firstOrNull { it.id == usedBy.id }
-                    jsonObject(
-                        "id" to jsonString(usedBy.id),
-                        "title" to jsonString(firstHeading(target?.body.orEmpty()) ?: usedBy.id),
-                        "kind" to jsonString(usedBy.kind.name),
-                        "route" to jsonNullableString(routes[usedBy.id]),
-                    )
-                }
-                jsonObject(
-                    "parents" to jsonArray(current.extends.map(::typeLink)),
-                    "children" to jsonArray(children.map { typeLink(it.id) }),
-                    "usage" to jsonArray(usage),
-                )
-            }
-            jsonObject(
-                "id" to jsonString(document.id),
-                "slug" to jsonString(safeSlug(document.id)),
-                "route" to jsonString(routes.getValue(document.id)),
-                "title" to jsonString(firstHeading(document.body) ?: document.id),
-                "kind" to jsonString(document.kind.name),
-                "type" to jsonNullableString(node?.type),
-                "url" to jsonNullableString(node?.url),
-                "body" to jsonString(document.body),
-                "properties" to propertyEntries,
-                "schema" to jsonArray(schema),
-                "nodeType" to (nodeTypeDetails ?: JsonValue.Null),
-                "relationUsage" to jsonArray(relationUsage),
-                "timeline" to (timeline?.let { current ->
-                    val mappings = graph.temporalModel.mappings.filter {
-                        it.sourceTimelineId == current.id || it.targetTimelineId == current.id
-                    }.map { mapping ->
-                        jsonObject(
-                            "direction" to jsonString(if (mapping.sourceTimelineId == current.id) "outgoing" else "incoming"),
-                            "source" to jsonString(mapping.sourceTimelineId),
-                            "sourceRoute" to jsonNullableString(routes[mapping.sourceTimelineId]),
-                            "target" to jsonString(mapping.targetTimelineId),
-                            "targetRoute" to jsonNullableString(routes[mapping.targetTimelineId]),
-                            "definition" to mapping.toJson(),
-                        )
-                    }
-                    jsonObject(
-                        "id" to jsonString(current.id),
-                        "axis" to jsonString(current.axisId),
-                        "domain" to jsonString(current.domainId),
-                        "coordinate" to current.coordinate.toJson(),
-                        "parent" to jsonNullableString(current.coordinateSystem.parentTimelineId),
-                        "parentRoute" to jsonNullableString(current.coordinateSystem.parentTimelineId?.let(routes::get)),
-                        "lineage" to (current.lineage?.toJson() ?: JsonValue.Null),
-                        "lineageRoute" to jsonNullableString(current.lineage?.sourceTimelineId?.let(routes::get)),
-                        "mappings" to jsonArray(mappings),
-                    )
-                } ?: JsonValue.Null),
-                "backlinks" to jsonArray(incoming[document.id].orEmpty().map { relation ->
-                    jsonObject(
-                        "id" to jsonString(relation.from),
-                        "type" to jsonString(relation.type),
-                        "route" to jsonNullableString(routes[relation.from]),
-                    )
-                }),
-            )
-        }
-        val nodes = graph.nodes.map { node ->
-            jsonObject("data" to jsonObject(
-                "id" to jsonString(node.id),
-                "label" to jsonString(firstHeading(documents.firstOrNull { it.id == node.id }?.body.orEmpty()) ?: node.id),
-                "route" to jsonNullableString(routes[node.id]),
-                "kind" to jsonString(node.kind.name),
-                "type" to jsonString(node.type),
-            ))
-        }
-        val edges = graph.relations.mapIndexed { index, relation ->
-            jsonObject("data" to jsonObject(
-                "id" to jsonString("e$index"), "source" to jsonString(relation.from),
-                "target" to jsonString(relation.to), "label" to jsonString(relation.type),
-            ))
-        }
-        val timelineNodes = graph.timelines.map { timeline ->
-            jsonObject("data" to jsonObject(
-                "id" to jsonString(timeline.id),
-                "label" to jsonString(timeline.id),
-                "route" to jsonNullableString(routes[timeline.id]),
-                "domain" to jsonString(timeline.domainId),
-            ))
-        }
-        val timelineEdges = buildList {
-            graph.timelines.forEach { timeline ->
-                timeline.coordinateSystem.parentTimelineId?.let { parent ->
-                    add(jsonObject("data" to jsonObject(
-                        "id" to jsonString("same-axis:${parent}:${timeline.id}"),
-                        "source" to jsonString(parent), "target" to jsonString(timeline.id),
-                        "label" to jsonString("same axis"), "kind" to jsonString("sameAxis"),
-                    )))
-                }
-                timeline.lineage?.let { lineage ->
-                    add(jsonObject("data" to jsonObject(
-                        "id" to jsonString("lineage:${lineage.sourceTimelineId}:${timeline.id}"),
-                        "source" to jsonString(lineage.sourceTimelineId), "target" to jsonString(timeline.id),
-                        "label" to jsonString(lineage.kind.name.lowercase()), "kind" to jsonString("lineage"),
-                    )))
-                }
-            }
-            graph.temporalModel.mappings.forEach { mapping ->
-                add(jsonObject("data" to jsonObject(
-                    "id" to jsonString("mapping:${mapping.id}"),
-                    "source" to jsonString(mapping.sourceTimelineId), "target" to jsonString(mapping.targetTimelineId),
-                    "label" to jsonString(mapping.kind.name.lowercase()), "kind" to jsonString("mapping"),
-                )))
-            }
-        }
-        return jsonObject(
-            "base" to jsonString(base),
-            "documents" to jsonArray(docs),
-            "routes" to JsonValue.Object(routes.mapValues { jsonString(it.value) }),
-            "graph" to jsonObject("nodes" to jsonArray(nodes), "edges" to jsonArray(edges)),
-            "timelineGraph" to jsonObject("nodes" to jsonArray(timelineNodes), "edges" to jsonArray(timelineEdges)),
-        ).encode() + "\n"
-    }
-}
-
 internal fun safeSlug(id: String): String = buildString {
     id.encodeToByteArray().forEach { byte ->
         val value = byte.toInt() and 0xff
         val character = value.toChar()
-        if (character in 'A'..'Z' || character in 'a'..'z' || character in '0'..'9' || character in setOf('_', '-', '.')) append(character)
-        else append('~').append(value.toString(16).uppercase().padStart(2, '0'))
+        if (character in 'A'..'Z' || character in 'a'..'z' || character in '0'..'9' ||
+            character in setOf('_', '-', '.')
+        ) append(character) else append('~').append(value.toString(16).uppercase().padStart(2, '0'))
     }
 }
-
-private fun firstHeading(body: String): String? = body.lineSequence().map(String::trim)
-    .firstOrNull { it.startsWith("# ") }?.removePrefix("# ")?.trim()?.trimEnd('#')?.trim()?.takeIf(String::isNotEmpty)

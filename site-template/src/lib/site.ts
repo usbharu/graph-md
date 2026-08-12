@@ -1,4 +1,4 @@
-import generatedSite from "../generated/site.json";
+import generatedSite from "virtual:graphmd/site";
 
 export type Backlink = {
   id: string;
