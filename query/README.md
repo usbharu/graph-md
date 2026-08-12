@@ -26,6 +26,10 @@ a names-only block inherits its parent block or node time. This is resolved
 while rebuilding the index from `SourceDocument`, without changing the static
 bundle schema.
 
+Dynamic `embed:query` and `embed:back-link` contents are generated cache data,
+so they are omitted entirely from body text, property, and relation assertions.
+Embed execution uses a 100-row result limit.
+
 ## Building and searching
 
 ```kotlin

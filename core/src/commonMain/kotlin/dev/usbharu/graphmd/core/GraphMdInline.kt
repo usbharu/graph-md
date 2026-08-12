@@ -9,6 +9,9 @@ import kotlin.js.JsExport
 data class RelationParts(val target: String, val relType: String)
 
 @JsExport
+data class EmbedParts(val kind: String, val value: String)
+
+@JsExport
 object GraphMdInline {
     public fun parseRelationTargetAndType(inside: String): RelationParts? =
         RelationTargetParser.parse(inside)?.let { RelationParts(it.first, it.second) }
@@ -30,5 +33,12 @@ object GraphMdInline {
             true
         } catch (_: InlinePropsParseException) {
             false
+        }
+
+    public fun parseEmbedHeader(content: String): EmbedParts? =
+        when (val embed = BodyBlockHeaderParser.parse(content).embed) {
+            is dev.usbharu.graphmd.core.model.EmbedDirective.Query -> EmbedParts("query", embed.query)
+            is dev.usbharu.graphmd.core.model.EmbedDirective.BackLink -> EmbedParts("back-link", embed.relType)
+            null -> null
         }
 }

@@ -27,6 +27,13 @@ class BodySyntaxExtractor {
         )
         diagnostics += blockParsing.diagnostics
         val blocks = blockParsing.blocks
+        val semanticMasked = masked.toCharArray().also { characters ->
+            blocks.filter { it.embed != null }.forEach { block ->
+                for (offset in block.contentRange.start until block.contentRange.end.coerceAtMost(characters.size)) {
+                    if (characters[offset] != '\n' && characters[offset] != '\r') characters[offset] = ' '
+                }
+            }
+        }.concatToString()
 
         fun inheritedBlockValidTime(index: Int): List<ValidTime> =
             blocks.asSequence()
@@ -40,15 +47,15 @@ class BodySyntaxExtractor {
                 .orEmpty()
 
         var index = 0
-        while (index < masked.length) {
-            if (masked[index] == '@' && !isEscaped(masked, index)) {
+        while (index < semanticMasked.length) {
+            if (semanticMasked[index] == '@' && !isEscaped(semanticMasked, index)) {
                 when {
-                    isDirectiveKeywordAt(masked, index, "@props") -> {
+                    isDirectiveKeywordAt(semanticMasked, index, "@props") -> {
                         var objectStart = index + "@props".length
                         var defaultValidTime: RawArray? =
                             inheritedBlockValidTime(index).takeIf { it.isNotEmpty() }?.let(::validTimesToRawArray)
-                        if (masked.getOrNull(objectStart) == '(') {
-                            val args = readBalanced(masked, objectStart, '(', ')')
+                        if (semanticMasked.getOrNull(objectStart) == '(') {
+                            val args = readBalanced(semanticMasked, objectStart, '(', ')')
                             if (args == null) {
                                 propsSyntaxValid = false
                                 diagnostics += syntaxDiagnostic("Unclosed @props arguments", sourcePath, documentId, index, body.length)
@@ -73,8 +80,8 @@ class BodySyntaxExtractor {
                             }
                             objectStart = args.end
                         }
-                        if (masked.getOrNull(objectStart) == '{') {
-                            val range = readBalanced(masked, objectStart, '{', '}')
+                        if (semanticMasked.getOrNull(objectStart) == '{') {
+                            val range = readBalanced(semanticMasked, objectStart, '{', '}')
                             if (range != null) {
                                 val text = body.substring(objectStart, range.end)
                                 try {
@@ -101,9 +108,9 @@ class BodySyntaxExtractor {
                             diagnostics += syntaxDiagnostic("Unclosed @props block", sourcePath, documentId, index, body.length)
                         }
                     }
-                    isDirectiveKeywordAt(masked, index, "@link") -> {
+                    isDirectiveKeywordAt(semanticMasked, index, "@link") -> {
                         val relation = parseCanonicalRelation(
-                            masked,
+                            semanticMasked,
                             body,
                             index,
                             sourcePath,

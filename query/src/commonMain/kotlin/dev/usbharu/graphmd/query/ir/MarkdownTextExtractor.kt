@@ -41,6 +41,13 @@ internal object MarkdownTextExtractor {
                 .orEmpty()
         }
 
+        fun insideEmbed(absoluteOffset: Int): Boolean {
+            val relativeBodyOffset = absoluteOffset - bodyOffset
+            return bodyBlocks.any { block ->
+                block.embed != null && relativeBodyOffset >= block.contentRange.start && relativeBodyOffset < block.contentRange.end
+            }
+        }
+
         val result = mutableListOf<ExtractedText>()
         var paragraphStart = -1
         val paragraph = StringBuilder()
@@ -83,7 +90,7 @@ internal object MarkdownTextExtractor {
             val lineEnd = source.indexOf('\n', offset).let { if (it < 0) source.length else it }
             val rawLine = source.substring(offset, lineEnd)
             val trimmed = rawLine.trim()
-            if (offset in markerLineStarts) {
+            if (offset in markerLineStarts || insideEmbed(offset)) {
                 flushParagraph(offset)
             } else if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
                 if (inCode) {
