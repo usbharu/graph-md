@@ -99,6 +99,11 @@ Gradle builds do not require Node.js or pnpm. After changing the query JS API
 or `markdown-it-graphmd`, maintainers can refresh them explicitly with
 `./gradlew :cli:updateEmbeddedWebRuntime`; that maintenance task requires pnpm.
 
+The generated site's source lives in `site-template/` as a regular Astro
+project. Work on the Wiki UI directly with `cd site-template && pnpm install &&
+pnpm dev`; Gradle mechanically packages that directory for the multiplatform
+CLI and contains no handwritten HTML, Astro, TSX, or CSS templates.
+
 Inline queries and `--query-file` are supported. Repeat `--param NAME=VALUE`
 for prepared-query parameters; `null`, booleans, integers, decimals, and
 quoted JSON strings are inferred, while other values are strings. Results are

@@ -1,0 +1,29 @@
+---
+import WikiLayout from "../layouts/WikiLayout.astro";
+import { site } from "../lib/site";
+
+const groups = site.documents.reduce((all, document) => {
+  (all[document.kind] ??= []).push(document);
+  return all;
+}, {} as Record<string, typeof site.documents>);
+---
+
+<WikiLayout title="Home">
+  <h1>Documents</h1>
+  <p class="lead">{site.documents.length}件のGraphMD文書</p>
+  {Object.entries(groups).map(([kind, documents]) => (
+    <section>
+      <h2>{kind}</h2>
+      <div class="cards">
+        {documents.map((document) => (
+          <a class="card" href={document.route}>
+            <strong>{document.title}</strong>
+            <span>
+              {document.id}{document.type ? ` · ${document.type}` : ""}
+            </span>
+          </a>
+        ))}
+      </div>
+    </section>
+  ))}
+</WikiLayout>

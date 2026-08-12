@@ -13,9 +13,12 @@ val generatedVersionSource = resources.text.fromString(
     """.trimIndent() + "\n",
 )
 
-val embeddedWebRuntimeSource = layout.projectDirectory.file(
-    "src/commonMain/kotlin/dev/usbharu/graphmd/cli/EmbeddedWebRuntime.kt",
-)
+val siteTemplateDirectory = rootProject.layout.projectDirectory.dir("site-template")
+val embeddedWebRuntimeDirectory = siteTemplateDirectory.dir("runtime-encoded")
+val generatedSiteTemplateDirectory = layout.buildDirectory.dir("generated/siteTemplate")
+val generatedSiteTemplateSource = generatedSiteTemplateDirectory.map {
+    it.file("dev/usbharu/graphmd/cli/GeneratedSiteTemplate.kt")
+}
 
 val syncMarkdownCoreVendor by tasks.registering(Sync::class) {
     dependsOn(":core:jsNodeProductionLibraryDistribution")
@@ -64,13 +67,26 @@ val updateEmbeddedWebRuntime by tasks.registering(Exec::class) {
     dependsOn(bundleQueryWebRuntime, bundleMarkdownItGraphMd)
     val markdownBundle = rootProject.layout.projectDirectory.file("markdown-it-graphmd/dist/index.js")
     inputs.files(bundledQueryRuntime, markdownBundle)
-    outputs.file(embeddedWebRuntimeSource)
+    outputs.files(
+        embeddedWebRuntimeDirectory.file("graph-md-query-runtime.js.gz.b64"),
+        embeddedWebRuntimeDirectory.file("markdown-it-graphmd.js.gz.b64"),
+    )
     commandLine(
         "node", rootProject.file("scripts/embed-web-runtime.mjs").absolutePath,
-        embeddedWebRuntimeSource.asFile.absolutePath,
+        embeddedWebRuntimeDirectory.asFile.absolutePath,
         bundledQueryRuntime.get().asFile.absolutePath,
         markdownBundle.asFile.absolutePath,
     )
+}
+
+val siteTemplateFiles = fileTree(siteTemplateDirectory) {
+    exclude("node_modules/**", "dist/**", ".astro/**", "public/runtime/**", "src/vendor/**")
+}
+
+val generateSiteTemplate by tasks.registering(GenerateSiteTemplateTask::class) {
+    sourceRoot.set(siteTemplateDirectory)
+    templateFiles.from(siteTemplateFiles)
+    outputFile.set(generatedSiteTemplateSource)
 }
 
 val generateCliVersion by tasks.registering(Sync::class) {
@@ -119,6 +135,7 @@ kotlin {
     sourceSets {
         commonMain {
             kotlin.srcDir(generateCliVersion)
+            kotlin.srcDir(generatedSiteTemplateDirectory)
             dependencies {
                 implementation(project(":core"))
                 implementation(project(":query"))
@@ -131,6 +148,10 @@ kotlin {
             }
         }
     }
+}
+
+tasks.matching { it.name.startsWith("compileKotlin") }.configureEach {
+    dependsOn(generateSiteTemplate)
 }
 
 tasks.register<JavaExec>("run") {

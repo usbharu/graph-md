@@ -1,0 +1,13 @@
+---
+import GraphApp from "../components/GraphApp";
+import WikiLayout from "../layouts/WikiLayout.astro";
+import { site } from "../lib/site";
+---
+
+<WikiLayout title="グラフ">
+  <h1>グラフ</h1>
+  <GraphApp
+    client:only="react"
+    elements={[...site.graph.nodes, ...site.graph.edges]}
+  />
+</WikiLayout>

@@ -1,0 +1,41 @@
+---
+import WikiLayout from "../../layouts/WikiLayout.astro";
+import { renderMarkdown } from "../../lib/markdown";
+import { site } from "../../lib/site";
+
+export function getStaticPaths() {
+  return site.documents.map((document) => ({
+    params: { slug: document.slug },
+    props: { document },
+  }));
+}
+
+const { document } = Astro.props;
+const html = renderMarkdown(document.body);
+---
+
+<WikiLayout title={document.title}>
+  <article>
+    <div class="eyebrow">
+      {document.kind}{document.type && ` · ${document.type}`}
+    </div>
+    <h1>{document.title}</h1>
+    {document.url && <p><a href={document.url}>メディアを開く ↗</a></p>}
+    <div class="markdown" set:html={html} />
+    <footer>
+      <h2>Backlinks</h2>
+      {document.backlinks.length ? (
+        <ul>
+          {document.backlinks.map((link) => (
+            <li>
+              {link.route ? <a href={link.route}>{link.id}</a> : link.id}
+              {" "}<small>{link.type}</small>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p>リンクはありません。</p>
+      )}
+    </footer>
+  </article>
+</WikiLayout>

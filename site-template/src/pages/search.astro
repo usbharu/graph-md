@@ -1,0 +1,11 @@
+---
+import SearchApp from "../components/SearchApp";
+import WikiLayout from "../layouts/WikiLayout.astro";
+import { site } from "../lib/site";
+---
+
+<WikiLayout title="検索">
+  <h1>検索</h1>
+  <script is:inline src={site.base + "runtime/graph-md-query-runtime.js"}></script>
+  <SearchApp client:load documents={site.documents} base={site.base} />
+</WikiLayout>

@@ -1,0 +1,32 @@
+{
+  "base": "/",
+  "documents": [
+    {
+      "id": "welcome",
+      "slug": "welcome",
+      "route": "/documents/welcome/",
+      "title": "Welcome to GraphMD",
+      "kind": "Node",
+      "type": "Page",
+      "url": null,
+      "body": "# Welcome to GraphMD\n\nEdit the Astro project in `site-template/` and preview changes directly with `pnpm dev`.\n",
+      "backlinks": []
+    }
+  ],
+  "routes": {
+    "welcome": "/documents/welcome/"
+  },
+  "graph": {
+    "nodes": [
+      {
+        "data": {
+          "id": "welcome",
+          "label": "Welcome to GraphMD",
+          "route": "/documents/welcome/",
+          "kind": "Node"
+        }
+      }
+    ],
+    "edges": []
+  }
+}

@@ -1,0 +1,35 @@
+---
+import { site } from "../lib/site";
+import "../styles/global.css";
+
+const { title } = Astro.props;
+---
+
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>{title} · GraphMD</title>
+  </head>
+  <body>
+    <header>
+      <a class="brand" href={site.base}>GraphMD Wiki</a>
+      <nav>
+        <a href={site.base + "search/"}>検索</a>
+        <a href={site.base + "graph/"}>グラフ</a>
+      </nav>
+    </header>
+    <div class="shell">
+      <aside>
+        <h2>Documents</h2>
+        {site.documents.map((doc) => (
+          <a href={doc.route}>
+            {doc.title}<small>{doc.kind} · {doc.id}</small>
+          </a>
+        ))}
+      </aside>
+      <main><slot /></main>
+    </div>
+  </body>
+</html>

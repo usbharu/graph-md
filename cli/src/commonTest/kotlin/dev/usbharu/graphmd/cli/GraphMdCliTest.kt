@@ -41,8 +41,8 @@ class GraphMdCliTest {
         assertTrue(generated.getValue("/site/src/components/SearchApp.tsx").contains("GraphMdWebSearch"))
         assertTrue(generated.getValue("/site/src/generated/site.json").contains("/wiki/documents/alice/"))
         assertFalse(generated.getValue("/site/package.json").contains("workspace:"))
-        assertTrue(generated.getValue("/site/package.json").contains("\"@astrojs/react\":\"5.0.7\""))
-        assertTrue(generated.getValue("/site/package.json").contains("\"astro\":\"6.4.8\""))
+        assertTrue(generated.getValue("/site/package.json").contains("\"@astrojs/react\": \"5.0.7\""))
+        assertTrue(generated.getValue("/site/package.json").contains("\"astro\": \"6.4.8\""))
     }
 
     @Test
@@ -64,7 +64,7 @@ class GraphMdCliTest {
         val replaced = cli.run(listOf("site", "/site", "/workspace", "--force"))
         assertEquals(0, replaced.exitCode, replaced.stderr)
         assertFalse("/site/keep.txt" in fileSystem.contentsUnder("/site"))
-        assertFalse("/site/pnpm-lock.yaml" in fileSystem.contentsUnder("/site"))
+        assertTrue(fileSystem.contentsUnder("/site").getValue("/site/pnpm-lock.yaml") != "stale lockfile")
     }
 
     @Test
