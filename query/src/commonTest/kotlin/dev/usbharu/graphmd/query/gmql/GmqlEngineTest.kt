@@ -357,6 +357,10 @@ class GmqlEngineTest {
                 """MATCH (n:Person) VALID ON MainStory ANYTIME RETURN ID(n) AS id ORDER BY id""" to
                     listOf("alice", "bob")
                 ),
+            "WITHIN remains available as an existing unquoted identifier" to (
+                """MATCH (WITHIN:Person) VALID ON MainStory AT 100
+                   RETURN ID(WITHIN) AS id ORDER BY id""" to listOf("alice", "bob")
+                ),
         )
 
         cases.forEach { (description, queryAndExpected) ->

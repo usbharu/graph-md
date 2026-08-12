@@ -422,7 +422,7 @@ private class Parser(private val tokens: List<Token>) {
 }
 
 private val RESERVED_KEYWORDS = setOf(
-    "MATCH", "WHERE", "VALID", "ON", "AT", "OVERLAPS", "CONTAINS", "DURING", "ANYTIME", "WITHIN",
+    "MATCH", "WHERE", "VALID", "ON", "AT", "OVERLAPS", "CONTAINS", "DURING", "ANYTIME",
     "RETURN", "DISTINCT", "AS", "ORDER", "BY", "ASC", "DESC", "OFFSET", "LIMIT",
     "AND", "OR", "NOT", "IN", "IS", "NULL", "MISSING", "TRUE", "FALSE",
 )

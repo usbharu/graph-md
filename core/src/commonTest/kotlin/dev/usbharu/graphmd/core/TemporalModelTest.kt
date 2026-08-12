@@ -227,6 +227,69 @@ class TemporalModelTest {
     }
 
     @Test
+    fun `calendar pattern honors Julian leap rules and offset year numbering`() {
+        val result = compile(
+            timeline("Gregorian", "coordinate: gregorian"),
+            timeline("Julian", "sameAxisAs: Gregorian\ncoordinate: julian"),
+            timeline(
+                "JulianLeapDay",
+                """
+                sameAxisAs: Julian
+                coordinate:
+                  kind: calendar-pattern
+                  calendar: julian
+                  fields: [month, day]
+                  repeatsEvery: year
+                """.trimIndent(),
+            ),
+            timeline(
+                "BuddhistMonth",
+                """
+                sameAxisAs: Gregorian
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [year, month]
+                  numbering:
+                    kind: offset
+                    offset: 543
+                    yearZero: false
+                """.trimIndent(),
+            ),
+        )
+        assertTrue(result.diagnostics.isEmpty(), result.diagnostics.toString())
+        val engine = TemporalEngine(result.temporalModel)
+
+        val julianWindow = TemporalExpansionWindow(
+            checkNotNull(engine.normalizeToAxis("Julian", TemporalCoordinate.CalendarDate(1900, 1, 1))),
+            checkNotNull(engine.normalizeToAxis("Julian", TemporalCoordinate.CalendarDate(1901, 1, 1))),
+        )
+        val julianLeapDay = assertIs<TemporalSelection.Recurrence>(
+            engine.resolveToAxis(
+                "JulianLeapDay",
+                engine.parse("JulianLeapDay", "02-29").coordinate,
+                julianWindow,
+            ),
+        )
+        assertEquals(1, julianLeapDay.occurrences.size)
+        assertEquals(
+            checkNotNull(engine.normalizeToAxis("Julian", TemporalCoordinate.CalendarDate(1900, 2, 29))),
+            julianLeapDay.occurrences.single().start,
+        )
+
+        val buddhistMonth = assertIs<TemporalSelection.Period>(
+            engine.resolveToAxis("BuddhistMonth", engine.parse("BuddhistMonth", "2567-02").coordinate),
+        ).value
+        assertEquals(
+            checkNotNull(engine.normalizeToAxis("Gregorian", TemporalCoordinate.CalendarDate(2024, 2, 1))),
+            buddhistMonth.start,
+        )
+        assertEquals(
+            checkNotNull(engine.normalizeToAxis("Gregorian", TemporalCoordinate.CalendarDate(2024, 3, 1))),
+            buddhistMonth.endExclusive,
+        )
+    }
+
+    @Test
     fun `calendar pattern resolves ISO week and configurable fiscal quarter boundaries`() {
         val result = compile(
             timeline("CommonEra", "coordinate: gregorian"),
@@ -380,6 +443,15 @@ class TemporalModelTest {
                   format: "{month:1}1{day:1}"
                 """.trimIndent(),
             ),
+            timeline(
+                "OverflowingQuarterStartMonth",
+                """
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [year, quarter]
+                  quarterStartMonth: 4294967297
+                """.trimIndent(),
+            ),
         )
 
         assertTrue(result.diagnostics.any { it.message == "calendar-pattern day requires month" })
@@ -395,6 +467,9 @@ class TemporalModelTest {
                 it.message == "coordinate.format MUST separate adjacent variable-width fields"
             },
         )
+        assertTrue(result.diagnostics.any {
+            it.message == "coordinate.quarterStartMonth MUST be between 1 and 12"
+        })
     }
 
     @Test

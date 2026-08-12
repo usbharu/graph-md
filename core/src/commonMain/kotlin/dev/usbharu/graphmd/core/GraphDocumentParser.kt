@@ -505,10 +505,11 @@ class GraphDocumentParser {
         if (hasAuthoredYear && repeatsEvery != null) {
             diagnostics += schemaError("repeating calendar-pattern fields MUST omit year and weekYear", sourcePath, documentId)
         }
-        val quarterStartMonth = map.long("quarterStartMonth", sourcePath, diagnostics, documentId)?.toInt() ?: 1
-        if (quarterStartMonth !in 1..12) {
+        val rawQuarterStartMonth = map.long("quarterStartMonth", sourcePath, diagnostics, documentId)
+        if (rawQuarterStartMonth != null && rawQuarterStartMonth !in 1L..12L) {
             diagnostics += schemaError("coordinate.quarterStartMonth MUST be between 1 and 12", sourcePath, documentId)
         }
+        val quarterStartMonth = rawQuarterStartMonth?.takeIf { it in 1L..12L }?.toInt() ?: 1
         if (("quarterStartMonth" in map.map || "quarterYearLabel" in map.map) && CalendarField.Quarter !in fieldSet) {
             diagnostics += schemaError("quarter options require the quarter field", sourcePath, documentId)
         }
