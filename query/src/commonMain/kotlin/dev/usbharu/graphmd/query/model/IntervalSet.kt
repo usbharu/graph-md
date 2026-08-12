@@ -497,7 +497,10 @@ class TimelineCatalog private constructor(
         val to = extent.to?.let { periods(resolve(it)) }.orEmpty()
         val ranges = when {
             extent.from != null && extent.to != null -> from.mapNotNull { start ->
-                val end = to.firstOrNull { it.endExclusive > start.start } ?: return@mapNotNull null
+                val latestEnd = start.start + ExactRational.of(CALENDAR_PATTERN_MAX_YEAR_CYCLE_DAYS)
+                val end = to.firstOrNull {
+                    it.endExclusive > start.start && it.endExclusive <= latestEnd
+                } ?: return@mapNotNull null
                 TemporalAxisPeriod(start.start, end.endExclusive)
             }
             extent.from != null -> from
@@ -576,3 +579,6 @@ class TimelineCatalog private constructor(
 // Gregorian leap-day and ISO week-53 patterns repeat within at most eight years.
 // Two extra years keep endpoint pairing explicit without expanding an unbounded recurrence.
 private const val CALENDAR_PATTERN_RANGE_CONTEXT_YEARS = 10
+// A yearly range may cross one year boundary, but it must not skip a cycle to find a missing endpoint.
+// ISO week-years can contain 53 weeks, so their maximum cycle is 371 days rather than 366.
+private const val CALENDAR_PATTERN_MAX_YEAR_CYCLE_DAYS = 371L

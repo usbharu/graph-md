@@ -427,6 +427,29 @@ class GmqlEngineTest {
                 """,
             ),
             source(
+                "/leap-range-type.md",
+                """
+                ---
+                id: LeapRange
+                kind: NodeType
+                ---
+                """,
+            ),
+            source(
+                "/leap-end.md",
+                """
+                ---
+                id: leap-end
+                kind: Node
+                type: LeapRange
+                validTime:
+                  - timeline: Birthday
+                    from: "01-01"
+                    to: "02-29"
+                ---
+                """,
+            ),
+            source(
                 "/place-type.md",
                 """
                 ---
@@ -454,7 +477,8 @@ class GmqlEngineTest {
         val compilation = GraphCompiler().compileSources(localSources)
         val newDocumentDiagnostics = compilation.diagnostics.filter {
             it.source?.path in setOf(
-                "/common-era.md", "/birthday.md", "/leapling.md", "/new-year.md", "/place-type.md", "/tokyo.md",
+                "/common-era.md", "/birthday.md", "/leapling.md", "/new-year.md", "/leap-range-type.md", "/leap-end.md",
+                "/place-type.md", "/tokyo.md",
             )
         }
         assertTrue(newDocumentDiagnostics.isEmpty(), newDocumentDiagnostics.toString())
@@ -567,6 +591,30 @@ class GmqlEngineTest {
         )
         val invalidExpansionIndexed = runSuspend { localEngine.search(invalidExpansionQuery) }
         val invalidExpansionReference = runSuspend { localEngine.scan(invalidExpansionQuery) }
+        val missingLeapEnd = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:LeapRange)
+                   VALID ON Birthday AT "06-01"
+                   WITHIN ["2001-01-01", "2002-01-01")
+                   RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
+        val presentLeapEnd = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:LeapRange)
+                   VALID ON Birthday AT "02-01"
+                   WITHIN ["2004-01-01", "2005-01-01")
+                   RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
+        val overflowingWithin = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person)
+                   VALID ON Birthday AT "02-29"
+                   WITHIN ["999999999999999999999-01-01", "2002-01-01")
+                   RETURN ID(n) AS id""",
+            )
+        }
 
         assertEquals(listOf("leapling"), leapDay.stringColumn())
         rangeOperators.forEach { (operator, result) ->
@@ -595,6 +643,11 @@ class GmqlEngineTest {
         assertEquals(QueryDiagnosticCode.UNKNOWN_TIMELINE, unknownExpansionIndexed.diagnostics.single().code)
         assertEquals(invalidExpansionReference, invalidExpansionIndexed)
         assertEquals(QueryDiagnosticCode.INVALID_TEMPORAL_WINDOW, invalidExpansionIndexed.diagnostics.single().code)
+        assertTrue(missingLeapEnd.isSuccess, missingLeapEnd.diagnostics.toString())
+        assertTrue(missingLeapEnd.rows.isEmpty(), missingLeapEnd.toString())
+        assertEquals(listOf("leap-end"), presentLeapEnd.stringColumn())
+        assertFalse(overflowingWithin.isSuccess)
+        assertEquals("GMQL4005", overflowingWithin.diagnostics.single().code)
     }
 
     @Test

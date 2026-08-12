@@ -949,11 +949,20 @@ internal class GmqlExecutor(
                 ?: throw GmqlEvaluationException(
                     diagnostic("GMQL4005", "WITHIN bounds must use YYYY-MM-DD.", expression.range, GmqlDiagnosticKind.TEMPORAL),
                 )
-            return TemporalCoordinate.CalendarDate(
-                match.groupValues[1].toLong(),
-                match.groupValues[2].toInt(),
-                match.groupValues[3].toInt(),
-            )
+            val year = match.groupValues[1].toLongOrNull()
+            val month = match.groupValues[2].toIntOrNull()
+            val day = match.groupValues[3].toIntOrNull()
+            if (year == null || month == null || day == null) {
+                throw GmqlEvaluationException(
+                    diagnostic(
+                        "GMQL4005",
+                        "WITHIN bounds are outside the supported calendar range.",
+                        expression.range,
+                        GmqlDiagnosticKind.TEMPORAL,
+                    ),
+                )
+            }
+            return TemporalCoordinate.CalendarDate(year, month, day)
         }
         return graph.timelineCatalog.expansionWindow(
             CalendarExpansionWindow(timeline, date(interval.start), date(interval.end)),

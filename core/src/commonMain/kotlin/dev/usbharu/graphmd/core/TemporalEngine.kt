@@ -25,12 +25,11 @@ class TemporalEngine(
     fun coerceCoordinate(timeline: String, coordinate: TemporalCoordinate): TemporalCoordinate? {
         val spec = coordinateSystems[timeline]?.coordinate ?: return null
         if (spec !is TemporalCoordinateSpec.CalendarPattern) return coordinate
-        return when (coordinate) {
+        val pattern = when (coordinate) {
             is TemporalCoordinate.CalendarPattern -> coordinate
             is TemporalCoordinate.Label -> parseCalendarPattern(spec, coordinate.value)
             is TemporalCoordinate.Rational -> if (coordinate.value.denominator == 1L && spec.fields.size == 1) {
                 TemporalCoordinate.CalendarPattern(mapOf(spec.fields.single() to coordinate.value.numerator))
-                    .takeIf { validCalendarPatternFields(spec, it.fields) }
             } else {
                 null
             }
@@ -51,6 +50,9 @@ class TemporalEngine(
                 null
             }
             else -> null
+        }
+        return pattern?.takeIf {
+            it.fields.keys == spec.fields.toSet() && validCalendarPatternFields(spec, it.fields)
         }
     }
 
@@ -742,7 +744,7 @@ private fun calendarFieldPattern(field: CalendarField, width: Int?): String {
         field == CalendarField.Year || field == CalendarField.WeekYear ->
             if (width == null) "[+-]?\\d{4,}" else "[+-]?\\d{$width,}"
         width == null -> "\\d{${defaultCalendarFieldWidth(field)}}"
-        else -> "\\d{$width}"
+        else -> "\\d{$width,}"
     }
     return "($digits)"
 }

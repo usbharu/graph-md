@@ -154,6 +154,17 @@ class TemporalModelTest {
                   format: "{day:02}/{month:02}"
                 """.trimIndent(),
             ),
+            timeline(
+                "ShortMonth",
+                """
+                sameAxisAs: CommonEra
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [month]
+                  repeatsEvery: year
+                  format: "{month:1}"
+                """.trimIndent(),
+            ),
         )
         assertTrue(result.diagnostics.isEmpty(), result.diagnostics.toString())
         val engine = TemporalEngine(result.temporalModel)
@@ -173,6 +184,12 @@ class TemporalModelTest {
         assertEquals(
             mapOf(CalendarField.Month to 2L, CalendarField.Day to 8L),
             assertIs<TemporalCoordinate.CalendarPattern>(birthday.coordinate).fields,
+        )
+        val shortMonth = engine.parse("ShortMonth", "12")
+        assertEquals("12", engine.format("ShortMonth", shortMonth.coordinate))
+        assertEquals(
+            shortMonth.coordinate,
+            engine.parse("ShortMonth", engine.format("ShortMonth", shortMonth.coordinate)).coordinate,
         )
     }
 
@@ -394,6 +411,60 @@ class TemporalModelTest {
 
         assertTrue(result.diagnostics.any {
             it.message == "published.value is not valid for PublicationMonth"
+        }, result.diagnostics.toString())
+    }
+
+    @Test
+    fun `calendar pattern rejects invalid structured dates in instant and duration properties`() {
+        val result = compile(
+            timeline(
+                "PatternDate",
+                """
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [year, month, day]
+                """.trimIndent(),
+            ),
+            SourceDocument(
+                """
+                ---
+                id: Event
+                kind: NodeType
+                props:
+                  occurredAt:
+                    type: instant
+                    timeline: PatternDate
+                  active:
+                    type: duration
+                    timeline: PatternDate
+                ---
+                """.trimIndent(),
+                "/event-type.md",
+            ),
+            SourceDocument(
+                """
+                ---
+                id: invalid-date
+                kind: Node
+                type: Event
+                props:
+                  occurredAt:
+                    timeline: PatternDate
+                    value: { year: 2023, month: 2, day: 29 }
+                  active:
+                    timeline: PatternDate
+                    from: { year: 2023, month: 2, day: 29 }
+                ---
+                """.trimIndent(),
+                "/invalid-date.md",
+            ),
+        )
+
+        assertTrue(result.diagnostics.any {
+            it.message == "occurredAt.value is not valid for PatternDate"
+        }, result.diagnostics.toString())
+        assertTrue(result.diagnostics.any {
+            it.message == "active.from is not valid for PatternDate"
         }, result.diagnostics.toString())
     }
 
