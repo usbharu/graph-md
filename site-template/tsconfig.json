@@ -5,5 +5,5 @@
     "jsxImportSource": "react",
     "resolveJsonModule": true
   },
-  "exclude": ["dist", "node_modules", "public/runtime", "src/vendor"]
+  "exclude": ["dist", "node_modules", "public/runtime", "src/vendor", "vendor"]
 }

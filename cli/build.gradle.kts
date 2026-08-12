@@ -146,8 +146,8 @@ val stageSiteTemplate by tasks.registering(Sync::class) {
     filesMatching(listOf("package.json", "pnpm-lock.yaml")) {
         filter { line ->
             line.replace(
-                "file:../astro/build/dist/js/productionLibrary",
-                "file:./vendor/graph-md-astro",
+                "../astro/build/dist/js/productionLibrary",
+                "./vendor/graph-md-astro",
             )
         }
     }

@@ -12,6 +12,7 @@ const VIRTUAL_MODULES = Object.freeze({
 });
 
 const RESOLVED_PREFIX = "\0graphmd:";
+const EXCLUDED_DIRECTORIES = new Set([".git", ".astro", "node_modules", "build", "dist"]);
 
 /**
  * Compiles Graph Markdown as part of Astro's Vite pipeline.
@@ -141,17 +142,24 @@ export { VIRTUAL_MODULES };
 
 async function readSources(roots, extensions, projectRoot) {
   const files = [];
-  for (const root of roots) await walk(root, extensions, files);
-  files.sort((left, right) => left.localeCompare(right));
-  return Promise.all(
-    files.map(async (file) => ({
+  for (const root of roots) {
+    const excludeProject = root !== projectRoot && isInside(projectRoot, root);
+    await walk(root, extensions, files, { explicit: true, projectRoot, excludeProject });
+  }
+  files.sort((left, right) => left.file.localeCompare(right.file));
+  const sources = await Promise.all(
+    files.map(async ({ file, explicit }) => ({
+      explicit,
       path: normalizePath(path.relative(projectRoot, file)),
       text: await fs.readFile(file, "utf8"),
     })),
   );
+  return sources
+    .filter((source) => source.explicit || firstLine(source.text) === "---")
+    .map(({ path: sourcePath, text }) => ({ path: sourcePath, text }));
 }
 
-async function walk(directory, extensions, output) {
+async function walk(directory, extensions, output, context) {
   let metadata;
   try {
     metadata = await fs.stat(directory);
@@ -160,10 +168,13 @@ async function walk(directory, extensions, output) {
     throw error;
   }
   if (metadata.isFile()) {
-    if (extensions.has(path.extname(directory))) output.push(directory);
+    if (extensions.has(path.extname(directory))) {
+      output.push({ file: directory, explicit: context.explicit });
+    }
     return;
   }
   if (!metadata.isDirectory()) return;
+  if (context.excludeProject && path.resolve(directory) === context.projectRoot) return;
   let entries;
   try {
     entries = await fs.readdir(directory, { withFileTypes: true });
@@ -172,10 +183,23 @@ async function walk(directory, extensions, output) {
     throw error;
   }
   for (const entry of entries) {
+    if (entry.isDirectory() && EXCLUDED_DIRECTORIES.has(entry.name)) continue;
     const absolute = path.join(directory, entry.name);
-    if (entry.isDirectory()) await walk(absolute, extensions, output);
-    else if (entry.isFile() && extensions.has(path.extname(entry.name))) output.push(absolute);
+    if (entry.isDirectory()) {
+      await walk(absolute, extensions, output, { ...context, explicit: false });
+    } else if (entry.isFile() && extensions.has(path.extname(entry.name))) {
+      output.push({ file: absolute, explicit: false });
+    }
   }
+}
+
+function firstLine(text) {
+  return text.split(/\r?\n/, 1)[0];
+}
+
+function isInside(candidate, parent) {
+  const relative = path.relative(parent, candidate);
+  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
 function isGraphMdSource(file, roots, extensions) {
