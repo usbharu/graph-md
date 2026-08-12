@@ -3442,6 +3442,36 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `rename batch preserves every document in a chained move`() {
+        val index = GraphMdWorkspaceIndex()
+        val firstUri = "file:///workspace/first.md"
+        val secondUri = "file:///workspace/second.md"
+        val thirdUri = "file:///workspace/third.md"
+        val firstReferenceUri = "file:///workspace/first-reference.md"
+        val secondReferenceUri = "file:///workspace/second-reference.md"
+        index.upsert(firstUri, graphDocument("FirstType", "NodeType"))
+        index.upsert(secondUri, graphDocument("SecondType", "NodeType"))
+        index.upsert(firstReferenceUri, "---\nid: first-reference\nkind: Node\ntype: FirstType\n---")
+        index.upsert(secondReferenceUri, "---\nid: second-reference\nkind: Node\ntype: SecondType\n---")
+
+        index.rename(
+            listOf(
+                FileRename(firstUri, secondUri),
+                FileRename(secondUri, thirdUri),
+            ),
+        )
+
+        assertEquals(
+            listOf(secondUri),
+            index.definitions(firstReferenceUri, Position(3, "type: ".length)).map { it.uri },
+        )
+        assertEquals(
+            listOf(thirdUri),
+            index.definitions(secondReferenceUri, Position(3, "type: ".length)).map { it.uri },
+        )
+    }
+
+    @Test
     fun `deleting a watched file clears its published diagnostics`() {
         val root = Files.createTempDirectory("graphmd-lsp-delete-diagnostics")
         try {

@@ -299,19 +299,25 @@ internal class GraphMdWorkspaceIndex(
     }
 
     fun rename(files: List<FileRename>) {
-        val renames = files.map { normalizeUri(it.oldUri) to normalizeUri(it.newUri) }
+        val renames = files
+            .map { normalizeUri(it.oldUri) to normalizeUri(it.newUri) }
+            .filter { (oldUri, newUri) -> oldUri != newUri }
         synchronized(this) {
-            renames.forEach { (oldUri, newUri) ->
-                if (oldUri == newUri) return@forEach
+            val sourceUris = renames.mapTo(mutableSetOf()) { it.first }
+            val sourceDocuments = sourceUris.associateWith(documents::get)
+            val openSourceUris = sourceUris.intersect(openDocuments)
+            sourceUris.forEach {
+                documents.remove(it)
+                openDocuments.remove(it)
+            }
 
-                val source = documents.remove(oldUri)
-                val sourceWasOpen = openDocuments.remove(oldUri)
-                val destination = documents[newUri]
-                val destinationIsOpen = newUri in openDocuments
+            renames.forEach { (oldUri, newUri) ->
+                val source = sourceDocuments[oldUri]
+                val sourceWasOpen = oldUri in openSourceUris
+                val destinationIsOpen = newUri !in sourceUris && newUri in openDocuments
                 val replacement = when {
-                    destinationIsOpen -> destination
+                    destinationIsOpen -> documents[newUri]
                     sourceWasOpen && source != null -> indexedDocument(newUri, source.text)
-                    destination != null -> destination
                     else -> readDocument(newUri) ?: source?.let { indexedDocument(newUri, it.text) }
                 }
 
@@ -322,7 +328,7 @@ internal class GraphMdWorkspaceIndex(
                 }
                 if (sourceWasOpen) openDocuments += newUri
             }
-            if (renames.any { (oldUri, newUri) -> oldUri != newUri }) invalidateCompilation()
+            if (renames.isNotEmpty()) invalidateCompilation()
         }
     }
 
