@@ -16,6 +16,7 @@ export default defineConfig({
 Pages and components can import these build-time virtual modules:
 
 - `virtual:graphmd/graph`
+- `virtual:graphmd/site`
 - `virtual:graphmd/sources`
 - `virtual:graphmd/search`
 - `virtual:graphmd/diagnostics`

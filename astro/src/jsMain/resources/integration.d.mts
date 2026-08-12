@@ -25,6 +25,7 @@ export interface GraphMdIntegrationOptions {
 
 export declare const VIRTUAL_MODULES: Readonly<{
   graph: "virtual:graphmd/graph";
+  site: "virtual:graphmd/site";
   sources: "virtual:graphmd/sources";
   search: "virtual:graphmd/search";
   diagnostics: "virtual:graphmd/diagnostics";

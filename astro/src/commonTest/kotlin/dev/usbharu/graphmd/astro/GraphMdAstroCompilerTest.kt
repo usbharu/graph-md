@@ -14,7 +14,7 @@ class GraphMdAstroCompilerTest {
                 source("Person", "NodeType"),
                 source("knows", "RelType"),
                 source("alice", "Node", "type: Person", "@link[Bob](bob knows)"),
-                source("bob", "Node", "type: Person"),
+                source("bob", "Node", "type: Person\nprops:\n  name: Bob"),
             ),
         )
 
@@ -35,15 +35,39 @@ class GraphMdAstroCompilerTest {
         assertTrue(result.search == null)
     }
 
+    @Test
+    fun `encodes the complete wiki view model without a generated file`() {
+        val result = GraphMdAstroCompiler().compile(
+            listOf(
+                source("Living", "NodeType"),
+                source("Person", "NodeType", "extends: [Living]\nprops:\n  name: { type: string, required: true }"),
+                source("Idol", "NodeType", "extends: [Person]"),
+                source("friend", "RelType", "from: [Person]\nto: [Person]"),
+                source("alice", "Node", "type: Person\nprops:\n  name: Alice", "@link[Bob](bob friend)"),
+                source("bob", "Node", "type: Person"),
+            ),
+        )
+
+        val site = WikiSiteEncoder("/wiki", result.documents, result.graph).encode()
+
+        assertTrue(site.contains("\"base\":\"/wiki/\""))
+        assertTrue(site.contains("\"schema\":[{\"name\":\"name\""))
+        assertTrue(site.contains("\"nodeType\":{\"parents\":[{\"id\":\"Living\""))
+        assertTrue(site.contains("\"children\":[{\"id\":\"Idol\""))
+        assertTrue(site.contains("\"usage\":[{\"id\":\"alice\""))
+        assertTrue(site.contains("\"properties\":[{\"name\":\"name\",\"value\":\"Alice\""))
+        assertTrue(site.contains("\"relationUsage\":[{\"from\":\"alice\""))
+    }
+
     private fun source(id: String, kind: String, fields: String = "", body: String = "") = SourceDocument(
-        """
-        ---
-        id: $id
-        kind: $kind
-        $fields
-        ---
-        $body
-        """.trimIndent(),
+        buildString {
+            appendLine("---")
+            appendLine("id: $id")
+            appendLine("kind: $kind")
+            if (fields.isNotEmpty()) appendLine(fields)
+            appendLine("---")
+            append(body)
+        },
         "$id.md",
     )
 }

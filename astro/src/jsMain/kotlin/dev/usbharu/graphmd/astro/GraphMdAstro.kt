@@ -58,6 +58,9 @@ class GraphMdAstroCompilation internal constructor(
         return JSON.stringify(encoded)
     }
 
+    /** Complete wiki view model consumed by Astro pages without an intermediate site.json file. */
+    fun siteJson(base: String = "/"): String = WikiSiteEncoder(base, result.documents, result.graph).encode()
+
     /** Lightweight normalized graph for virtual modules and graph visualizations. */
     fun graphJson(): String {
         val encoded = js("({})")

@@ -5,6 +5,7 @@ import graphMd from "./graph-md-astro.js";
 
 const VIRTUAL_MODULES = Object.freeze({
   graph: "virtual:graphmd/graph",
+  site: "virtual:graphmd/site",
   sources: "virtual:graphmd/sources",
   search: "virtual:graphmd/search",
   diagnostics: "virtual:graphmd/diagnostics",
@@ -20,6 +21,7 @@ export default function graphMdIntegration(options = {}) {
   const extensions = new Set(options.extensions ?? [".md"]);
   const configuredRoots = options.roots ?? ["documents"];
   let projectRoot = process.cwd();
+  let siteBase = "/";
   let roots = [];
   let snapshot;
 
@@ -34,7 +36,8 @@ export default function graphMdIntegration(options = {}) {
       successful: compilation.successful,
       diagnostics,
       graph: JSON.parse(compilation.graphJson()),
-      search: decodeSearchFiles(compilation.searchFilesJson()),
+      site: JSON.parse(compilation.siteJson(siteBase)),
+      search: JSON.parse(compilation.searchFilesJson()),
       sources,
     };
 
@@ -63,9 +66,27 @@ export default function graphMdIntegration(options = {}) {
       if (!(key in current)) return;
       return `export default ${JSON.stringify(current[key])};`;
     },
+    generateBundle() {
+      if (!snapshot?.successful) return;
+      for (const [name, source] of Object.entries(snapshot.search)) {
+        this.emitFile({ type: "asset", fileName: `search-index/${name}`, source });
+      }
+    },
     configureServer(server) {
       server.watcher.add(roots);
       let queued;
+
+      server.middlewares.use((request, response, next) => {
+        const pathname = new URL(request.url ?? "/", "http://graphmd.local").pathname;
+        const prefix = `${siteBase}search-index/`;
+        if (!pathname.startsWith(prefix)) return next();
+        const name = decodeURIComponent(pathname.slice(prefix.length));
+        const source = snapshot?.search[name];
+        if (source === undefined) return next();
+        response.statusCode = 200;
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        response.end(source);
+      });
 
       const refresh = (file) => {
         if (!isGraphMdSource(file, roots, extensions)) return;
@@ -107,6 +128,7 @@ export default function graphMdIntegration(options = {}) {
     hooks: {
       "astro:config:setup": ({ config, updateConfig }) => {
         projectRoot = path.normalize(fileURLToPath(config.root));
+        siteBase = config.base;
         roots = configuredRoots.map((root) => path.resolve(projectRoot, root));
         updateConfig({ vite: { plugins: [vitePlugin] } });
       },
@@ -141,18 +163,6 @@ async function walk(directory, extensions, output) {
     if (entry.isDirectory()) await walk(absolute, extensions, output);
     else if (entry.isFile() && extensions.has(path.extname(entry.name))) output.push(absolute);
   }
-}
-
-function decodeSearchFiles(encoded) {
-  return Object.fromEntries(
-    Object.entries(JSON.parse(encoded)).map(([name, content]) => {
-      try {
-        return [name, JSON.parse(content)];
-      } catch {
-        return [name, content];
-      }
-    }),
-  );
 }
 
 function isGraphMdSource(file, roots, extensions) {
