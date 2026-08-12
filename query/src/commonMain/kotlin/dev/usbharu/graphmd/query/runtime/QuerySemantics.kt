@@ -123,7 +123,24 @@ internal class QuerySemantics(
 
     private fun validate(): List<QueryDiagnostic> = buildList {
         val queryUsesRecurrence = query.temporalWindow?.timelineId?.let(graph.timelineCatalog::requiresExpansion) == true
-        if (queryUsesRecurrence && expansionWindow == null) {
+        query.expansionWindow?.let { authoredWindow ->
+            if (authoredWindow.timelineId !in graph.timelineCatalog) {
+                add(
+                    QueryDiagnostic(
+                        QueryDiagnosticCode.UNKNOWN_TIMELINE,
+                        "Unknown Timeline: ${authoredWindow.timelineId.value}",
+                    ),
+                )
+            } else if (expansionWindow == null) {
+                add(
+                    QueryDiagnostic(
+                        QueryDiagnosticCode.INVALID_TEMPORAL_WINDOW,
+                        "Calendar expansion window must be a valid, non-empty half-open date range",
+                    ),
+                )
+            }
+        }
+        if (queryUsesRecurrence && query.expansionWindow == null) {
             add(missingExpansionWindowDiagnostic())
         }
         query.temporalWindow?.let { window ->

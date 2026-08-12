@@ -391,7 +391,7 @@ class TimelineCatalog private constructor(
     }
 
     fun expansionWindow(value: CalendarExpansionWindow): TemporalExpansionWindow? {
-        require(value.timelineId in byId) { "Unknown Timeline: ${value.timelineId.value}" }
+        if (value.timelineId !in byId) return null
         return engine.expansionWindow(value.timelineId.value, value.start, value.endExclusive)
     }
 
@@ -413,6 +413,9 @@ class TimelineCatalog private constructor(
             val timelineId = TimelineId(validTime.timeline)
             if (timelineId !in byId) return@mapNotNull null
             val timeline = requireNotNull(byId[timelineId])
+            if (validTime.from == null && validTime.to == null) {
+                return@mapNotNull IntervalSet.of(TemporalInterval(timeline.assertionScopeId))
+            }
             val patternSpec = timeline.coordinateSystem.coordinate as? TemporalCoordinateSpec.CalendarPattern
             if (patternSpec != null) {
                 fun parse(point: TimePoint?): TemporalCoordinate.CalendarPattern? = point?.coordinate?.let { coordinate ->

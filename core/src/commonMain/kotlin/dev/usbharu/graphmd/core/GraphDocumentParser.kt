@@ -547,6 +547,17 @@ class GraphDocumentParser {
                 documentId,
             )
         }
+        if (placeholders.any { placeholder ->
+                val rawWidth = placeholder.groupValues[2]
+                rawWidth.isNotEmpty() && rawWidth.toIntOrNull()?.let { it in 1..64 } != true
+            }
+        ) {
+            diagnostics += schemaError(
+                "coordinate.format widths MUST be integers between 1 and 64",
+                sourcePath,
+                documentId,
+            )
+        }
         if (format.replace(Regex("""\{[A-Za-z][A-Za-z0-9]*(?::\d+)?\}"""), "").contains('{') ||
             format.replace(Regex("""\{[A-Za-z][A-Za-z0-9]*(?::\d+)?\}"""), "").contains('}')
         ) {

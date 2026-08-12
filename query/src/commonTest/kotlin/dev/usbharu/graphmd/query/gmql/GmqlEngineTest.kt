@@ -548,6 +548,25 @@ class GmqlEngineTest {
         val participatingApiQuery = GraphQuery(root = NodePattern(id = NodeId("leapling")))
         val participatingIndexedApi = runSuspend { localEngine.search(participatingApiQuery) }
         val participatingReferenceApi = runSuspend { localEngine.scan(participatingApiQuery) }
+        val unknownExpansionQuery = GraphQuery(
+            root = NodePattern(typeId = NodeTypeId("Place")),
+            expansionWindow = CalendarExpansionWindow(
+                TimelineId("MissingTimeline"),
+                TemporalCoordinate.CalendarDate(2024, 1, 1),
+                TemporalCoordinate.CalendarDate(2025, 1, 1),
+            ),
+        )
+        val unknownExpansionIndexed = runSuspend { localEngine.search(unknownExpansionQuery) }
+        val unknownExpansionReference = runSuspend { localEngine.scan(unknownExpansionQuery) }
+        val invalidExpansionQuery = apiQuery.copy(
+            expansionWindow = CalendarExpansionWindow(
+                TimelineId("Birthday"),
+                TemporalCoordinate.CalendarDate(2024, 2, 30),
+                TemporalCoordinate.CalendarDate(2025, 1, 1),
+            ),
+        )
+        val invalidExpansionIndexed = runSuspend { localEngine.search(invalidExpansionQuery) }
+        val invalidExpansionReference = runSuspend { localEngine.scan(invalidExpansionQuery) }
 
         assertEquals(listOf("leapling"), leapDay.stringColumn())
         rangeOperators.forEach { (operator, result) ->
@@ -572,6 +591,10 @@ class GmqlEngineTest {
             QueryDiagnosticCode.MISSING_TEMPORAL_EXPANSION_WINDOW,
             participatingIndexedApi.diagnostics.single().code,
         )
+        assertEquals(unknownExpansionReference, unknownExpansionIndexed)
+        assertEquals(QueryDiagnosticCode.UNKNOWN_TIMELINE, unknownExpansionIndexed.diagnostics.single().code)
+        assertEquals(invalidExpansionReference, invalidExpansionIndexed)
+        assertEquals(QueryDiagnosticCode.INVALID_TEMPORAL_WINDOW, invalidExpansionIndexed.diagnostics.single().code)
     }
 
     @Test

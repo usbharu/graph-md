@@ -761,20 +761,21 @@ private fun validCalendarPatternFields(
     fields[CalendarField.Quarter]?.let { if (it !in 1..4) return false }
     fields[CalendarField.Week]?.let { if (it !in 1..53) return false }
     val year = fields[CalendarField.Year]
+    val astronomicalYear = year?.let { toAstronomicalYear(it, spec.numbering) ?: return false }
     val month = fields[CalendarField.Month]
     val day = fields[CalendarField.Day]
-    if (year != null && month != null && day != null) {
-        val astronomical = toAstronomicalYear(year, spec.numbering) ?: return false
-        if (!validDate(astronomical, month.toInt(), day.toInt(), spec.calendar)) return false
+    if (astronomicalYear != null && month != null && day != null) {
+        if (!validDate(astronomicalYear, month.toInt(), day.toInt(), spec.calendar)) return false
     } else if (month != null && day != null && !validDate(2000, month.toInt(), day.toInt(), spec.calendar)) {
         return false
     }
     val weekYear = fields[CalendarField.WeekYear]
+    val astronomicalWeekYear = weekYear?.let { toAstronomicalYear(it, spec.numbering) ?: return false }
     val week = fields[CalendarField.Week]
-    if (weekYear != null && week != null) {
-        val astronomical = toAstronomicalYear(weekYear, spec.numbering) ?: return false
-        val first = isoWeekOneMonday(astronomical, spec.numbering) ?: return false
-        val next = isoWeekOneMonday(astronomical + 1, spec.numbering) ?: return false
+    if (astronomicalWeekYear != null && week != null) {
+        if (astronomicalWeekYear == Long.MAX_VALUE) return false
+        val first = isoWeekOneMonday(astronomicalWeekYear, spec.numbering) ?: return false
+        val next = isoWeekOneMonday(astronomicalWeekYear + 1, spec.numbering) ?: return false
         val weeks = ((next - first).numerator / 7).toInt()
         if (week !in 1L..weeks.toLong()) return false
     }

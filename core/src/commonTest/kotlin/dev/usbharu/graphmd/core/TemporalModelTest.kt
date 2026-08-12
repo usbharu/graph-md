@@ -323,11 +323,78 @@ class TemporalModelTest {
                   format: "{year:04}"
                 """.trimIndent(),
             ),
+            timeline(
+                "ZeroWidthFormat",
+                """
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [month]
+                  repeatsEvery: year
+                  format: "{month:0}"
+                """.trimIndent(),
+            ),
+            timeline(
+                "OverflowWidthFormat",
+                """
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [month]
+                  repeatsEvery: year
+                  format: "{month:999999999999999999999}"
+                """.trimIndent(),
+            ),
         )
 
         assertTrue(result.diagnostics.any { it.message == "calendar-pattern day requires month" })
         assertTrue(result.diagnostics.any { it.message == "ISO week fields require the Gregorian calendar" })
         assertTrue(result.diagnostics.any { it.message == "coordinate.format MUST reference every declared field exactly once" })
+        assertEquals(
+            2,
+            result.diagnostics.count { it.message == "coordinate.format widths MUST be integers between 1 and 64" },
+        )
+    }
+
+    @Test
+    fun `calendar pattern rejects year zero when numbering has no year zero`() {
+        val result = compile(
+            timeline(
+                "PublicationMonth",
+                """
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [year, month]
+                """.trimIndent(),
+            ),
+            SourceDocument(
+                """
+                ---
+                id: Item
+                kind: NodeType
+                props:
+                  published:
+                    type: instant
+                    timeline: PublicationMonth
+                ---
+                """.trimIndent(),
+                "/item-type.md",
+            ),
+            SourceDocument(
+                """
+                ---
+                id: invalid-year
+                kind: Node
+                type: Item
+                props:
+                  published: { timeline: PublicationMonth, value: "0000-08" }
+                ---
+                """.trimIndent(),
+                "/invalid-year.md",
+            ),
+        )
+
+        assertTrue(result.diagnostics.any {
+            it.message == "published.value is not valid for PublicationMonth"
+        }, result.diagnostics.toString())
     }
 
     @Test
