@@ -68,7 +68,7 @@ The `graphmd` CLI is implemented in the `cli` multiplatform module.
 ./gradlew :cli:run --args='search "MATCH (person:Person) WHERE person.age >= $minimumAge RETURN person" ./documents --param minimumAge=18 --json'
 ./gradlew :cli:run --args="search --query-file queries/people.gmql ./documents --param minimumAge=18"
 ./gradlew :cli:run --args="index --output ./search-index ./documents"
-./gradlew :cli:run --args='search "MATCH (person:Person) WHERE FULLTEXT(person, \"勇者\") RETURN ID(person), SCORE()" --index ./search-index'
+./gradlew :cli:run --args="search --query-file queries/fulltext.gmql --index ./search-index"
 ./gradlew :cli:run --args="demo ./benchmark-data --count 1000 --seed 42"
 ```
 
