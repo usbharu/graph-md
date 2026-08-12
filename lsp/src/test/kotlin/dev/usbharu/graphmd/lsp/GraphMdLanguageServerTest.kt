@@ -3447,15 +3447,15 @@ class GraphMdLanguageServerTest {
                     ),
                 ),
             )
-            assertTrue(client.latest(oldUri).any { it.message == "NodeType id must be unique: MovedType" })
+            assertTrue(client.latest(oldUri).any { it.messageText == "NodeType id must be unique: MovedType" })
 
             server.workspaceService.didRenameFiles(
                 RenameFilesParams(listOf(FileRename(oldUri, newUri))),
             )
 
             assertTrue(client.latest(oldUri).isEmpty())
-            assertTrue(client.latest(newUri).none { "unique: MovedType" in it.message })
-            assertTrue(client.latest(referenceUri).none { "MovedType" in it.message })
+            assertTrue(client.latest(newUri).none { "unique: MovedType" in it.messageText })
+            assertTrue(client.latest(referenceUri).none { "MovedType" in it.messageText })
             val definitions = server.textDocumentService.definition(
                 DefinitionParams(TextDocumentIdentifier(referenceUri), Position(3, "type: ".length)),
             ).get().left.orEmpty()
@@ -3509,7 +3509,7 @@ class GraphMdLanguageServerTest {
             listOf(newUri),
             index.definitions(destinationReferenceUri, Position(3, "type: ".length)).map { it.uri },
         )
-        assertTrue(index.diagnosticsByUri().getValue(referenceUri).any { it.message == "Unknown NodeType: OverlayType" })
+        assertTrue(index.diagnosticsByUri().getValue(referenceUri).any { it.messageText == "Unknown NodeType: OverlayType" })
     }
 
     @Test
