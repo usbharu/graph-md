@@ -112,7 +112,7 @@ class GraphMdLanguageServerTest {
         assertTrue(
             fixture.diagnostics.getValue(definitionUri).any {
                 it.severity == DiagnosticSeverity.Warning &&
-                    it.message == "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*"
+                    it.messageText == "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*"
             },
         )
     }
@@ -638,8 +638,8 @@ class GraphMdLanguageServerTest {
         val timelineAction = fixture.actions(nodeUri, "Unknown Timeline: MissingEra")
             .single { it.title == "Create Timeline 'MissingEra'" }
 
-        assertTrue(assertNotNull(relTypeAction.edit).documentChanges[1].left.edits.single().newText.contains("kind: RelType"))
-        assertTrue(assertNotNull(timelineAction.edit).documentChanges[1].left.edits.single().newText.contains("kind: Timeline"))
+        assertTrue(assertNotNull(relTypeAction.edit).documentChanges[1].left.edits.single().left.newText.contains("kind: RelType"))
+        assertTrue(assertNotNull(timelineAction.edit).documentChanges[1].left.edits.single().left.newText.contains("kind: Timeline"))
     }
 
     @Test
@@ -750,14 +750,14 @@ class GraphMdLanguageServerTest {
         )
 
         val missing = fixture.diagnostics.getValue(missingUri)
-            .single { it.message == "Required property missing after normalization: name" }
+            .single { it.messageText == "Required property missing after normalization: name" }
         assertEquals(Range(Position(4, 0), Position(4, 5)), missing.range)
         assertTrue(
             fixture.diagnostics.getValue(inlineUri)
-                .none { it.message == "Required property missing after normalization: name" },
+                .none { it.messageText == "Required property missing after normalization: name" },
         )
         val bodyProps = fixture.diagnostics.getValue(bodyPropsUri)
-            .single { it.message == "Required property missing after normalization: name" }
+            .single { it.messageText == "Required property missing after normalization: name" }
         assertEquals(Range(Position(4, 0), Position(4, 0)), bodyProps.range)
     }
 
@@ -794,7 +794,7 @@ class GraphMdLanguageServerTest {
         )
 
         val diagnostic = fixture.diagnostics.getValue(uri)
-            .single { it.message.startsWith("Duplicate key: name at index") }
+            .single { it.messageText.startsWith("Duplicate key: name at index") }
 
         assertEquals(Range(Position(9, 2), Position(9, 6)), diagnostic.range)
     }
@@ -827,9 +827,9 @@ class GraphMdLanguageServerTest {
         )
 
         val diagnostics = fixture.diagnostics.getValue(nodeUri)
-        val duplicate = diagnostics.single { it.message.startsWith("Duplicate key: age at index") }
+        val duplicate = diagnostics.single { it.messageText.startsWith("Duplicate key: age at index") }
 
-        assertTrue(diagnostics.none { it.message == "Required property missing after normalization: age" })
+        assertTrue(diagnostics.none { it.messageText == "Required property missing after normalization: age" })
         assertEquals(Range(Position(5, 16), Position(5, 19)), duplicate.range)
     }
 
@@ -887,7 +887,7 @@ class GraphMdLanguageServerTest {
 
         for (uri in listOf(firstUri, secondUri)) {
             val diagnostic = fixture.diagnostics.getValue(uri).single {
-                it.message == "Node id must be unique: duplicate"
+                it.messageText == "Node id must be unique: duplicate"
             }
             assertEquals(Range(Position(1, 4), Position(1, 13)), diagnostic.range)
             assertEquals(DiagnosticSeverity.Error, diagnostic.severity)
@@ -903,10 +903,10 @@ class GraphMdLanguageServerTest {
         )
 
         assertTrue(fixture.diagnostics.getValue(firstUri).none {
-            it.message == "Node id must be unique: duplicate"
+            it.messageText == "Node id must be unique: duplicate"
         })
         assertTrue(fixture.diagnostics.getValue(secondUri).none {
-            it.message == "Node id must be unique: duplicate"
+            it.messageText == "Node id must be unique: duplicate"
         })
     }
 
@@ -995,7 +995,7 @@ class GraphMdLanguageServerTest {
         val allDiagnostics = fixture.diagnostics.flatMap { (uri, diagnostics) -> diagnostics.map { uri to it } }
         assertTrue(allDiagnostics.isNotEmpty())
         val missing = allDiagnostics.filter { (uri, diagnostic) -> fixture.actions(uri, diagnostic).isEmpty() }
-        assertTrue(missing.isEmpty(), missing.joinToString { (uri, diagnostic) -> "$uri: ${diagnostic.message}" })
+        assertTrue(missing.isEmpty(), missing.joinToString { (uri, diagnostic) -> "$uri: ${diagnostic.messageText}" })
     }
 
     @Test
@@ -1095,8 +1095,8 @@ class GraphMdLanguageServerTest {
         val hover = fixture.hover(sourceUri, targetOffset)
         assertTrue(hover.startsWith("**Node or Media** `shared`"))
         assertTrue("Ambiguous: 2 definitions" in hover)
-        assertTrue(fixture.diagnostics.getValue(nodeUri).any { it.message == "Node id must be unique: shared" })
-        assertTrue(fixture.diagnostics.getValue(mediaUri).any { it.message == "Node id must be unique: shared" })
+        assertTrue(fixture.diagnostics.getValue(nodeUri).any { it.messageText == "Node id must be unique: shared" })
+        assertTrue(fixture.diagnostics.getValue(mediaUri).any { it.messageText == "Node id must be unique: shared" })
         assertEquals(
             setOf(nodeUri, mediaUri, sourceUri),
             fixture.rename(sourceUri, targetOffset, "renamed").changes.keys,
@@ -1211,7 +1211,7 @@ class GraphMdLanguageServerTest {
         assertEquals(typeUri, propertyDefinition.uri)
         assertEquals(Range(Position(3, 2), Position(3, 4)), propertyDefinition.range)
 
-        val unresolved = fixture.diagnostics.getValue(nodeUri).first { it.message == "Unknown Node target: missing" }
+        val unresolved = fixture.diagnostics.getValue(nodeUri).first { it.messageText == "Unknown Node target: missing" }
         val missingCharacter = nodeText.substringAfterLast('\n').indexOf("missing")
         assertEquals(
             Range(Position(7, missingCharacter), Position(7, missingCharacter + "missing".length)),
@@ -1337,10 +1337,10 @@ class GraphMdLanguageServerTest {
         assertEquals(Range(Position(5, 26), Position(5, 35)), rename.changes.getValue(quotedUri).single().range)
 
         val unknown = fixture.diagnostics.getValue(missingUri)
-            .singleOrNull { it.message == "Unknown Timeline: MissingEra" }
-            ?: error(fixture.diagnostics.getValue(missingUri).joinToString { it.message })
+            .singleOrNull { it.messageText == "Unknown Timeline: MissingEra" }
+            ?: error(fixture.diagnostics.getValue(missingUri).joinToString { it.messageText })
         assertEquals(Range(Position(5, 22), Position(5, 32)), unknown.range)
-        assertTrue(fixture.diagnostics.getValue(missingUri).none { "today" in it.message || "Fake" in it.message })
+        assertTrue(fixture.diagnostics.getValue(missingUri).none { "today" in it.messageText || "Fake" in it.messageText })
     }
 
     @Test
@@ -1416,14 +1416,14 @@ class GraphMdLanguageServerTest {
         assertTrue(rename.changes.getValue(nodeUri).none { "IgnoredEra" in it.newText })
 
         val missingOffset = nodeText.indexOf("MissingEra")
-        val unknown = fixture.diagnostics.getValue(nodeUri).single { it.message == "Unknown Timeline: MissingEra" }
+        val unknown = fixture.diagnostics.getValue(nodeUri).single { it.messageText == "Unknown Timeline: MissingEra" }
         assertEquals(
             Range(positionAt(nodeText, missingOffset), positionAt(nodeText, missingOffset + "MissingEra".length)),
             unknown.range,
         )
         assertTrue(
             fixture.diagnostics.getValue(nodeUri).none {
-                "IgnoredEra" in it.message || "CodeEra" in it.message
+                "IgnoredEra" in it.messageText || "CodeEra" in it.messageText
             },
         )
     }
@@ -1487,8 +1487,8 @@ class GraphMdLanguageServerTest {
 
         val missingCompactOffset = schemaText.indexOf("MissingCompact:")
         val missingExplicitOffset = schemaText.indexOf("'MissingExplicit'") + 1
-        val missingCompact = fixture.diagnostics.getValue(schemaUri).single { it.message == "Unknown Timeline: MissingCompact" }
-        val missingExplicit = fixture.diagnostics.getValue(schemaUri).single { it.message == "Unknown Timeline: MissingExplicit" }
+        val missingCompact = fixture.diagnostics.getValue(schemaUri).single { it.messageText == "Unknown Timeline: MissingCompact" }
+        val missingExplicit = fixture.diagnostics.getValue(schemaUri).single { it.messageText == "Unknown Timeline: MissingExplicit" }
         assertEquals(positionAt(schemaText, missingCompactOffset), missingCompact.range.start)
         assertEquals(positionAt(schemaText, missingCompactOffset + "MissingCompact".length), missingCompact.range.end)
         assertEquals(positionAt(schemaText, missingExplicitOffset), missingExplicit.range.start)
@@ -1534,7 +1534,7 @@ class GraphMdLanguageServerTest {
 
         val missingRaw = """Missing\qEra"""
         val missingOffset = schemaText.indexOf(missingRaw)
-        val diagnostic = fixture.diagnostics.getValue(schemaUri).single { it.message == "Unknown Timeline: MissingqEra" }
+        val diagnostic = fixture.diagnostics.getValue(schemaUri).single { it.messageText == "Unknown Timeline: MissingqEra" }
         assertEquals(
             Range(positionAt(schemaText, missingOffset), positionAt(schemaText, missingOffset + missingRaw.length)),
             diagnostic.range,
@@ -1569,7 +1569,7 @@ class GraphMdLanguageServerTest {
             fixture.definitions(nodeUri, nodeText.indexOf("type: Person") + "type: ".length + 1).single().uri,
         )
         assertTrue(
-            fixture.diagnostics.getValue(nodeUri).none { it.message == "Unknown NodeType: MissingNestedType" },
+            fixture.diagnostics.getValue(nodeUri).none { it.messageText == "Unknown NodeType: MissingNestedType" },
         )
 
         val definitionPosition = Position(1, 5)
@@ -2286,22 +2286,22 @@ class GraphMdLanguageServerTest {
         )
 
         val diagnostic = fixture.diagnostics.getValue(nodeUri).single {
-            it.message == "status value is not in enum"
+            it.messageText == "status value is not in enum"
         }
         assertEquals(Range(Position(5, 10), Position(5, 17)), diagnostic.range)
 
         val arrayDiagnostic = fixture.diagnostics.getValue(nodeUri).single {
-            it.message == "tags[] value is not in enum"
+            it.messageText == "tags[] value is not in enum"
         }
         assertEquals(Range(Position(7, 6), Position(7, 13)), arrayDiagnostic.range)
 
         val textDiagnostic = fixture.diagnostics.getValue(nodeUri).single {
-            it.message == "labels.en value is not in enum"
+            it.messageText == "labels.en value is not in enum"
         }
         assertEquals(Range(Position(10, 13), Position(10, 20)), textDiagnostic.range)
 
         val inlineDiagnostic = fixture.diagnostics.getValue(inlineUri).single {
-            it.message == "status value is not in enum"
+            it.messageText == "status value is not in enum"
         }
         assertEquals(Range(Position(5, 16), Position(5, 23)), inlineDiagnostic.range)
     }
@@ -2905,12 +2905,12 @@ class GraphMdLanguageServerTest {
         )
 
         val diagnostics = published.getValue("file:///workspace/alice.md")
-        val unknownType = diagnostics.first { it.message == "Unknown NodeType: MissingPerson" }
+        val unknownType = diagnostics.first { it.messageText == "Unknown NodeType: MissingPerson" }
         assertEquals(3, unknownType.range.start.line)
         assertEquals(6, unknownType.range.start.character)
         assertEquals(19, unknownType.range.end.character)
 
-        val unknownRel = diagnostics.first { it.message == "Unknown RelType: missingRel" }
+        val unknownRel = diagnostics.first { it.messageText == "Unknown RelType: missingRel" }
         assertEquals(5, unknownRel.range.start.line)
         assertEquals(23, unknownRel.range.start.character)
         assertEquals(33, unknownRel.range.end.character)
@@ -2948,30 +2948,30 @@ class GraphMdLanguageServerTest {
         )
 
         val unresolved = fixture.diagnostics.getValue("file:///workspace/unresolved.md")
-            .single { it.message == "Unknown NodeType: Missing" }
+            .single { it.messageText == "Unknown NodeType: Missing" }
         assertEquals(DiagnosticSeverity.Error, unresolved.severity)
         assertEquals("ReferenceError", unresolved.code.left)
         assertEquals(Range(Position(3, 6), Position(3, 13)), unresolved.range)
 
         val wrong = fixture.diagnostics.getValue("file:///workspace/wrong.md")
-            .single { it.message == "Expected NodeType but found RelType: Wrong" }
+            .single { it.messageText == "Expected NodeType but found RelType: Wrong" }
         assertEquals(Range(Position(3, 6), Position(3, 11)), wrong.range)
 
         val ambiguous = fixture.diagnostics.getValue("file:///workspace/ambiguous.md")
-            .single { it.message == "Ambiguous NodeType reference: Ambiguous" }
+            .single { it.messageText == "Ambiguous NodeType reference: Ambiguous" }
         assertEquals(Range(Position(3, 6), Position(3, 15)), ambiguous.range)
 
         val mixed = fixture.diagnostics.getValue("file:///workspace/mixed.md")
-            .single { it.message == "Expected Node but found NodeType, RelType: Mixed" }
+            .single { it.messageText == "Expected Node but found NodeType, RelType: Mixed" }
         assertEquals(Range(Position(5, 21), Position(5, 26)), mixed.range)
 
         assertTrue(
             fixture.diagnostics.getValue("file:///workspace/resolved-mixed.md")
-                .none { it.code?.left == "ReferenceError" && "ResolvedMixed" in it.message },
+                .none { it.code?.left == "ReferenceError" && "ResolvedMixed" in it.messageText },
         )
         assertTrue(
             fixture.diagnostics.getValue("file:///workspace/resolved.md")
-                .none { it.code?.left == "ReferenceError" && "Person" in it.message },
+                .none { it.code?.left == "ReferenceError" && "Person" in it.messageText },
         )
     }
 
@@ -3000,13 +3000,13 @@ class GraphMdLanguageServerTest {
         )
 
         val wrong = fixture.diagnostics.getValue(nodeUri)
-            .single { it.message == "Expected Timeline but found NodeType: QuotedWrong" }
+            .single { it.messageText == "Expected Timeline but found NodeType: QuotedWrong" }
         assertEquals(Range(Position(5, 15), Position(5, 26)), wrong.range)
         assertEquals(DiagnosticSeverity.Error, wrong.severity)
         assertEquals("ReferenceError", wrong.code.left)
 
         val ambiguous = fixture.diagnostics.getValue(nodeUri)
-            .single { it.message == "Ambiguous Timeline reference: QuotedAmbiguous" }
+            .single { it.messageText == "Ambiguous Timeline reference: QuotedAmbiguous" }
         assertEquals(Range(Position(6, 15), Position(6, 30)), ambiguous.range)
         assertTrue(fixture.actions(nodeUri, ambiguous).isEmpty())
         assertTrue(
@@ -3085,18 +3085,18 @@ class GraphMdLanguageServerTest {
 
         val diagnostics = fixture.diagnostics.getValue(schemaUri)
         val wrong = diagnostics.single {
-            it.message == "Expected Timeline but found NodeType: WrongMapped"
+            it.messageText == "Expected Timeline but found NodeType: WrongMapped"
         }
         assertEquals(Range(Position(7, 12), Position(7, 23)), wrong.range)
 
         val ambiguous = diagnostics.single {
-            it.message == "Ambiguous Timeline reference: AmbiguousMapped"
+            it.messageText == "Ambiguous Timeline reference: AmbiguousMapped"
         }
         assertEquals(Range(Position(12, 8), Position(12, 23)), ambiguous.range)
         assertTrue(fixture.actions(schemaUri, ambiguous).isEmpty())
         assertEquals(
             2,
-            diagnostics.count { it.code?.left == "SchemaError" && "mapped selectors were removed" in it.message },
+            diagnostics.count { it.code?.left == "SchemaError" && "mapped selectors were removed" in it.messageText },
             diagnostics.joinToString(),
         )
     }
@@ -3142,16 +3142,16 @@ class GraphMdLanguageServerTest {
 
         val diagnostics = fixture.diagnostics.getValue(schemaUri)
         val punctuation = diagnostics.single {
-            it.message == "Expected Timeline but found NodeType: Third.Age"
+            it.messageText == "Expected Timeline but found NodeType: Third.Age"
         }
         assertEquals(Range(Position(7, 8), Position(7, 17)), punctuation.range)
         val leading = diagnostics.single {
-            it.message == "Ambiguous Timeline reference: _Leading"
+            it.messageText == "Ambiguous Timeline reference: _Leading"
         }
         assertEquals(Range(Position(12, 12), Position(12, 20)), leading.range)
         assertEquals(
             4,
-            diagnostics.count { it.code?.left == "SchemaError" && "mapped selectors were removed" in it.message },
+            diagnostics.count { it.code?.left == "SchemaError" && "mapped selectors were removed" in it.messageText },
             diagnostics.joinToString(),
         )
     }
@@ -3202,17 +3202,17 @@ class GraphMdLanguageServerTest {
         assertEquals(
             Range(Position(7, 10), Position(7, 23)),
             diagnostics.single {
-                it.message == "Expected Timeline but found NodeType: SingularWrong"
+                it.messageText == "Expected Timeline but found NodeType: SingularWrong"
             }.range,
         )
         val ambiguous = diagnostics.single {
-            it.message == "Ambiguous Timeline reference: Singular.Ambiguous"
+            it.messageText == "Ambiguous Timeline reference: Singular.Ambiguous"
         }
         assertEquals(Range(Position(12, 6), Position(12, 24)), ambiguous.range)
         assertTrue(fixture.actions(schemaUri, ambiguous).isEmpty())
         assertEquals(
             4,
-            diagnostics.count { it.code?.left == "SchemaError" && "mapped selectors were removed" in it.message },
+            diagnostics.count { it.code?.left == "SchemaError" && "mapped selectors were removed" in it.messageText },
             diagnostics.joinToString(),
         )
     }
@@ -3250,13 +3250,13 @@ class GraphMdLanguageServerTest {
         )
 
         val diagnostics = fixture.diagnostics.getValue(schemaUri)
-        val nested = diagnostics.single { it.message == "Ambiguous Timeline reference: Nested" }
+        val nested = diagnostics.single { it.messageText == "Ambiguous Timeline reference: Nested" }
         assertEquals(Range(Position(7, 6), Position(7, 12)), nested.range)
         assertTrue(fixture.actions(schemaUri, nested).isEmpty())
         assertTrue(
             diagnostics.none {
                 it.code?.left == "ReferenceError" &&
-                    (it.message.contains("Spurious") || it.message.contains("AlsoSpurious"))
+                    (it.messageText.contains("Spurious") || it.messageText.contains("AlsoSpurious"))
             },
             diagnostics.joinToString(),
         )
@@ -3310,15 +3310,15 @@ class GraphMdLanguageServerTest {
         val diagnostics = fixture.diagnostics.getValue(nodeUri)
         assertEquals(
             Range(Position(6, 14), Position(6, 26)),
-            diagnostics.single { it.message == "Expected Timeline but found NodeType: WrongNumeric" }.range,
+            diagnostics.single { it.messageText == "Expected Timeline but found NodeType: WrongNumeric" }.range,
         )
         assertEquals(
             Range(Position(9, 14), Position(9, 30)),
-            diagnostics.single { it.message == "Ambiguous Timeline reference: AmbiguousNumeric" }.range,
+            diagnostics.single { it.messageText == "Ambiguous Timeline reference: AmbiguousNumeric" }.range,
         )
         assertEquals(
             Range(Position(14, 16), Position(14, 27)),
-            diagnostics.single { it.message == "Expected Timeline but found NodeType: WrongNested" }.range,
+            diagnostics.single { it.messageText == "Expected Timeline but found NodeType: WrongNested" }.range,
         )
     }
 
@@ -3358,28 +3358,28 @@ class GraphMdLanguageServerTest {
         )
 
         val diagnostic = fixture.diagnostics.getValue(uri).single {
-            it.message == "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*"
+            it.messageText == "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*"
         }
         assertEquals(DiagnosticSeverity.Warning, diagnostic.severity)
         assertEquals(Position(1, 5), diagnostic.range.start)
         assertEquals(Position(1, 11), diagnostic.range.end)
 
         val escapedDiagnostic = fixture.diagnostics.getValue(escapedUri).single {
-            it.message == "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*"
+            it.messageText == "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*"
         }
         assertEquals(DiagnosticSeverity.Warning, escapedDiagnostic.severity)
         assertEquals(Position(1, 5), escapedDiagnostic.range.start)
         assertEquals(Position(1, 12), escapedDiagnostic.range.end)
 
         val hashDiagnostic = fixture.diagnostics.getValue(hashUri).single {
-            it.message == "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*"
+            it.messageText == "id MUST match [A-Za-z_][A-Za-z0-9_.:-]*"
         }
         assertEquals(DiagnosticSeverity.Warning, hashDiagnostic.severity)
         assertEquals(Position(1, 5), hashDiagnostic.range.start)
         assertEquals(Position(1, 11), hashDiagnostic.range.end)
 
         val whitespaceRelTypeDiagnostic = fixture.diagnostics.getValue(whitespaceRelTypeUri).single {
-            it.message == "RelType id MUST NOT contain whitespace"
+            it.messageText == "RelType id MUST NOT contain whitespace"
         }
         assertEquals(DiagnosticSeverity.Error, whitespaceRelTypeDiagnostic.severity)
         assertEquals(Position(1, 5), whitespaceRelTypeDiagnostic.range.start)
@@ -3405,7 +3405,7 @@ class GraphMdLanguageServerTest {
 
             assertTrue(client.notifications.isEmpty())
             server.initialized(InitializedParams())
-            assertTrue(client.latest(uri).any { it.message == invalidIdWarning })
+            assertTrue(client.latest(uri).any { it.messageText == invalidIdWarning })
         } finally {
             root.toFile().deleteRecursively()
         }
@@ -3421,7 +3421,7 @@ class GraphMdLanguageServerTest {
             val client = RecordingLanguageClient()
             val server = initializedServer(root, client)
 
-            assertTrue(client.latest(uri).any { it.message == invalidIdWarning })
+            assertTrue(client.latest(uri).any { it.messageText == invalidIdWarning })
             client.notifications.clear()
 
             Files.delete(file)
@@ -3500,7 +3500,7 @@ class GraphMdLanguageServerTest {
                     TextDocumentItem(uri, "markdown", 1, graphDocument("INVALID ID@", "Timeline")),
                 ),
             )
-            assertTrue(client.latest(uri).any { it.message == invalidIdWarning })
+            assertTrue(client.latest(uri).any { it.messageText == invalidIdWarning })
             client.notifications.clear()
 
             Files.delete(file)
@@ -3508,7 +3508,7 @@ class GraphMdLanguageServerTest {
                 DidChangeWatchedFilesParams(listOf(FileEvent(uri, FileChangeType.Deleted))),
             )
             assertTrue(client.notifications.single { it.uri == uri }.diagnostics.any {
-                it.message == invalidIdWarning
+                it.messageText == invalidIdWarning
             })
 
             server.textDocumentService.didClose(DidCloseTextDocumentParams(TextDocumentIdentifier(uri)))
@@ -3521,7 +3521,7 @@ class GraphMdLanguageServerTest {
             )
 
             assertTrue(client.notifications.single { it.uri == uri }.diagnostics.any {
-                it.message == invalidIdWarning
+                it.messageText == invalidIdWarning
             })
         } finally {
             root.toFile().deleteRecursively()
@@ -3563,25 +3563,25 @@ class GraphMdLanguageServerTest {
                         listOf(TextDocumentContentChangeEvent(invalidText)),
                     ),
                 )
-                assertTrue(client.latest(uri).any { it.message == invalidIdWarning })
+                assertTrue(client.latest(uri).any { it.messageText == invalidIdWarning })
 
                 listOf(FileChangeType.Created, FileChangeType.Changed, FileChangeType.Deleted).forEach { changeType ->
                     server.workspaceService.didChangeWatchedFiles(
                         DidChangeWatchedFilesParams(listOf(FileEvent(uri, changeType))),
                     )
-                    assertTrue(client.latest(uri).any { it.message == invalidIdWarning })
+                    assertTrue(client.latest(uri).any { it.messageText == invalidIdWarning })
                 }
 
                 server.textDocumentService.didClose(
                     DidCloseTextDocumentParams(TextDocumentIdentifier(uri)),
                 )
-                assertTrue(client.latest(uri).none { it.message == invalidIdWarning })
+                assertTrue(client.latest(uri).none { it.messageText == invalidIdWarning })
 
                 Files.writeString(file, invalidText)
                 server.workspaceService.didChangeWatchedFiles(
                     DidChangeWatchedFilesParams(listOf(FileEvent(uri, FileChangeType.Changed))),
                 )
-                assertTrue(client.latest(uri).any { it.message == invalidIdWarning })
+                assertTrue(client.latest(uri).any { it.messageText == invalidIdWarning })
             }
         } finally {
             root.toFile().deleteRecursively()
@@ -3626,7 +3626,7 @@ class GraphMdLanguageServerTest {
             }
             assertEquals(1, notifications.size)
             assertEquals(diskUri, notifications.single().uri)
-            assertTrue(notifications.single().diagnostics.any { it.message == invalidIdWarning })
+            assertTrue(notifications.single().diagnostics.any { it.messageText == invalidIdWarning })
         } finally {
             root.toFile().deleteRecursively()
         }
@@ -4581,8 +4581,8 @@ class GraphMdLanguageServerTest {
         }
 
         fun actions(uri: String, message: String): List<CodeAction> {
-            val diagnostic = diagnostics.getValue(uri).firstOrNull { it.message == message }
-                ?: error("Missing diagnostic '$message'; found: ${diagnostics.getValue(uri).joinToString { it.message }}")
+            val diagnostic = diagnostics.getValue(uri).firstOrNull { it.messageText == message }
+                ?: error("Missing diagnostic '$message'; found: ${diagnostics.getValue(uri).joinToString { it.messageText }}")
             return actions(uri, diagnostic)
         }
 
