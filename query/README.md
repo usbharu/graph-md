@@ -156,3 +156,15 @@ analyzer version, referenced shards, checksum, and assertion references before
 the index can execute.
 The current bundle format is v4 and serializes temporal rationals as
 `{numerator, denominator}`. Older bundle versions are rejected and must be regenerated.
+
+The multiplatform CLI exposes the same format without adding a filesystem
+dependency to this module:
+
+```sh
+graphmd index --output ./search-index ./documents
+graphmd search 'MATCH (n) WHERE FULLTEXT(n, "archive") RETURN ID(n), SCORE()' --index ./search-index
+```
+
+An explicitly supplied index is authoritative. The CLI does not compare it to
+the source Markdown, and rejects missing, modified, incompatible, or unlisted
+shard files while loading it.

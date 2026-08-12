@@ -1215,6 +1215,154 @@ class GraphMdCliTest {
         assertFalse(result.stderr.contains("Key is missing in the map"))
     }
 
+    @Test
+    fun `index builds reusable full text bundle and search does not reload markdown`() {
+        val fs = FakeFileSystem(
+            mapOf(
+                "/workspace/Person.md" to nodeType("Person"),
+                "/workspace/alice.md" to node("alice", "Person", "勇者の記録 Brave hero archive"),
+            ),
+        )
+        val cli = GraphMdCli(fs)
+
+        val built = cli.run(listOf("index", "--output", "/index", "/workspace", "--json"))
+        fs.delete("/workspace/Person.md")
+        fs.delete("/workspace/alice.md")
+        val searched = cli.run(
+            listOf(
+                "search",
+                "MATCH (n:Person) WHERE FULLTEXT(n, \"勇者\") RETURN ID(n) AS id, SCORE() AS score",
+                "--index",
+                "/index",
+                "--json",
+            ),
+        )
+
+        assertEquals(0, built.exitCode, built.stderr)
+        assertTrue(built.stdout.contains("\"textAssertions\":"))
+        assertTrue(fs.contentsUnder("/index").containsKey("/index/manifest.json"))
+        assertEquals(0, searched.exitCode, searched.stderr)
+        assertTrue(searched.stdout.contains("\"id\":\"alice\""), searched.stdout)
+        assertTrue(searched.stdout.contains("\"score\":"), searched.stdout)
+    }
+
+    @Test
+    fun `indexed search supports query files and typed parameters`() {
+        val fs = FakeFileSystem(
+            mapOf(
+                "/workspace/Person.md" to nodeType("Person"),
+                "/workspace/alice.md" to node("alice", "Person", "Brave searchable text"),
+                "/queries/find.gmql" to
+                    "MATCH (n:Person) WHERE FULLTEXT(n, ${'$'}keyword) RETURN ID(n) AS id",
+            ),
+        )
+        val cli = GraphMdCli(fs)
+        assertEquals(0, cli.run(listOf("index", "--output", "/index", "/workspace")).exitCode)
+
+        val result = cli.run(
+            listOf(
+                "search",
+                "--query-file",
+                "/queries/find.gmql",
+                "--index",
+                "/index",
+                "--param",
+                "keyword=\"Brave\"",
+            ),
+        )
+
+        assertEquals(0, result.exitCode, result.stderr)
+        assertTrue(result.stdout.contains("alice"))
+    }
+
+    @Test
+    fun `index safely replaces valid bundles and rejects unrelated contents`() {
+        val fs = FakeFileSystem(
+            mapOf(
+                "/workspace/Person.md" to nodeType("Person"),
+                "/workspace/alice.md" to node("alice", "Person", "First version"),
+            ),
+        )
+        val cli = GraphMdCli(fs)
+        assertEquals(0, cli.run(listOf("index", "--output", "/index", "/workspace")).exitCode)
+
+        fs.writeText("/workspace/alice.md", node("alice", "Person", "Second version"))
+        val replaced = cli.run(listOf("index", "--output", "/index", "/workspace"))
+        assertEquals(0, replaced.exitCode, replaced.stderr)
+        val second = cli.run(
+            listOf("search", "MATCH (n) WHERE FULLTEXT(n, \"Second\") RETURN ID(n)", "--index", "/index"),
+        )
+        assertEquals(0, second.exitCode, second.stderr)
+        assertTrue(second.stdout.contains("alice"))
+
+        fs.writeText("/index/keep.txt", "unrelated")
+        val before = fs.contentsUnder("/index")
+        val rejected = cli.run(listOf("index", "--output", "/index", "/workspace"))
+        assertEquals(1, rejected.exitCode)
+        assertEquals(before, fs.contentsUnder("/index"))
+        assertTrue(rejected.stderr.contains("unexpected files"), rejected.stderr)
+    }
+
+    @Test
+    fun `index preserves previous bundle when staged write fails`() {
+        val fs = FakeFileSystem(
+            mapOf(
+                "/workspace/Person.md" to nodeType("Person"),
+                "/workspace/alice.md" to node("alice", "Person", "Stable version"),
+            ),
+        )
+        val cli = GraphMdCli(fs)
+        assertEquals(0, cli.run(listOf("index", "--output", "/index", "/workspace")).exitCode)
+        val before = fs.contentsUnder("/index")
+        fs.failNextWrite()
+
+        val failed = cli.run(listOf("index", "--output", "/index", "/workspace"))
+
+        assertEquals(1, failed.exitCode)
+        assertEquals(before, fs.contentsUnder("/index"))
+        assertTrue(fs.contentsUnder("/").keys.none { ".graphmd-tmp" in it })
+    }
+
+    @Test
+    fun `indexed search rejects modified shards and incompatible arguments`() {
+        val fs = FakeFileSystem(
+            mapOf(
+                "/workspace/Person.md" to nodeType("Person"),
+                "/workspace/alice.md" to node("alice", "Person", "Search body"),
+            ),
+        )
+        val cli = GraphMdCli(fs)
+        assertEquals(0, cli.run(listOf("index", "--output", "/index", "/workspace")).exitCode)
+        val shard = fs.contentsUnder("/index").keys.first { !it.endsWith("manifest.json") }
+        fs.writeText(shard, "[]")
+
+        val corrupt = cli.run(listOf("search", "MATCH (n) RETURN ID(n)", "--index", "/index"))
+        val mixed = cli.run(
+            listOf("search", "MATCH (n) RETURN ID(n)", "/workspace", "--index", "/index"),
+        )
+        val missingOutput = cli.run(listOf("index", "/workspace"))
+
+        assertEquals(2, corrupt.exitCode)
+        assertTrue(corrupt.stderr.contains("checksum mismatch"), corrupt.stderr)
+        assertEquals(2, mixed.exitCode)
+        assertTrue(mixed.stderr.contains("cannot be used with --index"))
+        assertEquals(2, missingOutput.exitCode)
+        assertTrue(missingOutput.stderr.contains("--output is required"))
+    }
+
+    @Test
+    fun `index does not write output when compilation fails`() {
+        val fs = FakeFileSystem(
+            mapOf("/workspace/broken.md" to node("broken", "MissingType", "body")),
+        )
+
+        val result = GraphMdCli(fs).run(listOf("index", "--output", "/index", "/workspace", "--json"))
+
+        assertEquals(1, result.exitCode)
+        assertEquals(null, fs.kind("/index"))
+        assertTrue(result.stderr.contains("Unknown NodeType"), result.stderr)
+    }
+
     private fun fixtureCli(): GraphMdCli = GraphMdCli(
         FakeFileSystem(
             files = mapOf(
@@ -1437,10 +1585,11 @@ class GraphMdCliTest {
 private class FakeFileSystem(
     files: Map<String, String>,
     private val aliases: Map<String, String> = emptyMap(),
-    private val failWriteAt: Int? = null,
+    failWriteAt: Int? = null,
 ) : CliFileSystem {
     private val mutableFiles = files.toMutableMap()
     private var writeCount = 0
+    private var failureWriteNumber = failWriteAt
     private val directories: MutableSet<String> = buildSet {
         add("/")
         files.keys.forEach { file ->
@@ -1492,8 +1641,40 @@ private class FakeFileSystem(
 
     override fun writeText(path: String, text: String) {
         writeCount++
-        if (writeCount == failWriteAt) error("simulated write failure")
+        if (writeCount == failureWriteNumber) error("simulated write failure")
         mutableFiles[canonical(path)] = text
+    }
+
+    fun failNextWrite() {
+        failureWriteNumber = writeCount + 1
+    }
+
+    override fun move(source: String, destination: String) {
+        val canonicalSource = canonical(source)
+        val canonicalDestination = canonical(destination)
+        check(kind(canonicalDestination) == null) { "Destination already exists: $destination" }
+        when (kind(canonicalSource)) {
+            FileKind.File -> mutableFiles[canonicalDestination] = mutableFiles.remove(canonicalSource)!!
+            FileKind.Directory -> {
+                val sourcePrefix = if (canonicalSource == "/") "/" else "$canonicalSource/"
+                val destinationPrefix = if (canonicalDestination == "/") "/" else "$canonicalDestination/"
+                val movedFiles = mutableFiles.filterKeys { it.startsWith(sourcePrefix) }
+                movedFiles.keys.forEach(mutableFiles::remove)
+                movedFiles.forEach { (path, contents) ->
+                    mutableFiles[destinationPrefix + path.removePrefix(sourcePrefix)] = contents
+                }
+                val movedDirectories = directories.filter { it == canonicalSource || it.startsWith(sourcePrefix) }
+                directories.removeAll(movedDirectories.toSet())
+                movedDirectories.forEach { path ->
+                    directories += if (path == canonicalSource) {
+                        canonicalDestination
+                    } else {
+                        destinationPrefix + path.removePrefix(sourcePrefix)
+                    }
+                }
+            }
+            else -> error("Source does not exist: $source")
+        }
     }
 
     override fun delete(path: String, mustExist: Boolean) {

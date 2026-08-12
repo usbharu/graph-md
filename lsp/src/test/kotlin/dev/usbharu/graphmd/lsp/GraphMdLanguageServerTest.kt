@@ -13,6 +13,7 @@ import dev.usbharu.graphmd.core.model.RelTypeDocument
 import dev.usbharu.graphmd.core.model.ResolvedPropSchema
 import dev.usbharu.graphmd.core.model.SourceDocument
 import dev.usbharu.graphmd.core.model.TimelineSelector
+import dev.usbharu.graphmd.query.GraphSearchEngine
 import org.eclipse.lsp4j.CompletionParams
 import org.eclipse.lsp4j.CompletionItemKind
 import org.eclipse.lsp4j.CodeActionContext
@@ -516,6 +517,41 @@ class GraphMdLanguageServerTest {
         assertEquals("alice", updated.rows.single().values.single())
         assertTrue(original.rows.isEmpty())
         assertTrue(compilationCount.get() >= 2)
+    }
+
+    @Test
+    fun `full text search engine stays in memory until a document changes`() {
+        val buildCount = AtomicInteger()
+        val index = GraphMdWorkspaceIndex(
+            buildSearchEngine = { compilation, sources ->
+                buildCount.incrementAndGet()
+                GraphSearchEngine.build(compilation, sources)
+            },
+        )
+        val typeUri = "file:///workspace/Person.md"
+        val nodeUri = "file:///workspace/alice.md"
+        index.upsert(typeUri, "---\nid: Person\nkind: NodeType\n---")
+        index.upsert(nodeUri, "---\nid: alice\nkind: Node\ntype: Person\n---\nOriginal body")
+
+        repeat(2) {
+            val result = index.search(
+                GraphMdSearchParams(
+                    """MATCH (node) WHERE FULLTEXT(node, "Original") RETURN ID(node) AS id""",
+                ),
+            )
+            assertEquals("alice", result.rows.single().values.single())
+        }
+        assertEquals(1, buildCount.get())
+
+        index.upsert(nodeUri, "---\nid: alice\nkind: Node\ntype: Person\n---\nUpdated body")
+        val updated = index.search(
+            GraphMdSearchParams(
+                """MATCH (node) WHERE FULLTEXT(node, "Updated") RETURN ID(node) AS id""",
+            ),
+        )
+
+        assertEquals("alice", updated.rows.single().values.single())
+        assertEquals(2, buildCount.get())
     }
 
     @Test

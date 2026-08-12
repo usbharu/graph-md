@@ -215,6 +215,8 @@ private class GraphMdWorkspaceService(
 }
 
 internal class GraphMdWorkspaceIndex(
+    private val buildSearchEngine: (GraphCompilationResult, List<SourceDocument>) -> GraphSearchEngine =
+        GraphSearchEngine::build,
     private val compileSources: (List<SourceDocument>) -> GraphCompilationResult = GraphCompiler()::compileSources,
 ) {
     private data class WorkspaceSnapshot(
@@ -1865,7 +1867,7 @@ private fun ReferenceTargetKind.displayName(): String = when (this) {
                 ?.takeIf { it.generation == workspace.generation }
                 ?.let { return it.engine }
         }
-        val candidate = GraphSearchEngine.build(
+        val candidate = buildSearchEngine(
             workspace.compilation,
             workspace.documents.toSourceDocuments(),
         )

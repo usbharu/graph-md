@@ -67,10 +67,17 @@ The `graphmd` CLI is implemented in the `cli` multiplatform module.
 ./gradlew :cli:run --args="stats ./documents"
 ./gradlew :cli:run --args='search "MATCH (person:Person) WHERE person.age >= $minimumAge RETURN person" ./documents --param minimumAge=18 --json'
 ./gradlew :cli:run --args="search --query-file queries/people.gmql ./documents --param minimumAge=18"
+./gradlew :cli:run --args="index --output ./search-index ./documents"
+./gradlew :cli:run --args='search "MATCH (person:Person) WHERE FULLTEXT(person, \"勇者\") RETURN ID(person), SCORE()" --index ./search-index'
 ./gradlew :cli:run --args="demo ./benchmark-data --count 1000 --seed 42"
 ```
 
 `search` executes GMQL against the documents found at the supplied paths.
+`index` writes a reusable static bundle containing `manifest.json` and its JSON
+shards. Passing that directory with `search --index DIR` validates and loads the
+bundle without scanning or recompiling Markdown. Search paths and `--index` are
+mutually exclusive. Regeneration safely replaces an existing valid GraphMD
+index, but rejects a non-empty directory containing unrelated files.
 
 `embed` materializes dynamic query and backlink blocks as ordinary Markdown tables:
 
