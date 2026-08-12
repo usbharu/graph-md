@@ -66,6 +66,20 @@ class GraphMdLanguageServer : LanguageServer, LanguageClientAware, GraphMdSearch
                             resolveProvider = false
                         },
                     )
+                    workspace = WorkspaceServerCapabilities().apply {
+                        fileOperations = FileOperationsServerCapabilities().apply {
+                            didRename = FileOperationOptions(
+                                listOf(
+                                    FileOperationFilter(
+                                        FileOperationPattern("**/*.md").apply {
+                                            matches = FileOperationPatternKind.File
+                                        },
+                                        "file",
+                                    ),
+                                ),
+                            )
+                        }
+                    }
                 },
             ),
         )
@@ -190,6 +204,11 @@ private class GraphMdWorkspaceService(
         params.changes.forEach(index::updateFromDisk)
         server.publishDiagnostics()
     }
+
+    override fun didRenameFiles(params: RenameFilesParams) {
+        index.rename(params.files)
+        server.publishDiagnostics()
+    }
 }
 
 internal class GraphMdWorkspaceIndex(
@@ -281,6 +300,40 @@ internal class GraphMdWorkspaceIndex(
         synchronized(this) {
             if (normalizedUri in openDocuments) return
             replaceNormalized(normalizedUri, document)
+        }
+    }
+
+    fun rename(files: List<FileRename>) {
+        val renames = files
+            .map { normalizeUri(it.oldUri) to normalizeUri(it.newUri) }
+            .filter { (oldUri, newUri) -> oldUri != newUri }
+        synchronized(this) {
+            val sourceUris = renames.mapTo(mutableSetOf()) { it.first }
+            val sourceDocuments = sourceUris.associateWith(documents::get)
+            val openSourceUris = sourceUris.intersect(openDocuments)
+            sourceUris.forEach {
+                documents.remove(it)
+                openDocuments.remove(it)
+            }
+
+            renames.forEach { (oldUri, newUri) ->
+                val source = sourceDocuments[oldUri]
+                val sourceWasOpen = oldUri in openSourceUris
+                val destinationIsOpen = newUri !in sourceUris && newUri in openDocuments
+                val replacement = when {
+                    destinationIsOpen -> documents[newUri]
+                    sourceWasOpen && source != null -> indexedDocument(newUri, source.text)
+                    else -> readDocument(newUri) ?: source?.let { indexedDocument(newUri, it.text) }
+                }
+
+                if (replacement == null) {
+                    documents.remove(newUri)
+                } else {
+                    documents[newUri] = replacement
+                }
+                if (sourceWasOpen) openDocuments += newUri
+            }
+            if (renames.isNotEmpty()) invalidateCompilation()
         }
     }
 
