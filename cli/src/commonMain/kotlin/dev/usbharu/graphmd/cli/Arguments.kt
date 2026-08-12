@@ -93,6 +93,12 @@ internal sealed interface CliCommand {
         val queryFile: String?,
         override val paths: List<String>,
         val parameters: Map<String, String>,
+        val indexDirectory: String?,
+    ) : CliCommand
+
+    data class Index(
+        val outputDirectory: String,
+        override val paths: List<String>,
     ) : CliCommand
 
     data class Embed(
@@ -199,7 +205,7 @@ internal object CliArguments {
                 )
             }
             "search" -> {
-                parsed.reject(setOf("query-file", "param"))
+                parsed.reject(setOf("query-file", "param", "index"))
                 val queryFiles = parsed.values["query-file"].orEmpty()
                 if (queryFiles.size > 1) usage("--query-file may only be specified once")
                 val queryFile = queryFiles.singleOrNull()
@@ -209,6 +215,10 @@ internal object CliArguments {
                     null
                 }
                 val paths = if (queryFile == null) parsed.positionals.drop(1) else parsed.positionals
+                val indexDirectory = parsed.singleValue("index", required = false)
+                if (indexDirectory != null && paths.isNotEmpty()) {
+                    usage("search paths cannot be used with --index")
+                }
                 val parameters = linkedMapOf<String, String>()
                 parsed.values["param"].orEmpty().forEach { encoded ->
                     val name = encoded.substringBefore("=", missingDelimiterValue = "")
@@ -218,7 +228,14 @@ internal object CliArguments {
                     if (name in parameters) usage("Duplicate parameter: $name")
                     parameters[name] = encoded.substringAfter("=")
                 }
-                CliCommand.Search(query, queryFile, paths, parameters)
+                CliCommand.Search(query, queryFile, paths, parameters, indexDirectory)
+            }
+            "index" -> {
+                parsed.reject(setOf("output"))
+                CliCommand.Index(
+                    outputDirectory = checkNotNull(parsed.singleValue("output", required = true)),
+                    paths = parsed.positionals,
+                )
             }
             "embed" -> {
                 parsed.reject(emptySet())
@@ -270,7 +287,7 @@ internal object CliArguments {
                     flags += name
                     index++
                 }
-                "kind", "type", "direction", "valid-time", "query-file", "param", "count", "seed" -> {
+                "kind", "type", "direction", "valid-time", "query-file", "param", "index", "output", "count", "seed" -> {
                     val value = inlineValue ?: tokens.getOrNull(index + 1)?.takeUnless { it.startsWith("--") }
                         ?: usage("--$name requires a value")
                     values.getOrPut(name) { mutableListOf() } += value
@@ -354,6 +371,7 @@ internal object CliArguments {
           lint    Validate GraphMD documents
           stats   Show graph statistics
           search  Execute a GMQL query
+          index   Build a reusable static search index
           embed   Materialize dynamic embed blocks as Markdown tables
           demo    Generate random, valid GraphMD demo data
 
@@ -375,7 +393,9 @@ internal object CliArguments {
         "search" -> """
             Usage: graphmd search QUERY [paths...] [--param NAME=VALUE]... [--json]
                    graphmd search --query-file FILE [paths...] [--param NAME=VALUE]... [--json]
+                   graphmd search QUERY --index DIR [--param NAME=VALUE]... [--json]
         """.trimIndent() + "\n"
+        "index" -> "Usage: graphmd index --output DIR [paths...] [--json]\n"
         "embed" -> "Usage: graphmd embed [paths...] [--json]\n"
         "demo" -> "Usage: graphmd demo DIR --count N [--seed INT] [--json]\n"
         else -> rootHelp()

@@ -17,6 +17,7 @@ internal interface CliFileSystem {
     fun child(path: String, name: String): String
     fun createDirectories(path: String)
     fun writeText(path: String, text: String)
+    fun move(source: String, destination: String)
     fun delete(path: String, mustExist: Boolean = true)
 }
 
@@ -30,7 +31,14 @@ internal object SystemCliFileSystem : CliFileSystem {
         }
     }
 
-    override fun canonical(path: String): String = SystemFileSystem.resolve(Path(path)).toString()
+    override fun canonical(path: String): String {
+        val requested = Path(path)
+        if (SystemFileSystem.metadataOrNull(requested) != null) {
+            return SystemFileSystem.resolve(requested).toString()
+        }
+        val parent = requested.parent ?: Path(".")
+        return Path(canonical(parent.toString()), requested.name).toString()
+    }
 
     override fun children(path: String): List<String> =
         SystemFileSystem.list(Path(path)).map { it.toString() }
@@ -46,6 +54,10 @@ internal object SystemCliFileSystem : CliFileSystem {
 
     override fun writeText(path: String, text: String) {
         SystemFileSystem.sink(Path(path)).buffered().use { it.writeString(text) }
+    }
+
+    override fun move(source: String, destination: String) {
+        SystemFileSystem.atomicMove(Path(source), Path(destination))
     }
 
     override fun delete(path: String, mustExist: Boolean) {
