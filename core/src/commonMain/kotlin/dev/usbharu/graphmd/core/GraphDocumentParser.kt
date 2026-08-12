@@ -562,7 +562,8 @@ class GraphDocumentParser {
         fun isVariableWidth(placeholder: MatchResult): Boolean =
             placeholder.groupValues[2].isNotEmpty() || placeholder.groupValues[1] in setOf("year", "weekYear")
         if (placeholders.zipWithNext().any { (left, right) ->
-                left.range.last + 1 == right.range.first && isVariableWidth(left) && isVariableWidth(right)
+                val separator = format.substring(left.range.last + 1, right.range.first)
+                isVariableWidth(left) && isVariableWidth(right) && separator.all(Char::isDigit)
             }
         ) {
             diagnostics += schemaError(

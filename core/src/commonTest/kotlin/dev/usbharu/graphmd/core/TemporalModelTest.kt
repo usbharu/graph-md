@@ -370,6 +370,16 @@ class TemporalModelTest {
                   format: "{month:1}{day:1}"
                 """.trimIndent(),
             ),
+            timeline(
+                "AmbiguousNumericSeparatorFormat",
+                """
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [month, day]
+                  repeatsEvery: year
+                  format: "{month:1}1{day:1}"
+                """.trimIndent(),
+            ),
         )
 
         assertTrue(result.diagnostics.any { it.message == "calendar-pattern day requires month" })
@@ -379,9 +389,12 @@ class TemporalModelTest {
             2,
             result.diagnostics.count { it.message == "coordinate.format widths MUST be integers between 1 and 64" },
         )
-        assertTrue(result.diagnostics.any {
-            it.message == "coordinate.format MUST separate adjacent variable-width fields"
-        })
+        assertEquals(
+            2,
+            result.diagnostics.count {
+                it.message == "coordinate.format MUST separate adjacent variable-width fields"
+            },
+        )
     }
 
     @Test

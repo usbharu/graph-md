@@ -1,15 +1,43 @@
 package dev.usbharu.graphmd.cli
 
 import dev.usbharu.graphmd.core.GraphCompiler
+import dev.usbharu.graphmd.core.model.CalendarField
+import dev.usbharu.graphmd.core.model.CalendarGranularity
+import dev.usbharu.graphmd.core.model.CalendarKind
 import dev.usbharu.graphmd.core.model.CompileOptions
 import dev.usbharu.graphmd.core.model.SourceDocument
+import dev.usbharu.graphmd.core.model.TemporalCoordinateSpec
 import dev.usbharu.graphmd.core.model.ValidationMode
+import dev.usbharu.graphmd.core.model.YearNumbering
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class GraphMdCliTest {
+    @Test
+    fun `calendar pattern JSON preserves year numbering`() {
+        fun json(numbering: YearNumbering): String = TemporalCoordinateSpec.CalendarPattern(
+            CalendarKind.Gregorian,
+            listOf(CalendarField.Year),
+            numbering,
+            CalendarGranularity.Year,
+        ).toJson().encode()
+
+        val common = json(YearNumbering.CommonEra)
+        val astronomical = json(YearNumbering.Astronomical)
+        val offset = json(YearNumbering.Offset(offset = 543, yearZero = false))
+
+        assertTrue(common.contains("\"numbering\":\"common-era\""), common)
+        assertTrue(astronomical.contains("\"numbering\":\"astronomical\""), astronomical)
+        assertTrue(
+            offset.contains("\"numbering\":{\"kind\":\"offset\",\"offset\":543,\"yearZero\":false}"),
+            offset,
+        )
+        assertFalse(common == astronomical)
+        assertFalse(common == offset)
+    }
+
     @Test
     fun `demo generates a valid minimum dataset and reports its seed`() {
         val fs = FakeFileSystem(emptyMap())

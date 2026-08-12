@@ -264,10 +264,12 @@ internal fun TemporalCoordinateSpec.toJson(): JsonValue = when (this) {
     is TemporalCoordinateSpec.Calendar -> jsonObject(
         "kind" to jsonString("calendar"),
         "calendar" to jsonString(calendar.name.lowercase()),
+        "numbering" to numbering.toJson(),
     )
     is TemporalCoordinateSpec.CalendarPattern -> jsonObject(
         "kind" to jsonString("calendar-pattern"),
         "calendar" to jsonString(calendar.name.lowercase()),
+        "numbering" to numbering.toJson(),
         "fields" to jsonArray(fields.map { jsonString(it.name.replaceFirstChar(Char::lowercase)) }),
         "granularity" to jsonString(granularity.name.lowercase()),
         "repeatsEvery" to (repeatsEvery?.let { jsonString(it.name.lowercase()) } ?: JsonValue.Null),
@@ -286,6 +288,16 @@ internal fun TemporalCoordinateSpec.toJson(): JsonValue = when (this) {
     is TemporalCoordinateSpec.Era -> jsonObject(
         "kind" to jsonString("era"),
         "periods" to jsonArray(periods.map { jsonString(it.name) }),
+    )
+}
+
+private fun YearNumbering.toJson(): JsonValue = when (this) {
+    YearNumbering.CommonEra -> jsonString("common-era")
+    YearNumbering.Astronomical -> jsonString("astronomical")
+    is YearNumbering.Offset -> jsonObject(
+        "kind" to jsonString("offset"),
+        "offset" to jsonNumber(offset),
+        "yearZero" to jsonBoolean(yearZero),
     )
 }
 

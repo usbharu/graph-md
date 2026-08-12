@@ -563,6 +563,14 @@ class GmqlEngineTest {
                 """MATCH (n:Person) VALID ON Birthday AT "02-29" RETURN ID(n) AS id""",
             )
         }
+        val anytimeWithin = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person)
+                   VALID ON Birthday ANYTIME
+                   WITHIN ["2023-01-01", "2025-01-01")
+                   RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
         val windowStartTail = runSuspend {
             localEngine.queryGmql(
                 """MATCH (n:Person)
@@ -720,6 +728,8 @@ class GmqlEngineTest {
         assertTrue(ordinaryDay.rows.isEmpty(), ordinaryDay.toString())
         assertFalse(missingWindow.isSuccess)
         assertEquals("GMQL4004", missingWindow.diagnostics.single().code)
+        assertTrue(anytimeWithin.isSuccess, anytimeWithin.diagnostics.toString())
+        assertEquals(listOf("leapling", "new-year"), anytimeWithin.stringColumn())
         assertEquals(listOf("new-year"), windowStartTail.stringColumn())
         assertEquals(listOf("new-year"), windowEndHead.stringColumn())
         assertTrue(unrelatedWithoutWindow.isSuccess, unrelatedWithoutWindow.diagnostics.toString())

@@ -118,7 +118,7 @@ WITHIN ["2000-01-01", "2031-01-01")
 RETURN n
 ```
 
-`VALID ANYTIME WITHIN [...]` is available when a query needs to join recurring
+`VALID ON Birthday ANYTIME WITHIN [...]` is available when a query needs to join recurring
 assertions without selecting a narrower temporal value. Omitting `WITHIN` when
 recurring validity participates in evaluation returns `GMQL4004`.
 
