@@ -27,6 +27,7 @@ import org.eclipse.lsp4j.DefinitionParams
 import org.eclipse.lsp4j.DiagnosticSeverity
 import org.eclipse.lsp4j.FileChangeType
 import org.eclipse.lsp4j.FileEvent
+import org.eclipse.lsp4j.FileRename
 import org.eclipse.lsp4j.HoverParams
 import org.eclipse.lsp4j.InitializeParams
 import org.eclipse.lsp4j.InitializedParams
@@ -41,6 +42,7 @@ import org.eclipse.lsp4j.Range
 import org.eclipse.lsp4j.RenameParams
 import org.eclipse.lsp4j.Position
 import org.eclipse.lsp4j.RenameOptions
+import org.eclipse.lsp4j.RenameFilesParams
 import org.eclipse.lsp4j.ShowMessageRequestParams
 import org.eclipse.lsp4j.TextDocumentContentChangeEvent
 import org.eclipse.lsp4j.TextDocumentIdentifier
@@ -171,6 +173,10 @@ class GraphMdLanguageServerTest {
         assertNotNull(capabilities.codeActionProvider)
         assertTrue(CodeActionKind.QuickFix in capabilities.codeActionProvider.right.codeActionKinds)
         assertTrue("@" in capabilities.completionProvider.triggerCharacters)
+        val renameFileFilter = capabilities.workspace.fileOperations.didRename.filters.single()
+        assertEquals("file", renameFileFilter.scheme)
+        assertEquals("**/*.md", renameFileFilter.pattern.glob)
+        assertEquals("file", renameFileFilter.pattern.matches)
     }
 
     @Test
@@ -3412,6 +3418,131 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `rename notification removes the stale open path after watched move events`() {
+        val root = Files.createTempDirectory("graphmd-lsp-rename")
+        try {
+            val oldFile = root.resolve("old.md")
+            val newFile = root.resolve("nested").resolve("new.md")
+            val referenceFile = root.resolve("reference.md")
+            val text = graphDocument("MovedType", "NodeType")
+            val referenceText = "---\nid: reference\nkind: Node\ntype: MovedType\n---"
+            Files.writeString(oldFile, text)
+            Files.writeString(referenceFile, referenceText)
+            val oldUri = oldFile.toUri().toString()
+            val newUri = newFile.toUri().toString()
+            val referenceUri = referenceFile.toUri().toString()
+            val client = RecordingLanguageClient()
+            val server = initializedServer(root, client)
+            server.textDocumentService.didOpen(
+                DidOpenTextDocumentParams(TextDocumentItem(oldUri, "markdown", 1, text)),
+            )
+
+            Files.createDirectories(newFile.parent)
+            Files.move(oldFile, newFile)
+            server.workspaceService.didChangeWatchedFiles(
+                DidChangeWatchedFilesParams(
+                    listOf(
+                        FileEvent(oldUri, FileChangeType.Deleted),
+                        FileEvent(newUri, FileChangeType.Created),
+                    ),
+                ),
+            )
+            assertTrue(client.latest(oldUri).any { it.message == "NodeType id must be unique: MovedType" })
+
+            server.workspaceService.didRenameFiles(
+                RenameFilesParams(listOf(FileRename(oldUri, newUri))),
+            )
+
+            assertTrue(client.latest(oldUri).isEmpty())
+            assertTrue(client.latest(newUri).none { "unique: MovedType" in it.message })
+            assertTrue(client.latest(referenceUri).none { "MovedType" in it.message })
+            val definitions = server.textDocumentService.definition(
+                DefinitionParams(TextDocumentIdentifier(referenceUri), Position(3, "type: ".length)),
+            ).get().left.orEmpty()
+            assertEquals(listOf(newUri), definitions.map { it.uri })
+
+            server.textDocumentService.didClose(DidCloseTextDocumentParams(TextDocumentIdentifier(oldUri)))
+            server.workspaceService.didChangeWatchedFiles(
+                DidChangeWatchedFilesParams(
+                    listOf(
+                        FileEvent(oldUri, FileChangeType.Deleted),
+                        FileEvent(newUri, FileChangeType.Created),
+                    ),
+                ),
+            )
+            val definitionsAfterLateEvents = server.textDocumentService.definition(
+                DefinitionParams(TextDocumentIdentifier(referenceUri), Position(3, "type: ".length)),
+            ).get().left.orEmpty()
+            assertEquals(listOf(newUri), definitionsAfterLateEvents.map { it.uri })
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `rename transfers an open overlay unless the destination is already open`() {
+        val index = GraphMdWorkspaceIndex()
+        val oldUri = "file:///workspace/old.md"
+        val newUri = "file:///workspace/new.md"
+        val referenceUri = "file:///workspace/reference.md"
+        val destinationReferenceUri = "file:///workspace/destination-reference.md"
+        index.open(oldUri, graphDocument("OverlayType", "NodeType"))
+        index.upsert(referenceUri, "---\nid: reference\nkind: Node\ntype: OverlayType\n---")
+
+        index.rename(listOf(FileRename(oldUri, newUri)))
+
+        assertEquals(
+            listOf(newUri),
+            index.definitions(referenceUri, Position(3, "type: ".length)).map { it.uri },
+        )
+
+        index.open(oldUri, graphDocument("StaleType", "NodeType"))
+        index.open(newUri, graphDocument("DestinationType", "NodeType"))
+        index.upsert(
+            destinationReferenceUri,
+            "---\nid: destination-reference\nkind: Node\ntype: DestinationType\n---",
+        )
+
+        index.rename(listOf(FileRename(oldUri, newUri)))
+
+        assertEquals(
+            listOf(newUri),
+            index.definitions(destinationReferenceUri, Position(3, "type: ".length)).map { it.uri },
+        )
+        assertTrue(index.diagnosticsByUri().getValue(referenceUri).any { it.message == "Unknown NodeType: OverlayType" })
+    }
+
+    @Test
+    fun `rename batch preserves every document in a chained move`() {
+        val index = GraphMdWorkspaceIndex()
+        val firstUri = "file:///workspace/first.md"
+        val secondUri = "file:///workspace/second.md"
+        val thirdUri = "file:///workspace/third.md"
+        val firstReferenceUri = "file:///workspace/first-reference.md"
+        val secondReferenceUri = "file:///workspace/second-reference.md"
+        index.upsert(firstUri, graphDocument("FirstType", "NodeType"))
+        index.upsert(secondUri, graphDocument("SecondType", "NodeType"))
+        index.upsert(firstReferenceUri, "---\nid: first-reference\nkind: Node\ntype: FirstType\n---")
+        index.upsert(secondReferenceUri, "---\nid: second-reference\nkind: Node\ntype: SecondType\n---")
+
+        index.rename(
+            listOf(
+                FileRename(firstUri, secondUri),
+                FileRename(secondUri, thirdUri),
+            ),
+        )
+
+        assertEquals(
+            listOf(secondUri),
+            index.definitions(firstReferenceUri, Position(3, "type: ".length)).map { it.uri },
+        )
+        assertEquals(
+            listOf(thirdUri),
+            index.definitions(secondReferenceUri, Position(3, "type: ".length)).map { it.uri },
+        )
+    }
+
+    @Test
     fun `deleting a watched file clears its published diagnostics`() {
         val root = Files.createTempDirectory("graphmd-lsp-delete-diagnostics")
         try {
@@ -4314,6 +4445,54 @@ class GraphMdLanguageServerTest {
         )
         assertEquals("items: \${1:string}", arraySchema.single { it.label == "items" }.insertText)
         assertEquals(InsertTextFormat.Snippet, arraySchema.single { it.label == "items" }.insertTextFormat)
+    }
+
+    @Test
+    fun `property schema field completion starts a nested line after the property declaration`() {
+        fun assertCompletion(
+            kind: String,
+            lineSeparator: String,
+            label: String,
+            expectedField: String,
+        ) {
+            val lines = mutableListOf(
+                "---",
+                "id: Example",
+                "kind: $kind",
+            )
+            if (kind == "RelType") {
+                lines += "from: [Node]"
+                lines += "to: [Node]"
+            }
+            lines += listOf("props:", "  name:", "---")
+            val text = lines.joinToString(lineSeparator)
+            val uri = "file:///workspace/$kind.md"
+            val fixture = serverFixture(mapOf(uri to text))
+            val cursor = text.indexOf("  name:") + "  name:".length
+
+            val item = fixture.completions(uri, cursor).single { it.label == label }
+            val edit = assertNotNull(item.textEdit?.left)
+            val propertyLine = lines.indexOf("  name:")
+            val expectedText = buildList {
+                addAll(lines.subList(0, propertyLine + 1))
+                add("    $expectedField")
+                addAll(lines.subList(propertyLine + 1, lines.size))
+            }.joinToString(lineSeparator)
+
+            assertEquals(lineSeparator + "    " + expectedField, edit.newText)
+            assertEquals(
+                Range(Position(propertyLine, "  name:".length), Position(propertyLine, "  name:".length)),
+                edit.range,
+            )
+            assertEquals(
+                expectedText,
+                text.replaceRange(cursor, cursor, edit.newText),
+            )
+            assertEquals(InsertTextFormat.Snippet, item.insertTextFormat)
+        }
+
+        assertCompletion("NodeType", "\n", "type", "type: \${1:string}")
+        assertCompletion("RelType", "\r\n", "required", "required: \${1:false}")
     }
 
     @Test
