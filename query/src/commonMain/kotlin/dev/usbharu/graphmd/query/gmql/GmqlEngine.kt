@@ -636,7 +636,16 @@ internal class GmqlExecutor(
                 tick()
                 if (assertion.owner != owner || assertion.path != path) return@mapNotNull null
                 val time = binding.validity intersect materialize(assertion.validTime)
-                if (time.isEmpty) null else GmqlValue.TemporalEntry(assertion.value.toGmqlValue(), time)
+                if (time.isEmpty) {
+                    null
+                } else {
+                    GmqlValue.TemporalEntry(
+                        assertion.value.toGmqlValue { timeline, coordinate ->
+                            graph.timelineCatalog.formatCoordinate(TimelineId(timeline), coordinate)
+                        },
+                        time,
+                    )
+                }
             }.toList()
         if (entries.isNotEmpty()) return Eval(GmqlValue.TemporalValue(entries), entries.unionTime())
         val pseudoEntries = graph.textAssertions.asSequence()
@@ -1166,26 +1175,34 @@ internal fun GmqlValue.type(): GmqlType = when (this) {
     is GmqlValue.TemporalExtentValue -> GmqlType.TemporalExtent
 }
 
-private fun NormalizedValue.toGmqlValue(): GmqlValue = when (this) {
+private fun NormalizedValue.toGmqlValue(
+    formatCoordinate: (String, TemporalCoordinate) -> String?,
+): GmqlValue = when (this) {
     is StringValue -> GmqlValue.StringValue(value)
     is IntegerValue -> GmqlValue.IntegerValue(value)
     is NumberValue -> GmqlValue.DecimalValue(value)
     is BooleanValue -> GmqlValue.BooleanValue(value)
     NullValue -> GmqlValue.NullValue
-    is ArrayValue -> GmqlValue.CollectionValue(values.map { it.toGmqlValue() })
+    is ArrayValue -> GmqlValue.CollectionValue(values.map { it.toGmqlValue(formatCoordinate) })
     is TextValue -> GmqlValue.CollectionValue(values.entries.map {
         GmqlValue.CollectionValue(listOf(GmqlValue.StringValue(it.key), GmqlValue.StringValue(it.value)))
     })
     is ObjectValue -> GmqlValue.CollectionValue(values.entries.map {
-        GmqlValue.CollectionValue(listOf(GmqlValue.StringValue(it.key), it.value.toGmqlValue()))
+        GmqlValue.CollectionValue(listOf(GmqlValue.StringValue(it.key), it.value.toGmqlValue(formatCoordinate)))
     })
-    is InstantValue -> coordinate.toGmqlValue()
+    is InstantValue -> coordinate.toGmqlValue(timeline, formatCoordinate)
     is DurationValue -> GmqlValue.CollectionValue(
-        listOfNotNull(from?.coordinate?.toGmqlValue(), to?.coordinate?.toGmqlValue()),
+        listOfNotNull(
+            from?.let { it.coordinate.toGmqlValue(it.timeline ?: timeline, formatCoordinate) },
+            to?.let { it.coordinate.toGmqlValue(it.timeline ?: timeline, formatCoordinate) },
+        ),
     )
 }
 
-private fun TemporalCoordinate.toGmqlValue(): GmqlValue = when (this) {
+private fun TemporalCoordinate.toGmqlValue(
+    timeline: String?,
+    formatCoordinate: (String, TemporalCoordinate) -> String?,
+): GmqlValue = when (this) {
     is TemporalCoordinate.Rational -> if (value.denominator == 1L) {
         GmqlValue.IntegerValue(value.numerator)
     } else {
@@ -1195,14 +1212,15 @@ private fun TemporalCoordinate.toGmqlValue(): GmqlValue = when (this) {
         "$year-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}",
     )
     is TemporalCoordinate.CalendarPattern -> GmqlValue.StringValue(
-        fields.entries.sortedBy { it.key.ordinal }.joinToString("-") { (field, fieldValue) ->
-            when (field) {
-                CalendarField.Year, CalendarField.WeekYear -> fieldValue.toString().padStart(4, '0')
-                CalendarField.Month, CalendarField.Day -> fieldValue.toString().padStart(2, '0')
-                CalendarField.Quarter -> "Q$fieldValue"
-                CalendarField.Week -> "W${fieldValue.toString().padStart(2, '0')}"
-            }
-        },
+        timeline?.let { formatCoordinate(it, this) }
+            ?: fields.entries.sortedBy { it.key.ordinal }.joinToString("-") { (field, fieldValue) ->
+                when (field) {
+                    CalendarField.Year, CalendarField.WeekYear -> fieldValue.toString().padStart(4, '0')
+                    CalendarField.Month, CalendarField.Day -> fieldValue.toString().padStart(2, '0')
+                    CalendarField.Quarter -> "Q$fieldValue"
+                    CalendarField.Week -> "W${fieldValue.toString().padStart(2, '0')}"
+                }
+            },
     )
     is TemporalCoordinate.EraDate -> GmqlValue.StringValue(
         "$era $year-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}",

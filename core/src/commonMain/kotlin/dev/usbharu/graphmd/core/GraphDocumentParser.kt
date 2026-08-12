@@ -558,6 +558,18 @@ class GraphDocumentParser {
                 documentId,
             )
         }
+        fun isVariableWidth(placeholder: MatchResult): Boolean =
+            placeholder.groupValues[2].isNotEmpty() || placeholder.groupValues[1] in setOf("year", "weekYear")
+        if (placeholders.zipWithNext().any { (left, right) ->
+                left.range.last + 1 == right.range.first && isVariableWidth(left) && isVariableWidth(right)
+            }
+        ) {
+            diagnostics += schemaError(
+                "coordinate.format MUST separate adjacent variable-width fields",
+                sourcePath,
+                documentId,
+            )
+        }
         if (format.replace(Regex("""\{[A-Za-z][A-Za-z0-9]*(?::\d+)?\}"""), "").contains('{') ||
             format.replace(Regex("""\{[A-Za-z][A-Za-z0-9]*(?::\d+)?\}"""), "").contains('}')
         ) {

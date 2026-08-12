@@ -360,6 +360,16 @@ class TemporalModelTest {
                   format: "{month:999999999999999999999}"
                 """.trimIndent(),
             ),
+            timeline(
+                "AmbiguousAdjacentFormat",
+                """
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [month, day]
+                  repeatsEvery: year
+                  format: "{month:1}{day:1}"
+                """.trimIndent(),
+            ),
         )
 
         assertTrue(result.diagnostics.any { it.message == "calendar-pattern day requires month" })
@@ -368,6 +378,37 @@ class TemporalModelTest {
         assertEquals(
             2,
             result.diagnostics.count { it.message == "coordinate.format widths MUST be integers between 1 and 64" },
+        )
+        assertTrue(result.diagnostics.any {
+            it.message == "coordinate.format MUST separate adjacent variable-width fields"
+        })
+    }
+
+    @Test
+    fun `calendar pattern expansion rejects windows longer than ten thousand calendar years`() {
+        val result = compile(
+            timeline("CommonEra", "coordinate: gregorian"),
+            timeline(
+                "Birthday",
+                """
+                sameAxisAs: CommonEra
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [month, day]
+                  repeatsEvery: year
+                """.trimIndent(),
+            ),
+        )
+        val engine = TemporalEngine(result.temporalModel)
+        val start = checkNotNull(engine.normalizeToAxis("CommonEra", TemporalCoordinate.CalendarDate(1, 1, 1)))
+        val end = checkNotNull(engine.normalizeToAxis("CommonEra", TemporalCoordinate.CalendarDate(10_002, 1, 1)))
+
+        assertNull(
+            engine.resolveToAxis(
+                "Birthday",
+                engine.parse("Birthday", "01-01").coordinate,
+                TemporalExpansionWindow(start, end),
+            ),
         )
     }
 

@@ -35,7 +35,7 @@ data class StaticSearchBundle(
 }
 
 object StaticSearchIndexCodec {
-    const val FORMAT_VERSION: Int = 5
+    const val FORMAT_VERSION: Int = 6
 
     fun encode(
         index: SearchIndex,
@@ -603,6 +603,8 @@ private fun encodeDeferredTemporalSet(value: DeferredTemporalSet): Json = when (
         "assertionTimelineId" to jsonString(value.extent.assertionTimelineId.value),
         "from" to (value.extent.from?.let(::encodeCoordinate) ?: Json.Null),
         "to" to (value.extent.to?.let(::encodeCoordinate) ?: Json.Null),
+        "fromInclusive" to jsonBoolean(value.extent.fromInclusive),
+        "toInclusive" to jsonBoolean(value.extent.toInclusive),
     )
     is DeferredTemporalSet.Intersection -> encodeDeferredBinary("intersection", value.left, value.right)
     is DeferredTemporalSet.Union -> encodeDeferredBinary("union", value.left, value.right)
@@ -634,6 +636,8 @@ private fun decodeDeferredTemporalSet(json: Json): DeferredTemporalSet {
                     as? TemporalCoordinate.CalendarPattern,
                 value.required("to").takeUnless { it === Json.Null }?.let(::decodeCoordinate)
                     as? TemporalCoordinate.CalendarPattern,
+                value.required("fromInclusive").booleanValue(),
+                value.required("toInclusive").booleanValue(),
             ),
         )
         "intersection" -> DeferredTemporalSet.Intersection(

@@ -110,6 +110,8 @@ data class CalendarPatternExtent(
     val assertionTimelineId: TimelineId,
     val from: TemporalCoordinate.CalendarPattern?,
     val to: TemporalCoordinate.CalendarPattern?,
+    val fromInclusive: Boolean = true,
+    val toInclusive: Boolean = true,
 )
 
 sealed interface DeferredTemporalSet {
@@ -342,7 +344,14 @@ class TimelineCatalog private constructor(
             require(start == null || patternStart != null) { "calendar-pattern ranges cannot mix coordinate kinds" }
             require(end == null || patternEnd != null) { "calendar-pattern ranges cannot mix coordinate kinds" }
             return materializePattern(
-                CalendarPatternExtent(timelineId, source.assertionScopeId, patternStart, patternEnd),
+                CalendarPatternExtent(
+                    timelineId,
+                    source.assertionScopeId,
+                    patternStart,
+                    patternEnd,
+                    start?.second ?: true,
+                    end?.second ?: true,
+                ),
                 expansionWindow,
             )
         }
@@ -388,6 +397,11 @@ class TimelineCatalog private constructor(
     fun parseCoordinate(timelineId: TimelineId, raw: String): TemporalCoordinate {
         require(timelineId in byId) { "Unknown Timeline: ${timelineId.value}" }
         return engine.parse(timelineId.value, raw).coordinate
+    }
+
+    fun formatCoordinate(timelineId: TimelineId, coordinate: TemporalCoordinate): String? {
+        if (timelineId !in byId) return null
+        return runCatching { engine.format(timelineId.value, coordinate) }.getOrNull()
     }
 
     fun expansionWindow(value: CalendarExpansionWindow): TemporalExpansionWindow? {
@@ -497,14 +511,22 @@ class TimelineCatalog private constructor(
         val to = extent.to?.let { periods(resolve(it)) }.orEmpty()
         val ranges = when {
             extent.from != null && extent.to != null -> from.mapNotNull { start ->
+                val rangeStart = if (extent.fromInclusive) start.start else start.endExclusive
                 val latestEnd = start.start + ExactRational.of(CALENDAR_PATTERN_MAX_YEAR_CYCLE_DAYS)
                 val end = to.firstOrNull {
                     it.endExclusive > start.start && it.endExclusive <= latestEnd
                 } ?: return@mapNotNull null
-                TemporalAxisPeriod(start.start, end.endExclusive)
+                val rangeEnd = if (extent.toInclusive) end.endExclusive else end.start
+                if (rangeStart < rangeEnd) TemporalAxisPeriod(rangeStart, rangeEnd) else null
             }
-            extent.from != null -> from
-            extent.to != null -> to
+            extent.from != null -> from.mapNotNull { period ->
+                val start = if (extent.fromInclusive) period.start else period.endExclusive
+                if (start < period.endExclusive) TemporalAxisPeriod(start, period.endExclusive) else null
+            }
+            extent.to != null -> to.mapNotNull { period ->
+                val end = if (extent.toInclusive) period.endExclusive else period.start
+                if (period.start < end) TemporalAxisPeriod(period.start, end) else null
+            }
             else -> emptyList()
         }
         return IntervalSet.of(ranges.mapNotNull { period ->

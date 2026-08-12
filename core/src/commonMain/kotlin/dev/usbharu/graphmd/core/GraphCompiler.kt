@@ -2038,10 +2038,12 @@ class GraphCompiler(
             return null
         }
         var from = normalizeTemporalPoint(
-            obj.values["from"], "$propName.from", timelineById, referenceCandidates, sourcePath, documentId, diagnostics,
+            obj.values["from"], "$propName.from", timeline, timelineById, referenceCandidates,
+            sourcePath, documentId, diagnostics,
         )?.let { point -> if (point.timeline == null && timeline != null) point.copy(timeline = timeline) else point }
         var to = normalizeTemporalPoint(
-            obj.values["to"], "$propName.to", timelineById, referenceCandidates, sourcePath, documentId, diagnostics,
+            obj.values["to"], "$propName.to", timeline, timelineById, referenceCandidates,
+            sourcePath, documentId, diagnostics,
         )?.let { point -> if (point.timeline == null && timeline != null) point.copy(timeline = timeline) else point }
         val engine = temporalEngine(timelineById.values)
         fun coercePattern(point: TemporalPoint?, endpoint: String): TemporalPoint? {
@@ -2088,6 +2090,7 @@ class GraphCompiler(
     private fun normalizeTemporalPoint(
         raw: RawValue?,
         field: String,
+        defaultTimeline: String?,
         timelineById: Map<String, NormalizedTimeline>,
         referenceCandidates: Map<String, List<GraphDocument>>,
         sourcePath: String,
@@ -2095,6 +2098,15 @@ class GraphCompiler(
         diagnostics: MutableList<Diagnostic>,
     ): TemporalPoint? {
         if (raw == null) return null
+        if (raw is RawString && timelineById[defaultTimeline]?.coordinate is TemporalCoordinateSpec.CalendarPattern) {
+            val coordinate = runCatching {
+                temporalEngine(timelineById.values).parse(checkNotNull(defaultTimeline), raw.value).coordinate
+            }.getOrNull() ?: run {
+                diagnostics += typeError("$field is not valid for $defaultTimeline", sourcePath, documentId)
+                return null
+            }
+            return TemporalPoint(coordinate, raw.value, defaultTimeline)
+        }
         parseRawTemporalCoordinate(raw)?.let { return TemporalPoint(it) }
         val obj = raw as? RawObject ?: run {
             diagnostics += typeError("$field must be a temporal coordinate or timePoint object", sourcePath, documentId)

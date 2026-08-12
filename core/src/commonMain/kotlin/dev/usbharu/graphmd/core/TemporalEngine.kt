@@ -924,7 +924,7 @@ private fun resolveCalendarPattern(
     val to = dayIndexToCalendar(expansion.endExclusive.numerator - 1, calendar) ?: return null
     val fromAstronomical = toAstronomicalYear(from.year, spec.numbering) ?: return null
     val toAstronomical = toAstronomicalYear(to.year, spec.numbering) ?: return null
-    if (toAstronomical < fromAstronomical || toAstronomical - fromAstronomical > 10_000L) return null
+    if (toAstronomical < fromAstronomical || toAstronomical - fromAstronomical >= 10_000L) return null
     val expansionMargin = recurrenceContextYears.toLong() + 2L
     if (fromAstronomical < Long.MIN_VALUE + expansionMargin || toAstronomical > Long.MAX_VALUE - expansionMargin) {
         return null

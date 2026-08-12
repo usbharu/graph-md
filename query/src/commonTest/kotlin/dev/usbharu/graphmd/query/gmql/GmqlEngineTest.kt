@@ -436,6 +436,53 @@ class GmqlEngineTest {
                 """,
             ),
             source(
+                "/display-birthday.md",
+                """
+                ---
+                id: DisplayBirthday
+                kind: Timeline
+                sameAxisAs: CommonEra
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [month, day]
+                  repeatsEvery: year
+                  format: "{day:02}/{month:02}"
+                ---
+                """,
+            ),
+            source(
+                "/formatted-event-type.md",
+                """
+                ---
+                id: FormattedEvent
+                kind: NodeType
+                props:
+                  date:
+                    type: instant
+                    timeline: DisplayBirthday
+                  span:
+                    type: duration
+                    timeline: DisplayBirthday
+                ---
+                """,
+            ),
+            source(
+                "/formatted-event.md",
+                """
+                ---
+                id: formatted-event
+                kind: Node
+                type: FormattedEvent
+                props:
+                  date: { timeline: DisplayBirthday, value: "08/02" }
+                  span:
+                    timeline: DisplayBirthday
+                    from: "08/02"
+                    to: "09/02"
+                ---
+                """,
+            ),
+            source(
                 "/leap-end.md",
                 """
                 ---
@@ -478,6 +525,7 @@ class GmqlEngineTest {
         val newDocumentDiagnostics = compilation.diagnostics.filter {
             it.source?.path in setOf(
                 "/common-era.md", "/birthday.md", "/leapling.md", "/new-year.md", "/leap-range-type.md", "/leap-end.md",
+                "/display-birthday.md", "/formatted-event-type.md", "/formatted-event.md",
                 "/place-type.md", "/tokyo.md",
             )
         }
@@ -615,6 +663,35 @@ class GmqlEngineTest {
                    RETURN ID(n) AS id""",
             )
         }
+        val halfOpenSameDay = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person)
+                   VALID ON Birthday OVERLAPS ["02-29", "02-29")
+                   WITHIN ["2023-01-01", "2025-01-01")
+                   RETURN ID(n) AS id""",
+            )
+        }
+        val openClosedSameDay = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person)
+                   VALID ON Birthday OVERLAPS ("02-29", "02-29"]
+                   WITHIN ["2023-01-01", "2025-01-01")
+                   RETURN ID(n) AS id""",
+            )
+        }
+        val ordinaryHalfOpenSameDay = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:LeapRange)
+                   VALID ON Birthday OVERLAPS ["01-01", "01-01")
+                   WITHIN ["2024-01-01", "2025-01-01")
+                   RETURN ID(n) AS id""",
+            )
+        }
+        val formattedProperty = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:FormattedEvent) RETURN n.date AS date, n.span AS span""",
+            )
+        }
 
         assertEquals(listOf("leapling"), leapDay.stringColumn())
         rangeOperators.forEach { (operator, result) ->
@@ -648,6 +725,22 @@ class GmqlEngineTest {
         assertEquals(listOf("leap-end"), presentLeapEnd.stringColumn())
         assertFalse(overflowingWithin.isSuccess)
         assertEquals("GMQL4005", overflowingWithin.diagnostics.single().code)
+        assertTrue(halfOpenSameDay.isSuccess, halfOpenSameDay.diagnostics.toString())
+        assertTrue(halfOpenSameDay.rows.isEmpty(), halfOpenSameDay.toString())
+        assertTrue(openClosedSameDay.isSuccess, openClosedSameDay.diagnostics.toString())
+        assertTrue(openClosedSameDay.rows.isEmpty(), openClosedSameDay.toString())
+        assertTrue(ordinaryHalfOpenSameDay.isSuccess, ordinaryHalfOpenSameDay.diagnostics.toString())
+        assertTrue(ordinaryHalfOpenSameDay.rows.isEmpty(), ordinaryHalfOpenSameDay.toString())
+        assertTrue(formattedProperty.isSuccess, formattedProperty.diagnostics.toString())
+        val formattedDate = assertIs<GmqlValue.TemporalValue>(formattedProperty.rows.single().values[0])
+        assertEquals(GmqlValue.StringValue("08/02"), formattedDate.entries.single().value)
+        val formattedSpan = assertIs<GmqlValue.TemporalValue>(formattedProperty.rows.single().values[1])
+        assertEquals(
+            GmqlValue.CollectionValue(
+                listOf(GmqlValue.StringValue("08/02"), GmqlValue.StringValue("09/02")),
+            ),
+            formattedSpan.entries.single().value,
+        )
     }
 
     @Test

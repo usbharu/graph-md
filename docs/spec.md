@@ -651,7 +651,7 @@ coordinate:
   format: "{day:02}/{month:02}"
 ```
 
-`format`は宣言fieldをそれぞれ一度だけ参照しなければならない。`{field}`または`{field:width}`を使用し、`width`は1から64の整数で最小桁数を表す。formatはparseと表示の両方に適用する。
+`format`は宣言fieldをそれぞれ一度だけ参照しなければならない。`{field}`または`{field:width}`を使用し、`width`は1から64の整数で最小桁数を表す。隣接する可変幅fieldの間には区切りを必要とする。formatはparseと表示の両方に適用する。
 
 `year/month/day`が揃う値はinstant、それより細かいfieldを省略した値は自然期間、上位fieldを省略して`repeatsEvery`を持つ値は周期集合になる。自然期間と周期の各occurrenceは半開区間`[start, end)`へ正規化する。patternを`validTime`の片方の境界だけに記述した場合は、その値の自然期間を意味する。両境界を記述した場合は各周期内の範囲になり、年末をまたいでもよい。
 
