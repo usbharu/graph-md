@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import MarkdownIt from "markdown-it";
+import type { Env } from "markdown-it";
 import { graphMdPlugin, type GraphMdOptions } from "../src/index";
 
-function render(input: string, options?: GraphMdOptions, env?: unknown): string {
+function render(input: string, options?: GraphMdOptions, env?: Env): string {
   const md = new MarkdownIt();
   md.use(graphMdPlugin, options);
   return md.render(input, env);
