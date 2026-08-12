@@ -113,6 +113,62 @@ private class AstroSiteGenerator(
         val incoming = graph.relations.groupBy { it.to }
         val docs = documents.map { document ->
             val node = graph.nodes.firstOrNull { it.id == document.id }
+            val nodeType = graph.nodeTypes.firstOrNull { it.id == document.id }
+            val nodeTypeDocument = document as? NodeTypeDocument
+            val relType = graph.relTypes.firstOrNull { it.id == document.id }
+            val timeline = graph.timelines.firstOrNull { it.id == document.id }
+            val propertyEntries = node?.propEntries?.let(::propertyEntriesToJson)
+                ?: timeline?.props?.entries?.map { (name, value) ->
+                    jsonObject(
+                        "name" to jsonString(name),
+                        "value" to value.toJson(),
+                        "validTime" to jsonArray(emptyList()),
+                        "fallback" to jsonBoolean(false),
+                    )
+                }?.let(::jsonArray)
+                ?: jsonArray(emptyList())
+            val schema = (nodeType?.props ?: relType?.props).orEmpty().entries.map { (name, prop) ->
+                jsonObject("name" to jsonString(name), "schema" to prop.toJson())
+            }
+            val relationUsage = if (document.kind == DocumentKind.RelType) {
+                graph.relations.filter { it.type == document.id }.map { relation ->
+                    jsonObject(
+                        "from" to jsonString(relation.from),
+                        "fromRoute" to jsonNullableString(routes[relation.from]),
+                        "to" to jsonString(relation.to),
+                        "toRoute" to jsonNullableString(routes[relation.to]),
+                        "label" to jsonString(relation.sourceLabel),
+                        "properties" to propertyEntriesToJson(relation.propEntries),
+                    )
+                }
+            } else emptyList()
+            val nodeTypeDetails = nodeTypeDocument?.let { current ->
+                fun typeLink(id: String): JsonValue {
+                    val target = documents.firstOrNull { it.id == id }
+                    return jsonObject(
+                        "id" to jsonString(id),
+                        "title" to jsonString(firstHeading(target?.body.orEmpty()) ?: id),
+                        "route" to jsonNullableString(routes[id]),
+                    )
+                }
+                val children = documents.filterIsInstance<NodeTypeDocument>()
+                    .filter { current.id in it.extends }
+                    .sortedBy { it.id }
+                val usage = graph.nodes.filter { it.type == current.id }.sortedBy { it.id }.map { usedBy ->
+                    val target = documents.firstOrNull { it.id == usedBy.id }
+                    jsonObject(
+                        "id" to jsonString(usedBy.id),
+                        "title" to jsonString(firstHeading(target?.body.orEmpty()) ?: usedBy.id),
+                        "kind" to jsonString(usedBy.kind.name),
+                        "route" to jsonNullableString(routes[usedBy.id]),
+                    )
+                }
+                jsonObject(
+                    "parents" to jsonArray(current.extends.map(::typeLink)),
+                    "children" to jsonArray(children.map { typeLink(it.id) }),
+                    "usage" to jsonArray(usage),
+                )
+            }
             jsonObject(
                 "id" to jsonString(document.id),
                 "slug" to jsonString(safeSlug(document.id)),
@@ -122,6 +178,35 @@ private class AstroSiteGenerator(
                 "type" to jsonNullableString(node?.type),
                 "url" to jsonNullableString(node?.url),
                 "body" to jsonString(document.body),
+                "properties" to propertyEntries,
+                "schema" to jsonArray(schema),
+                "nodeType" to (nodeTypeDetails ?: JsonValue.Null),
+                "relationUsage" to jsonArray(relationUsage),
+                "timeline" to (timeline?.let { current ->
+                    val mappings = graph.temporalModel.mappings.filter {
+                        it.sourceTimelineId == current.id || it.targetTimelineId == current.id
+                    }.map { mapping ->
+                        jsonObject(
+                            "direction" to jsonString(if (mapping.sourceTimelineId == current.id) "outgoing" else "incoming"),
+                            "source" to jsonString(mapping.sourceTimelineId),
+                            "sourceRoute" to jsonNullableString(routes[mapping.sourceTimelineId]),
+                            "target" to jsonString(mapping.targetTimelineId),
+                            "targetRoute" to jsonNullableString(routes[mapping.targetTimelineId]),
+                            "definition" to mapping.toJson(),
+                        )
+                    }
+                    jsonObject(
+                        "id" to jsonString(current.id),
+                        "axis" to jsonString(current.axisId),
+                        "domain" to jsonString(current.domainId),
+                        "coordinate" to current.coordinate.toJson(),
+                        "parent" to jsonNullableString(current.coordinateSystem.parentTimelineId),
+                        "parentRoute" to jsonNullableString(current.coordinateSystem.parentTimelineId?.let(routes::get)),
+                        "lineage" to (current.lineage?.toJson() ?: JsonValue.Null),
+                        "lineageRoute" to jsonNullableString(current.lineage?.sourceTimelineId?.let(routes::get)),
+                        "mappings" to jsonArray(mappings),
+                    )
+                } ?: JsonValue.Null),
                 "backlinks" to jsonArray(incoming[document.id].orEmpty().map { relation ->
                     jsonObject(
                         "id" to jsonString(relation.from),
@@ -137,6 +222,7 @@ private class AstroSiteGenerator(
                 "label" to jsonString(firstHeading(documents.firstOrNull { it.id == node.id }?.body.orEmpty()) ?: node.id),
                 "route" to jsonNullableString(routes[node.id]),
                 "kind" to jsonString(node.kind.name),
+                "type" to jsonString(node.type),
             ))
         }
         val edges = graph.relations.mapIndexed { index, relation ->
@@ -145,11 +231,45 @@ private class AstroSiteGenerator(
                 "target" to jsonString(relation.to), "label" to jsonString(relation.type),
             ))
         }
+        val timelineNodes = graph.timelines.map { timeline ->
+            jsonObject("data" to jsonObject(
+                "id" to jsonString(timeline.id),
+                "label" to jsonString(timeline.id),
+                "route" to jsonNullableString(routes[timeline.id]),
+                "domain" to jsonString(timeline.domainId),
+            ))
+        }
+        val timelineEdges = buildList {
+            graph.timelines.forEach { timeline ->
+                timeline.coordinateSystem.parentTimelineId?.let { parent ->
+                    add(jsonObject("data" to jsonObject(
+                        "id" to jsonString("same-axis:${parent}:${timeline.id}"),
+                        "source" to jsonString(parent), "target" to jsonString(timeline.id),
+                        "label" to jsonString("same axis"), "kind" to jsonString("sameAxis"),
+                    )))
+                }
+                timeline.lineage?.let { lineage ->
+                    add(jsonObject("data" to jsonObject(
+                        "id" to jsonString("lineage:${lineage.sourceTimelineId}:${timeline.id}"),
+                        "source" to jsonString(lineage.sourceTimelineId), "target" to jsonString(timeline.id),
+                        "label" to jsonString(lineage.kind.name.lowercase()), "kind" to jsonString("lineage"),
+                    )))
+                }
+            }
+            graph.temporalModel.mappings.forEach { mapping ->
+                add(jsonObject("data" to jsonObject(
+                    "id" to jsonString("mapping:${mapping.id}"),
+                    "source" to jsonString(mapping.sourceTimelineId), "target" to jsonString(mapping.targetTimelineId),
+                    "label" to jsonString(mapping.kind.name.lowercase()), "kind" to jsonString("mapping"),
+                )))
+            }
+        }
         return jsonObject(
             "base" to jsonString(base),
             "documents" to jsonArray(docs),
             "routes" to JsonValue.Object(routes.mapValues { jsonString(it.value) }),
             "graph" to jsonObject("nodes" to jsonArray(nodes), "edges" to jsonArray(edges)),
+            "timelineGraph" to jsonObject("nodes" to jsonArray(timelineNodes), "edges" to jsonArray(timelineEdges)),
         ).encode() + "\n"
     }
 }

@@ -46,6 +46,84 @@ class GraphMdCliTest {
     }
 
     @Test
+    fun `site emits structured document metadata for wiki type views`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "/workspace/Person.md" to """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    extends: [Living]
+                    props:
+                      name: { type: string, required: true }
+                    ---
+                """.trimIndent(),
+                "/workspace/Living.md" to nodeType("Living"),
+                "/workspace/Idol.md" to """
+                    ---
+                    id: Idol
+                    kind: NodeType
+                    extends: [Person]
+                    ---
+                """.trimIndent(),
+                "/workspace/alice.md" to """
+                    ---
+                    id: alice
+                    kind: Node
+                    type: Person
+                    props:
+                      name: Alice
+                    ---
+                    @link[Bob](bob friend)
+                """.trimIndent(),
+                "/workspace/bob.md" to """
+                    ---
+                    id: bob
+                    kind: Node
+                    type: Person
+                    props:
+                      name: Bob
+                    ---
+                """.trimIndent(),
+                "/workspace/friend.md" to """
+                    ---
+                    id: friend
+                    kind: RelType
+                    from: [Person]
+                    to: [Person]
+                    ---
+                """.trimIndent(),
+                "/workspace/Reality.md" to timeline("Reality"),
+                "/workspace/IfWorld.md" to """
+                    ---
+                    id: IfWorld
+                    kind: Timeline
+                    derivedFrom:
+                      timeline: Reality
+                      kind: fork
+                    mapsTo: Reality
+                    ---
+                """.trimIndent(),
+            ),
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/site", "/workspace", "--json"))
+
+        assertEquals(0, result.exitCode, result.stderr)
+        val site = fileSystem.contentsUnder("/site").getValue("/site/src/generated/site.json")
+        assertTrue(site.contains("\"schema\":[{\"name\":\"name\""))
+        assertTrue(site.contains("\"nodeType\":{\"parents\":[{\"id\":\"Living\""))
+        assertTrue(site.contains("\"children\":[{\"id\":\"Idol\""))
+        assertTrue(site.contains("\"usage\":[{\"id\":\"alice\""))
+        assertTrue(site.contains("\"properties\":[{\"name\":\"name\",\"value\":\"Alice\""))
+        assertTrue(site.contains("\"relationUsage\":[{\"from\":\"alice\""))
+        assertTrue(site.contains("\"sourceTimeline\":\"Reality\",\"kind\":\"fork\""))
+        assertTrue(site.contains("\"direction\":\"outgoing\",\"source\":\"IfWorld\",\"sourceRoute\""))
+        assertTrue(site.contains("\"timelineGraph\":{\"nodes\":"))
+        assertTrue(site.contains("\"kind\":\"mapping\""))
+    }
+
+    @Test
     fun `site refuses non-empty output unless force is specified`() {
         val fileSystem = FakeFileSystem(
             mapOf(

@@ -10,6 +10,11 @@
       "type": "Page",
       "url": null,
       "body": "# Welcome to GraphMD\n\nEdit the Astro project in `site-template/` and preview changes directly with `pnpm dev`.\n",
+      "properties": [],
+      "schema": [],
+      "nodeType": null,
+      "relationUsage": [],
+      "timeline": null,
       "backlinks": []
     }
   ],
@@ -23,10 +28,15 @@
           "id": "welcome",
           "label": "Welcome to GraphMD",
           "route": "/documents/welcome/",
-          "kind": "Node"
+          "kind": "Node",
+          "type": "Page"
         }
       }
     ],
+    "edges": []
+  },
+  "timelineGraph": {
+    "nodes": [],
     "edges": []
   }
 }
