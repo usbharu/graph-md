@@ -1392,6 +1392,14 @@ private fun renderValidTimePoint(value: TimePoint): String =
 private fun renderCoordinate(value: TemporalCoordinate): String = when (value) {
     is TemporalCoordinate.Rational -> value.value.toString()
     is TemporalCoordinate.CalendarDate -> "${value.year}-${value.month.toString().padStart(2, '0')}-${value.day.toString().padStart(2, '0')}"
+    is TemporalCoordinate.CalendarPattern -> value.fields.entries.sortedBy { it.key.ordinal }.joinToString("-") { (field, fieldValue) ->
+        when (field) {
+            CalendarField.Year, CalendarField.WeekYear -> fieldValue.toString().padStart(4, '0')
+            CalendarField.Month, CalendarField.Day -> fieldValue.toString().padStart(2, '0')
+            CalendarField.Quarter -> "Q$fieldValue"
+            CalendarField.Week -> "W${fieldValue.toString().padStart(2, '0')}"
+        }
+    }
     is TemporalCoordinate.EraDate -> "${value.era} ${value.year}-${value.month.toString().padStart(2, '0')}-${value.day.toString().padStart(2, '0')}"
     is TemporalCoordinate.FrameIndex -> value.value.toString()
     is TemporalCoordinate.Timecode -> "${value.hours.toString().padStart(2, '0')}:${value.minutes.toString().padStart(2, '0')}:" +
@@ -1402,6 +1410,7 @@ private fun renderCoordinate(value: TemporalCoordinate): String = when (value) {
 private fun renderCoordinateSpec(value: TemporalCoordinateSpec): String = when (value) {
     TemporalCoordinateSpec.Number -> "number"
     is TemporalCoordinateSpec.Calendar -> "calendar:${value.calendar.name.lowercase()}"
+    is TemporalCoordinateSpec.CalendarPattern -> "calendar-pattern:${value.fields.joinToString(",") { it.name.replaceFirstChar(Char::lowercase) }}"
     is TemporalCoordinateSpec.Frame -> "frame"
     is TemporalCoordinateSpec.Timecode -> "timecode:${value.actualFps}"
     is TemporalCoordinateSpec.Era -> "era"

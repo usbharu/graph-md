@@ -103,6 +103,41 @@ class TemporalQueryTest {
         assertFalse((mappedAssertion intersect pointQuery).isEmpty)
     }
 
+    @Test
+    fun `calendar pattern validity without bounds remains the whole timeline`() {
+        val result = compile(
+            timeline(
+                "Birthday",
+                """
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [month, day]
+                  repeatsEvery: year
+                """.trimIndent(),
+            ),
+            timeline(
+                "PublicationMonth",
+                """
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [year, month]
+                """.trimIndent(),
+            ),
+        )
+        val catalog = TimelineCatalog.from(result.timelines)
+
+        listOf("Birthday", "PublicationMonth").forEach { timelineId ->
+            val validity = catalog.fromValidTimes(listOf(ValidTime(timelineId)))
+
+            assertEquals(null, validity.deferred, timelineId)
+            assertEquals(
+                listOf(TemporalInterval(catalog.assertionScopeId(TimelineId(timelineId)))),
+                validity.intervals,
+                timelineId,
+            )
+        }
+    }
+
     private fun compile(vararg sources: SourceDocument) = GraphCompiler().compileSources(sources.toList())
 
     private fun timeline(id: String, fields: String = "") = SourceDocument(

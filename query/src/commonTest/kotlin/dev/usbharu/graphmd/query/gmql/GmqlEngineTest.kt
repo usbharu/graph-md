@@ -1,7 +1,7 @@
 package dev.usbharu.graphmd.query.gmql
 
 import dev.usbharu.graphmd.core.GraphCompiler
-import dev.usbharu.graphmd.core.model.SourceDocument
+import dev.usbharu.graphmd.core.model.*
 import dev.usbharu.graphmd.query.GraphSearchEngine
 import dev.usbharu.graphmd.query.ir.AssertionOwner
 import dev.usbharu.graphmd.query.model.*
@@ -312,6 +312,470 @@ class GmqlEngineTest {
             val reference = runSuspend { engine.scanGmql(compiled.query!!) }
             assertEquals(reference, indexed, text)
         }
+    }
+
+    @Test
+    fun `existing GMQL temporal results remain stable across parser and AST changes`() {
+        val cases = listOf(
+            "AT includes the authored lower boundary" to (
+                """MATCH (n:Person) VALID ON MainStory AT 100 RETURN ID(n) AS id ORDER BY id""" to
+                    listOf("alice", "bob")
+                ),
+            "AT includes the authored upper boundary" to (
+                """MATCH (n:Person) VALID ON MainStory AT 300 RETURN ID(n) AS id ORDER BY id""" to
+                    listOf("alice", "bob")
+                ),
+            "AT excludes a point after the authored upper boundary" to (
+                """MATCH (n:Person) VALID ON MainStory AT 301 RETURN ID(n) AS id ORDER BY id""" to
+                    emptyList()
+                ),
+            "OVERLAPS keeps the existing inclusive source boundary behavior" to (
+                """MATCH (n:Person) VALID ON MainStory OVERLAPS [300, 301)
+                   RETURN ID(n) AS id ORDER BY id""" to listOf("alice", "bob")
+                ),
+            "OVERLAPS rejects a disjoint interval" to (
+                """MATCH (n:Person) VALID ON MainStory OVERLAPS [301, 302)
+                   RETURN ID(n) AS id ORDER BY id""" to emptyList()
+                ),
+            "CONTAINS means assertion contains query" to (
+                """MATCH (n:Person) VALID ON MainStory CONTAINS [100, 300]
+                   RETURN ID(n) AS id ORDER BY id""" to listOf("alice", "bob")
+                ),
+            "CONTAINS rejects a query wider than the assertion" to (
+                """MATCH (n:Person) VALID ON MainStory CONTAINS [99, 300]
+                   RETURN ID(n) AS id ORDER BY id""" to emptyList()
+                ),
+            "DURING means query contains assertion" to (
+                """MATCH (n:Person) VALID ON MainStory DURING [100, 300]
+                   RETURN ID(n) AS id ORDER BY id""" to listOf("alice", "bob")
+                ),
+            "DURING rejects an assertion wider than the query" to (
+                """MATCH (n:Person) VALID ON MainStory DURING [101, 300]
+                   RETURN ID(n) AS id ORDER BY id""" to emptyList()
+                ),
+            "scoped ANYTIME keeps only assertions on the selected timeline" to (
+                """MATCH (n:Person) VALID ON MainStory ANYTIME RETURN ID(n) AS id ORDER BY id""" to
+                    listOf("alice", "bob")
+                ),
+            "WITHIN remains available as an existing unquoted identifier" to (
+                """MATCH (WITHIN:Person) VALID ON MainStory AT 100
+                   RETURN ID(WITHIN) AS id ORDER BY id""" to listOf("alice", "bob")
+                ),
+        )
+
+        cases.forEach { (description, queryAndExpected) ->
+            val (query, expected) = queryAndExpected
+            val result = runSuspend { engine.queryGmql(query) }
+
+            assertTrue(result.isSuccess, "$description: ${result.diagnostics}")
+            assertEquals(expected, result.stringColumn(), description)
+        }
+    }
+
+    @Test
+    fun `calendar pattern validity expands only inside an explicit GMQL window`() {
+        val localSources = sources + listOf(
+            source(
+                "/common-era.md",
+                """
+                ---
+                id: CommonEra
+                kind: Timeline
+                coordinate: gregorian
+                ---
+                """,
+            ),
+            source(
+                "/birthday.md",
+                """
+                ---
+                id: Birthday
+                kind: Timeline
+                sameAxisAs: CommonEra
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [month, day]
+                  repeatsEvery: year
+                ---
+                """,
+            ),
+            source(
+                "/leapling.md",
+                """
+                ---
+                id: leapling
+                kind: Node
+                type: Person
+                validTime:
+                  - timeline: Birthday
+                    from: "02-29"
+                props:
+                  name: Leapling
+                ---
+                """,
+            ),
+            source(
+                "/new-year.md",
+                """
+                ---
+                id: new-year
+                kind: Node
+                type: Person
+                validTime:
+                  - timeline: Birthday
+                    from: "12-31"
+                    to: "01-01"
+                props:
+                  name: New Year
+                ---
+                """,
+            ),
+            source(
+                "/leap-range-type.md",
+                """
+                ---
+                id: LeapRange
+                kind: NodeType
+                ---
+                """,
+            ),
+            source(
+                "/display-birthday.md",
+                """
+                ---
+                id: DisplayBirthday
+                kind: Timeline
+                sameAxisAs: CommonEra
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [month, day]
+                  repeatsEvery: year
+                  format: "{day:02}/{month:02}"
+                ---
+                """,
+            ),
+            source(
+                "/formatted-event-type.md",
+                """
+                ---
+                id: FormattedEvent
+                kind: NodeType
+                props:
+                  date:
+                    type: instant
+                    timeline: DisplayBirthday
+                  span:
+                    type: duration
+                    timeline: DisplayBirthday
+                ---
+                """,
+            ),
+            source(
+                "/formatted-event.md",
+                """
+                ---
+                id: formatted-event
+                kind: Node
+                type: FormattedEvent
+                props:
+                  date: { timeline: DisplayBirthday, value: "08/02" }
+                  span:
+                    timeline: DisplayBirthday
+                    from: "08/02"
+                    to: "09/02"
+                ---
+                """,
+            ),
+            source(
+                "/leap-end.md",
+                """
+                ---
+                id: leap-end
+                kind: Node
+                type: LeapRange
+                validTime:
+                  - timeline: Birthday
+                    from: "01-01"
+                    to: "02-29"
+                ---
+                """,
+            ),
+            source(
+                "/place-type.md",
+                """
+                ---
+                id: Place
+                kind: NodeType
+                props:
+                  name:
+                    type: string
+                ---
+                """,
+            ),
+            source(
+                "/tokyo.md",
+                """
+                ---
+                id: tokyo
+                kind: Node
+                type: Place
+                props:
+                  name: Tokyo
+                ---
+                """,
+            ),
+        )
+        val compilation = GraphCompiler().compileSources(localSources)
+        val newDocumentDiagnostics = compilation.diagnostics.filter {
+            it.source?.path in setOf(
+                "/common-era.md", "/birthday.md", "/leapling.md", "/new-year.md", "/leap-range-type.md", "/leap-end.md",
+                "/display-birthday.md", "/formatted-event-type.md", "/formatted-event.md",
+                "/place-type.md", "/tokyo.md",
+            )
+        }
+        assertTrue(newDocumentDiagnostics.isEmpty(), newDocumentDiagnostics.toString())
+        val localEngine = GraphSearchEngine.build(compilation, localSources)
+
+        val leapDay = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person)
+                   VALID ON Birthday AT "02-29"
+                   WITHIN ["2023-01-01", "2025-01-01")
+                   RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
+        val ordinaryDay = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person)
+                   VALID ON Birthday AT "02-28"
+                   WITHIN ["2023-01-01", "2025-01-01")
+                   RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
+        val rangeOperators = listOf("OVERLAPS", "CONTAINS", "DURING").associateWith { operator ->
+            runSuspend {
+                localEngine.queryGmql(
+                    """MATCH (n:Person)
+                       VALID ON Birthday $operator ["02-29", "02-29"]
+                       WITHIN ["2023-01-01", "2025-01-01")
+                       RETURN ID(n) AS id ORDER BY id""",
+                )
+            }
+        }
+        val missingWindow = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person) VALID ON Birthday AT "02-29" RETURN ID(n) AS id""",
+            )
+        }
+        val anytimeWithin = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person)
+                   VALID ON Birthday ANYTIME
+                   WITHIN ["2023-01-01", "2025-01-01")
+                   RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
+        val windowStartTail = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person)
+                   VALID ON Birthday AT "01-01"
+                   WITHIN ["2024-01-01", "2025-01-01")
+                   RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
+        val windowEndHead = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person)
+                   VALID ON Birthday AT "12-31"
+                   WITHIN ["2024-01-01", "2025-01-01")
+                   RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
+        val unrelatedWithoutWindow = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Place) RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
+        val participatingWithoutWindow = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person) RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
+        val reloaded = GraphSearchEngine.loadStatic(localEngine.exportStatic())
+        val reloadedLeapDay = runSuspend {
+            reloaded.queryGmql(
+                """MATCH (n:Person)
+                   VALID ON Birthday AT "02-29"
+                   WITHIN ["2023-01-01", "2025-01-01")
+                   RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
+        val apiQuery = GraphQuery(
+            root = NodePattern(typeId = NodeTypeId("Person")),
+            temporalWindow = TemporalWindow.At(
+                TimelineId("Birthday"),
+                TemporalCoordinate.CalendarPattern(
+                    mapOf(CalendarField.Month to 2L, CalendarField.Day to 29L),
+                ),
+            ),
+            expansionWindow = CalendarExpansionWindow(
+                TimelineId("Birthday"),
+                TemporalCoordinate.CalendarDate(2023, 1, 1),
+                TemporalCoordinate.CalendarDate(2025, 1, 1),
+            ),
+        )
+        val indexedApi = runSuspend { localEngine.search(apiQuery) }
+        val referenceApi = runSuspend { localEngine.scan(apiQuery) }
+        val unrelatedApiQuery = GraphQuery(root = NodePattern(typeId = NodeTypeId("Place")))
+        val unrelatedIndexedApi = runSuspend { localEngine.search(unrelatedApiQuery) }
+        val unrelatedReferenceApi = runSuspend { localEngine.scan(unrelatedApiQuery) }
+        val participatingApiQuery = GraphQuery(root = NodePattern(id = NodeId("leapling")))
+        val participatingIndexedApi = runSuspend { localEngine.search(participatingApiQuery) }
+        val participatingReferenceApi = runSuspend { localEngine.scan(participatingApiQuery) }
+        val unknownExpansionQuery = GraphQuery(
+            root = NodePattern(typeId = NodeTypeId("Place")),
+            expansionWindow = CalendarExpansionWindow(
+                TimelineId("MissingTimeline"),
+                TemporalCoordinate.CalendarDate(2024, 1, 1),
+                TemporalCoordinate.CalendarDate(2025, 1, 1),
+            ),
+        )
+        val unknownExpansionIndexed = runSuspend { localEngine.search(unknownExpansionQuery) }
+        val unknownExpansionReference = runSuspend { localEngine.scan(unknownExpansionQuery) }
+        val invalidExpansionQuery = apiQuery.copy(
+            expansionWindow = CalendarExpansionWindow(
+                TimelineId("Birthday"),
+                TemporalCoordinate.CalendarDate(2024, 2, 30),
+                TemporalCoordinate.CalendarDate(2025, 1, 1),
+            ),
+        )
+        val invalidExpansionIndexed = runSuspend { localEngine.search(invalidExpansionQuery) }
+        val invalidExpansionReference = runSuspend { localEngine.scan(invalidExpansionQuery) }
+        val oversizedExpansionQuery = apiQuery.copy(
+            expansionWindow = CalendarExpansionWindow(
+                TimelineId("Birthday"),
+                TemporalCoordinate.CalendarDate(1, 1, 1),
+                TemporalCoordinate.CalendarDate(10_002, 1, 1),
+            ),
+        )
+        val oversizedExpansionIndexed = runSuspend { localEngine.search(oversizedExpansionQuery) }
+        val oversizedExpansionReference = runSuspend { localEngine.scan(oversizedExpansionQuery) }
+        val missingLeapEnd = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:LeapRange)
+                   VALID ON Birthday AT "06-01"
+                   WITHIN ["2001-01-01", "2002-01-01")
+                   RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
+        val presentLeapEnd = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:LeapRange)
+                   VALID ON Birthday AT "02-01"
+                   WITHIN ["2004-01-01", "2005-01-01")
+                   RETURN ID(n) AS id ORDER BY id""",
+            )
+        }
+        val overflowingWithin = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person)
+                   VALID ON Birthday AT "02-29"
+                   WITHIN ["999999999999999999999-01-01", "2002-01-01")
+                   RETURN ID(n) AS id""",
+            )
+        }
+        val oversizedWithin = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person)
+                   VALID ON Birthday AT "02-29"
+                   WITHIN ["0001-01-01", "10002-01-01")
+                   RETURN ID(n) AS id""",
+            )
+        }
+        val halfOpenSameDay = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person)
+                   VALID ON Birthday OVERLAPS ["02-29", "02-29")
+                   WITHIN ["2023-01-01", "2025-01-01")
+                   RETURN ID(n) AS id""",
+            )
+        }
+        val openClosedSameDay = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person)
+                   VALID ON Birthday OVERLAPS ("02-29", "02-29"]
+                   WITHIN ["2023-01-01", "2025-01-01")
+                   RETURN ID(n) AS id""",
+            )
+        }
+        val ordinaryHalfOpenSameDay = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:LeapRange)
+                   VALID ON Birthday OVERLAPS ["01-01", "01-01")
+                   WITHIN ["2024-01-01", "2025-01-01")
+                   RETURN ID(n) AS id""",
+            )
+        }
+        val formattedProperty = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:FormattedEvent) RETURN n.date AS date, n.span AS span""",
+            )
+        }
+
+        assertEquals(listOf("leapling"), leapDay.stringColumn())
+        rangeOperators.forEach { (operator, result) ->
+            assertEquals(listOf("leapling"), result.stringColumn(), operator)
+        }
+        assertEquals(leapDay, reloadedLeapDay)
+        assertEquals(referenceApi, indexedApi)
+        assertEquals(listOf("leapling"), indexedApi.matches.map { it.nodeId.value })
+        assertTrue(ordinaryDay.rows.isEmpty(), ordinaryDay.toString())
+        assertFalse(missingWindow.isSuccess)
+        assertEquals("GMQL4004", missingWindow.diagnostics.single().code)
+        assertTrue(anytimeWithin.isSuccess, anytimeWithin.diagnostics.toString())
+        assertEquals(listOf("leapling", "new-year"), anytimeWithin.stringColumn())
+        assertEquals(listOf("new-year"), windowStartTail.stringColumn())
+        assertEquals(listOf("new-year"), windowEndHead.stringColumn())
+        assertTrue(unrelatedWithoutWindow.isSuccess, unrelatedWithoutWindow.diagnostics.toString())
+        assertEquals(listOf("tokyo"), unrelatedWithoutWindow.stringColumn())
+        assertEquals(unrelatedReferenceApi, unrelatedIndexedApi)
+        assertEquals(listOf("tokyo"), unrelatedIndexedApi.matches.map { it.nodeId.value })
+        assertFalse(participatingWithoutWindow.isSuccess)
+        assertEquals("GMQL4004", participatingWithoutWindow.diagnostics.single().code)
+        assertEquals(participatingReferenceApi, participatingIndexedApi)
+        assertEquals(
+            QueryDiagnosticCode.MISSING_TEMPORAL_EXPANSION_WINDOW,
+            participatingIndexedApi.diagnostics.single().code,
+        )
+        assertEquals(unknownExpansionReference, unknownExpansionIndexed)
+        assertEquals(QueryDiagnosticCode.UNKNOWN_TIMELINE, unknownExpansionIndexed.diagnostics.single().code)
+        assertEquals(invalidExpansionReference, invalidExpansionIndexed)
+        assertEquals(QueryDiagnosticCode.INVALID_TEMPORAL_WINDOW, invalidExpansionIndexed.diagnostics.single().code)
+        assertEquals(oversizedExpansionReference, oversizedExpansionIndexed)
+        assertEquals(QueryDiagnosticCode.INVALID_TEMPORAL_WINDOW, oversizedExpansionIndexed.diagnostics.single().code)
+        assertTrue(missingLeapEnd.isSuccess, missingLeapEnd.diagnostics.toString())
+        assertTrue(missingLeapEnd.rows.isEmpty(), missingLeapEnd.toString())
+        assertEquals(listOf("leap-end"), presentLeapEnd.stringColumn())
+        assertFalse(overflowingWithin.isSuccess)
+        assertEquals("GMQL4005", overflowingWithin.diagnostics.single().code)
+        assertFalse(oversizedWithin.isSuccess)
+        assertEquals("GMQL4005", oversizedWithin.diagnostics.single().code)
+        assertTrue(halfOpenSameDay.isSuccess, halfOpenSameDay.diagnostics.toString())
+        assertTrue(halfOpenSameDay.rows.isEmpty(), halfOpenSameDay.toString())
+        assertTrue(openClosedSameDay.isSuccess, openClosedSameDay.diagnostics.toString())
+        assertTrue(openClosedSameDay.rows.isEmpty(), openClosedSameDay.toString())
+        assertTrue(ordinaryHalfOpenSameDay.isSuccess, ordinaryHalfOpenSameDay.diagnostics.toString())
+        assertTrue(ordinaryHalfOpenSameDay.rows.isEmpty(), ordinaryHalfOpenSameDay.toString())
+        assertTrue(formattedProperty.isSuccess, formattedProperty.diagnostics.toString())
+        val formattedDate = assertIs<GmqlValue.TemporalValue>(formattedProperty.rows.single().values[0])
+        assertEquals(GmqlValue.StringValue("08/02"), formattedDate.entries.single().value)
+        val formattedSpan = assertIs<GmqlValue.TemporalValue>(formattedProperty.rows.single().values[1])
+        assertEquals(
+            GmqlValue.CollectionValue(
+                listOf(GmqlValue.StringValue("08/02"), GmqlValue.StringValue("09/02")),
+            ),
+            formattedSpan.entries.single().value,
+        )
     }
 
     @Test

@@ -531,7 +531,7 @@ private fun rawValidTime(raw: RawValue): ValidTime {
 private fun rawTimePoint(raw: RawValue): TimePoint = when (raw) {
     is RawInteger -> TimePoint(TemporalCoordinate.Rational(ExactRational.of(raw.value)))
     is RawNumber -> TimePoint(TemporalCoordinate.Rational(ExactRational.fromDouble(raw.value)))
-    is RawString -> TimePoint(parseGenericTemporalCoordinate(raw.value))
+    is RawString -> TimePoint(TemporalCoordinate.Label(raw.value))
     is RawObject -> {
         val legacy = raw.values["timecode"] ?: throw InlinePropsParseException("Unknown timePoint coordinate shape")
         val point = rawTimePoint(legacy)
@@ -547,6 +547,16 @@ private fun rawTimePoint(point: TimePoint): RawValue = when (val coordinate = po
         RawString(coordinate.value.toString())
     }
     is TemporalCoordinate.CalendarDate -> RawString("${coordinate.year}-${coordinate.month.toString().padStart(2, '0')}-${coordinate.day.toString().padStart(2, '0')}")
+    is TemporalCoordinate.CalendarPattern -> RawString(
+        coordinate.fields.entries.sortedBy { it.key.ordinal }.joinToString("-") { (field, value) ->
+            when (field) {
+                CalendarField.Year, CalendarField.WeekYear -> value.toString().padStart(4, '0')
+                CalendarField.Month, CalendarField.Day -> value.toString().padStart(2, '0')
+                CalendarField.Quarter -> "Q$value"
+                CalendarField.Week -> "W${value.toString().padStart(2, '0')}"
+            }
+        },
+    )
     is TemporalCoordinate.EraDate -> RawString("${coordinate.era}-${coordinate.year}-${coordinate.month.toString().padStart(2, '0')}-${coordinate.day.toString().padStart(2, '0')}")
     is TemporalCoordinate.FrameIndex -> RawInteger(coordinate.value)
     is TemporalCoordinate.Timecode -> RawString(

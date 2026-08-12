@@ -154,6 +154,7 @@ class GraphDocumentParser {
         diagnostics: MutableList<Diagnostic>,
         documentId: String,
     ): TimePoint? {
+        if (value is YamlString) return TimePoint(TemporalCoordinate.Label(value.value))
         parseTemporalCoordinate(value, sourcePath, diagnostics, documentId, field)?.let { return TimePoint(it) }
         val map = value as? YamlMap ?: run {
             diagnostics += schemaError("$field MUST be a temporal coordinate", sourcePath, documentId)
@@ -337,6 +338,7 @@ class GraphDocumentParser {
                 } ?: YearNumbering.CommonEra
                 TemporalCoordinateSpec.Calendar(calendar, numbering)
             }
+            "calendar-pattern" -> parseCalendarPatternSpec(map, sourcePath, diagnostics, documentId)
             "frame" -> {
                 reportUnknownFields(map, setOf("kind", "start"), "coordinate", sourcePath, diagnostics, documentId)
                 TemporalCoordinateSpec.Frame(map.long("start", sourcePath, diagnostics, documentId) ?: 0)
@@ -391,6 +393,202 @@ class GraphDocumentParser {
                 diagnostics += schemaError("Unknown coordinate kind: $kind", sourcePath, documentId)
                 null
             }
+        }
+    }
+
+    private fun parseCalendarPatternSpec(
+        map: YamlMap,
+        sourcePath: String,
+        diagnostics: MutableList<Diagnostic>,
+        documentId: String,
+    ): TemporalCoordinateSpec.CalendarPattern? {
+        reportUnknownFields(
+            map,
+            setOf(
+                "kind", "calendar", "numbering", "fields", "granularity", "repeatsEvery", "format",
+                "quarterStartMonth", "quarterYearLabel",
+            ),
+            "coordinate",
+            sourcePath,
+            diagnostics,
+            documentId,
+        )
+        val calendar = when (map.string("calendar", sourcePath, diagnostics, documentId) ?: "gregorian") {
+            "gregorian" -> CalendarKind.Gregorian
+            "julian" -> CalendarKind.Julian
+            else -> {
+                diagnostics += schemaError("coordinate.calendar MUST be gregorian or julian", sourcePath, documentId)
+                return null
+            }
+        }
+        val numbering = map.map["numbering"]?.let {
+            parseYearNumbering(it, sourcePath, diagnostics, documentId)
+        } ?: YearNumbering.CommonEra
+        val rawFields = map.stringList("fields", sourcePath, diagnostics, documentId) ?: run {
+            diagnostics += schemaError("coordinate.fields MUST be a non-empty list", sourcePath, documentId)
+            return null
+        }
+        val fields = rawFields.mapNotNull { raw ->
+            when (raw) {
+                "year" -> CalendarField.Year
+                "month" -> CalendarField.Month
+                "day" -> CalendarField.Day
+                "quarter" -> CalendarField.Quarter
+                "weekYear" -> CalendarField.WeekYear
+                "week" -> CalendarField.Week
+                else -> {
+                    diagnostics += schemaError("Unknown calendar-pattern field: $raw", sourcePath, documentId)
+                    null
+                }
+            }
+        }
+        if (fields.isEmpty()) {
+            diagnostics += schemaError("coordinate.fields MUST be a non-empty list", sourcePath, documentId)
+            return null
+        }
+        if (fields.size != fields.distinct().size) {
+            diagnostics += schemaError("coordinate.fields MUST NOT contain duplicates", sourcePath, documentId)
+        }
+        val inferredGranularity = when {
+            CalendarField.Day in fields -> CalendarGranularity.Day
+            CalendarField.Week in fields -> CalendarGranularity.Week
+            CalendarField.Month in fields -> CalendarGranularity.Month
+            CalendarField.Quarter in fields -> CalendarGranularity.Quarter
+            else -> CalendarGranularity.Year
+        }
+        val granularity = when (val raw = map.string("granularity", sourcePath, diagnostics, documentId)) {
+            null -> inferredGranularity
+            "day" -> CalendarGranularity.Day
+            "week" -> CalendarGranularity.Week
+            "month" -> CalendarGranularity.Month
+            "quarter" -> CalendarGranularity.Quarter
+            "year" -> CalendarGranularity.Year
+            else -> {
+                diagnostics += schemaError("Unknown calendar-pattern granularity: $raw", sourcePath, documentId)
+                inferredGranularity
+            }
+        }
+        if (granularity != inferredGranularity) {
+            diagnostics += schemaError(
+                "coordinate.granularity MUST match the least-significant declared field (${inferredGranularity.name.lowercase()})",
+                sourcePath,
+                documentId,
+            )
+        }
+        val repeatsEvery = when (val raw = map.string("repeatsEvery", sourcePath, diagnostics, documentId)) {
+            null -> null
+            "year" -> CalendarRepeat.Year
+            else -> {
+                diagnostics += schemaError("Unknown calendar-pattern repeat period: $raw", sourcePath, documentId)
+                null
+            }
+        }
+        val fieldSet = fields.toSet()
+        val iso = fieldSet.intersect(setOf(CalendarField.WeekYear, CalendarField.Week))
+        val ordinary = fieldSet.intersect(setOf(CalendarField.Year, CalendarField.Month, CalendarField.Day, CalendarField.Quarter))
+        if (iso.isNotEmpty() && ordinary.isNotEmpty()) {
+            diagnostics += schemaError("ISO week fields cannot be mixed with calendar or quarter fields", sourcePath, documentId)
+        }
+        if (CalendarField.Day in fieldSet && CalendarField.Month !in fieldSet) {
+            diagnostics += schemaError("calendar-pattern day requires month", sourcePath, documentId)
+        }
+        if (CalendarField.Quarter in fieldSet && fieldSet.any { it == CalendarField.Month || it == CalendarField.Day }) {
+            diagnostics += schemaError("calendar-pattern quarter cannot be mixed with month or day", sourcePath, documentId)
+        }
+        if (iso.isNotEmpty() && calendar != CalendarKind.Gregorian) {
+            diagnostics += schemaError("ISO week fields require the Gregorian calendar", sourcePath, documentId)
+        }
+        val hasAuthoredYear = CalendarField.Year in fieldSet || CalendarField.WeekYear in fieldSet
+        if (!hasAuthoredYear && repeatsEvery == null) {
+            diagnostics += schemaError("calendar-pattern fields without a year require repeatsEvery", sourcePath, documentId)
+        }
+        if (hasAuthoredYear && repeatsEvery != null) {
+            diagnostics += schemaError("repeating calendar-pattern fields MUST omit year and weekYear", sourcePath, documentId)
+        }
+        val rawQuarterStartMonth = map.long("quarterStartMonth", sourcePath, diagnostics, documentId)
+        if (rawQuarterStartMonth != null && rawQuarterStartMonth !in 1L..12L) {
+            diagnostics += schemaError("coordinate.quarterStartMonth MUST be between 1 and 12", sourcePath, documentId)
+        }
+        val quarterStartMonth = rawQuarterStartMonth?.takeIf { it in 1L..12L }?.toInt() ?: 1
+        if (("quarterStartMonth" in map.map || "quarterYearLabel" in map.map) && CalendarField.Quarter !in fieldSet) {
+            diagnostics += schemaError("quarter options require the quarter field", sourcePath, documentId)
+        }
+        val quarterYearLabel = when (val raw = map.string("quarterYearLabel", sourcePath, diagnostics, documentId)) {
+            null, "start" -> QuarterYearLabel.Start
+            "end" -> QuarterYearLabel.End
+            else -> {
+                diagnostics += schemaError("coordinate.quarterYearLabel MUST be start or end", sourcePath, documentId)
+                QuarterYearLabel.Start
+            }
+        }
+        val format = map.string("format", sourcePath, diagnostics, documentId)
+        format?.let { validateCalendarPatternFormat(it, fieldSet, sourcePath, diagnostics, documentId) }
+        return TemporalCoordinateSpec.CalendarPattern(
+            calendar = calendar,
+            fields = fields.distinct().sortedBy(CalendarField::ordinal),
+            numbering = numbering,
+            granularity = granularity,
+            repeatsEvery = repeatsEvery,
+            format = format,
+            quarterStartMonth = quarterStartMonth,
+            quarterYearLabel = quarterYearLabel,
+        )
+    }
+
+    private fun validateCalendarPatternFormat(
+        format: String,
+        fields: Set<CalendarField>,
+        sourcePath: String,
+        diagnostics: MutableList<Diagnostic>,
+        documentId: String,
+    ) {
+        val placeholders = Regex("""\{([A-Za-z][A-Za-z0-9]*)(?::(\d+))?\}""").findAll(format).toList()
+        val names = placeholders.map { it.groupValues[1] }
+        val expected = fields.map {
+            when (it) {
+                CalendarField.Year -> "year"
+                CalendarField.Month -> "month"
+                CalendarField.Day -> "day"
+                CalendarField.Quarter -> "quarter"
+                CalendarField.WeekYear -> "weekYear"
+                CalendarField.Week -> "week"
+            }
+        }
+        if (names.toSet() != expected.toSet() || names.size != expected.size) {
+            diagnostics += schemaError(
+                "coordinate.format MUST reference every declared field exactly once",
+                sourcePath,
+                documentId,
+            )
+        }
+        if (placeholders.any { placeholder ->
+                val rawWidth = placeholder.groupValues[2]
+                rawWidth.isNotEmpty() && rawWidth.toIntOrNull()?.let { it in 1..64 } != true
+            }
+        ) {
+            diagnostics += schemaError(
+                "coordinate.format widths MUST be integers between 1 and 64",
+                sourcePath,
+                documentId,
+            )
+        }
+        fun isVariableWidth(placeholder: MatchResult): Boolean =
+            placeholder.groupValues[2].isNotEmpty() || placeholder.groupValues[1] in setOf("year", "weekYear")
+        if (placeholders.zipWithNext().any { (left, right) ->
+                val separator = format.substring(left.range.last + 1, right.range.first)
+                isVariableWidth(left) && isVariableWidth(right) && separator.all(Char::isDigit)
+            }
+        ) {
+            diagnostics += schemaError(
+                "coordinate.format MUST separate adjacent variable-width fields",
+                sourcePath,
+                documentId,
+            )
+        }
+        if (format.replace(Regex("""\{[A-Za-z][A-Za-z0-9]*(?::\d+)?\}"""), "").contains('{') ||
+            format.replace(Regex("""\{[A-Za-z][A-Za-z0-9]*(?::\d+)?\}"""), "").contains('}')
+        ) {
+            diagnostics += schemaError("coordinate.format contains an invalid placeholder", sourcePath, documentId)
         }
     }
 

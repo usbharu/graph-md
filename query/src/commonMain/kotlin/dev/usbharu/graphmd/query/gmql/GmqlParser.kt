@@ -239,7 +239,7 @@ private class Parser(private val tokens: List<Token>) {
     private fun parseValid(): GmqlValid {
         val start = previous().start
         val timeline = if (consumeKeyword("ON")) expectIdentifier().text else null
-        return when {
+        val valid = when {
             consumeKeyword("ANYTIME") -> GmqlValid(timeline, GmqlValidOperator.ANYTIME, range = rangeFrom(start))
             consumeKeyword("AT") -> GmqlValid(
                 timeline, GmqlValidOperator.AT, instant = parseExpression(), range = rangeFrom(start),
@@ -254,6 +254,11 @@ private class Parser(private val tokens: List<Token>) {
                 timeline, GmqlValidOperator.DURING, interval = parseInterval(), range = rangeFrom(start),
             )
             else -> fail("Expected ANYTIME, AT, OVERLAPS, CONTAINS, or DURING", peek())
+        }
+        return if (consumeKeyword("WITHIN")) {
+            valid.copy(expansionWindow = parseInterval(), range = rangeFrom(start))
+        } else {
+            valid
         }
     }
 

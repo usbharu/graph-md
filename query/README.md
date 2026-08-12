@@ -111,6 +111,21 @@ pass `person.biography` to `FULLTEXT` to search all of its members.
 require `VALID ON <timeline>`. Bounds may be numbers or quoted date/timecode
 strings and are parsed using that Timeline's coordinate.
 
+Recurring `calendar-pattern` values additionally require a finite, half-open
+calendar expansion window. The bounds are complete dates interpreted with the
+Timeline's calendar and numbering, independently of its custom value format:
+
+```gmql
+MATCH (n:Person)
+VALID ON Birthday AT "08-08"
+WITHIN ["2000-01-01", "2031-01-01")
+RETURN n
+```
+
+`VALID ON Birthday ANYTIME WITHIN [...]` is available when a query needs to join recurring
+assertions without selecting a narrower temporal value. Omitting `WITHIN` when
+recurring validity participates in evaluation returns `GMQL4004`.
+
 ## Temporal behavior
 
 GraphMD source `validTime.from` and `validTime.to` remain inclusive.

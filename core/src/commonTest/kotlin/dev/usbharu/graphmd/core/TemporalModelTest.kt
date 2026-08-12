@@ -129,6 +129,633 @@ class TemporalModelTest {
     }
 
     @Test
+    fun `calendar pattern fields drive parsing formatting and natural granularity`() {
+        val result = compile(
+            timeline("CommonEra", "coordinate: gregorian"),
+            timeline(
+                "PublicationMonth",
+                """
+                sameAxisAs: CommonEra
+                coordinate:
+                  kind: calendar-pattern
+                  calendar: gregorian
+                  fields: [year, month]
+                """.trimIndent(),
+            ),
+            timeline(
+                "Birthday",
+                """
+                sameAxisAs: CommonEra
+                coordinate:
+                  kind: calendar-pattern
+                  calendar: gregorian
+                  fields: [month, day]
+                  repeatsEvery: year
+                  format: "{day:02}/{month:02}"
+                """.trimIndent(),
+            ),
+            timeline(
+                "ShortMonth",
+                """
+                sameAxisAs: CommonEra
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [month]
+                  repeatsEvery: year
+                  format: "{month:1}"
+                """.trimIndent(),
+            ),
+        )
+        assertTrue(result.diagnostics.isEmpty(), result.diagnostics.toString())
+        val engine = TemporalEngine(result.temporalModel)
+
+        val month = engine.parse("PublicationMonth", "2026-08")
+        assertEquals(
+            TemporalSelection.Period(
+                TemporalAxisPeriod(
+                    checkNotNull(engine.normalizeToAxis("CommonEra", TemporalCoordinate.CalendarDate(2026, 8, 1))),
+                    checkNotNull(engine.normalizeToAxis("CommonEra", TemporalCoordinate.CalendarDate(2026, 9, 1))),
+                ),
+            ),
+            engine.resolveToAxis("PublicationMonth", month.coordinate),
+        )
+        val birthday = engine.parse("Birthday", "08/02")
+        assertEquals("08/02", engine.format("Birthday", birthday.coordinate))
+        assertEquals(
+            mapOf(CalendarField.Month to 2L, CalendarField.Day to 8L),
+            assertIs<TemporalCoordinate.CalendarPattern>(birthday.coordinate).fields,
+        )
+        val shortMonth = engine.parse("ShortMonth", "12")
+        assertEquals("12", engine.format("ShortMonth", shortMonth.coordinate))
+        assertEquals(
+            shortMonth.coordinate,
+            engine.parse("ShortMonth", engine.format("ShortMonth", shortMonth.coordinate)).coordinate,
+        )
+    }
+
+    @Test
+    fun `calendar pattern recurrence skips invalid leap days instead of rounding`() {
+        val result = compile(
+            timeline("CommonEra", "coordinate: gregorian"),
+            timeline(
+                "LeapDay",
+                """
+                sameAxisAs: CommonEra
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [month, day]
+                  repeatsEvery: year
+                """.trimIndent(),
+            ),
+        )
+        val engine = TemporalEngine(result.temporalModel)
+        val start = checkNotNull(engine.normalizeToAxis("CommonEra", TemporalCoordinate.CalendarDate(2023, 1, 1)))
+        val end = checkNotNull(engine.normalizeToAxis("CommonEra", TemporalCoordinate.CalendarDate(2025, 1, 1)))
+        val selection = assertIs<TemporalSelection.Recurrence>(
+            engine.resolveToAxis(
+                "LeapDay",
+                engine.parse("LeapDay", "02-29").coordinate,
+                TemporalExpansionWindow(start, end),
+            ),
+        )
+
+        assertEquals(1, selection.occurrences.size)
+        assertEquals(
+            checkNotNull(engine.normalizeToAxis("CommonEra", TemporalCoordinate.CalendarDate(2024, 2, 29))),
+            selection.occurrences.single().start,
+        )
+    }
+
+    @Test
+    fun `calendar pattern honors Julian leap rules and offset year numbering`() {
+        val result = compile(
+            timeline("Gregorian", "coordinate: gregorian"),
+            timeline("Julian", "sameAxisAs: Gregorian\ncoordinate: julian"),
+            timeline(
+                "JulianLeapDay",
+                """
+                sameAxisAs: Julian
+                coordinate:
+                  kind: calendar-pattern
+                  calendar: julian
+                  fields: [month, day]
+                  repeatsEvery: year
+                """.trimIndent(),
+            ),
+            timeline(
+                "BuddhistMonth",
+                """
+                sameAxisAs: Gregorian
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [year, month]
+                  numbering:
+                    kind: offset
+                    offset: 543
+                    yearZero: false
+                """.trimIndent(),
+            ),
+        )
+        assertTrue(result.diagnostics.isEmpty(), result.diagnostics.toString())
+        val engine = TemporalEngine(result.temporalModel)
+
+        val julianWindow = TemporalExpansionWindow(
+            checkNotNull(engine.normalizeToAxis("Julian", TemporalCoordinate.CalendarDate(1900, 1, 1))),
+            checkNotNull(engine.normalizeToAxis("Julian", TemporalCoordinate.CalendarDate(1901, 1, 1))),
+        )
+        val julianLeapDay = assertIs<TemporalSelection.Recurrence>(
+            engine.resolveToAxis(
+                "JulianLeapDay",
+                engine.parse("JulianLeapDay", "02-29").coordinate,
+                julianWindow,
+            ),
+        )
+        assertEquals(1, julianLeapDay.occurrences.size)
+        assertEquals(
+            checkNotNull(engine.normalizeToAxis("Julian", TemporalCoordinate.CalendarDate(1900, 2, 29))),
+            julianLeapDay.occurrences.single().start,
+        )
+
+        val buddhistMonth = assertIs<TemporalSelection.Period>(
+            engine.resolveToAxis("BuddhistMonth", engine.parse("BuddhistMonth", "2567-02").coordinate),
+        ).value
+        assertEquals(
+            checkNotNull(engine.normalizeToAxis("Gregorian", TemporalCoordinate.CalendarDate(2024, 2, 1))),
+            buddhistMonth.start,
+        )
+        assertEquals(
+            checkNotNull(engine.normalizeToAxis("Gregorian", TemporalCoordinate.CalendarDate(2024, 3, 1))),
+            buddhistMonth.endExclusive,
+        )
+    }
+
+    @Test
+    fun `calendar pattern resolves ISO week and configurable fiscal quarter boundaries`() {
+        val result = compile(
+            timeline("CommonEra", "coordinate: gregorian"),
+            timeline(
+                "IsoWeek",
+                """
+                sameAxisAs: CommonEra
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [weekYear, week]
+                """.trimIndent(),
+            ),
+            timeline(
+                "FiscalQuarter",
+                """
+                sameAxisAs: CommonEra
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [year, quarter]
+                  quarterStartMonth: 4
+                  quarterYearLabel: end
+                """.trimIndent(),
+            ),
+        )
+        val engine = TemporalEngine(result.temporalModel)
+
+        val iso = assertIs<TemporalSelection.Period>(
+            engine.resolveToAxis("IsoWeek", engine.parse("IsoWeek", "2020-W53").coordinate),
+        ).value
+        assertEquals(
+            checkNotNull(engine.normalizeToAxis("CommonEra", TemporalCoordinate.CalendarDate(2020, 12, 28))),
+            iso.start,
+        )
+        assertEquals(
+            checkNotNull(engine.normalizeToAxis("CommonEra", TemporalCoordinate.CalendarDate(2021, 1, 4))),
+            iso.endExclusive,
+        )
+
+        val quarter = assertIs<TemporalSelection.Period>(
+            engine.resolveToAxis("FiscalQuarter", engine.parse("FiscalQuarter", "2026-Q1").coordinate),
+        ).value
+        assertEquals(
+            checkNotNull(engine.normalizeToAxis("CommonEra", TemporalCoordinate.CalendarDate(2025, 4, 1))),
+            quarter.start,
+        )
+        assertEquals(
+            checkNotNull(engine.normalizeToAxis("CommonEra", TemporalCoordinate.CalendarDate(2025, 7, 1))),
+            quarter.endExclusive,
+        )
+    }
+
+    @Test
+    fun `calendar pattern canonical syntax is derived from declared fields`() {
+        val declarations = listOf(
+            Triple("MonthDay", "fields: [month, day]\nrepeatsEvery: year", "08-08"),
+            Triple("YearMonth", "fields: [year, month]", "2026-08"),
+            Triple("Year", "fields: [year]", "2026"),
+            Triple("Month", "fields: [month]\nrepeatsEvery: year", "08"),
+            Triple("Quarter", "fields: [year, quarter]", "2026-Q3"),
+            Triple("IsoWeek", "fields: [weekYear, week]", "2020-W53"),
+        )
+        val result = compile(
+            timeline("CommonEra", "coordinate: gregorian"),
+            *declarations.map { (id, declaration, _) ->
+                timeline(
+                    id,
+                    """
+                    sameAxisAs: CommonEra
+                    coordinate:
+                      kind: calendar-pattern
+                      ${declaration.replace("\n", "\n                      ")}
+                    """.trimIndent(),
+                )
+            }.toTypedArray(),
+        )
+        assertTrue(result.diagnostics.isEmpty(), result.diagnostics.toString())
+        val engine = TemporalEngine(result.temporalModel)
+
+        declarations.forEach { (id, _, raw) ->
+            assertEquals(raw, engine.format(id, engine.parse(id, raw).coordinate), id)
+        }
+    }
+
+    @Test
+    fun `calendar pattern rejects invalid field combinations and formats`() {
+        val result = compile(
+            timeline(
+                "DayWithoutMonth",
+                """
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [day]
+                  repeatsEvery: year
+                """.trimIndent(),
+            ),
+            timeline(
+                "JulianIsoWeek",
+                """
+                coordinate:
+                  kind: calendar-pattern
+                  calendar: julian
+                  fields: [weekYear, week]
+                """.trimIndent(),
+            ),
+            timeline(
+                "BrokenFormat",
+                """
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [year, month]
+                  format: "{year:04}"
+                """.trimIndent(),
+            ),
+            timeline(
+                "ZeroWidthFormat",
+                """
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [month]
+                  repeatsEvery: year
+                  format: "{month:0}"
+                """.trimIndent(),
+            ),
+            timeline(
+                "OverflowWidthFormat",
+                """
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [month]
+                  repeatsEvery: year
+                  format: "{month:999999999999999999999}"
+                """.trimIndent(),
+            ),
+            timeline(
+                "AmbiguousAdjacentFormat",
+                """
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [month, day]
+                  repeatsEvery: year
+                  format: "{month:1}{day:1}"
+                """.trimIndent(),
+            ),
+            timeline(
+                "AmbiguousNumericSeparatorFormat",
+                """
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [month, day]
+                  repeatsEvery: year
+                  format: "{month:1}1{day:1}"
+                """.trimIndent(),
+            ),
+            timeline(
+                "OverflowingQuarterStartMonth",
+                """
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [year, quarter]
+                  quarterStartMonth: 4294967297
+                """.trimIndent(),
+            ),
+        )
+
+        assertTrue(result.diagnostics.any { it.message == "calendar-pattern day requires month" })
+        assertTrue(result.diagnostics.any { it.message == "ISO week fields require the Gregorian calendar" })
+        assertTrue(result.diagnostics.any { it.message == "coordinate.format MUST reference every declared field exactly once" })
+        assertEquals(
+            2,
+            result.diagnostics.count { it.message == "coordinate.format widths MUST be integers between 1 and 64" },
+        )
+        assertEquals(
+            2,
+            result.diagnostics.count {
+                it.message == "coordinate.format MUST separate adjacent variable-width fields"
+            },
+        )
+        assertTrue(result.diagnostics.any {
+            it.message == "coordinate.quarterStartMonth MUST be between 1 and 12"
+        })
+    }
+
+    @Test
+    fun `calendar pattern expansion rejects windows longer than ten thousand calendar years`() {
+        val result = compile(
+            timeline("CommonEra", "coordinate: gregorian"),
+            timeline(
+                "Birthday",
+                """
+                sameAxisAs: CommonEra
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [month, day]
+                  repeatsEvery: year
+                """.trimIndent(),
+            ),
+        )
+        val engine = TemporalEngine(result.temporalModel)
+        val start = checkNotNull(engine.normalizeToAxis("CommonEra", TemporalCoordinate.CalendarDate(1, 1, 1)))
+        val end = checkNotNull(engine.normalizeToAxis("CommonEra", TemporalCoordinate.CalendarDate(10_002, 1, 1)))
+
+        assertNull(
+            engine.resolveToAxis(
+                "Birthday",
+                engine.parse("Birthday", "01-01").coordinate,
+                TemporalExpansionWindow(start, end),
+            ),
+        )
+    }
+
+    @Test
+    fun `calendar pattern rejects year zero when numbering has no year zero`() {
+        val result = compile(
+            timeline(
+                "PublicationMonth",
+                """
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [year, month]
+                """.trimIndent(),
+            ),
+            SourceDocument(
+                """
+                ---
+                id: Item
+                kind: NodeType
+                props:
+                  published:
+                    type: instant
+                    timeline: PublicationMonth
+                ---
+                """.trimIndent(),
+                "/item-type.md",
+            ),
+            SourceDocument(
+                """
+                ---
+                id: invalid-year
+                kind: Node
+                type: Item
+                props:
+                  published: { timeline: PublicationMonth, value: "0000-08" }
+                ---
+                """.trimIndent(),
+                "/invalid-year.md",
+            ),
+        )
+
+        assertTrue(result.diagnostics.any {
+            it.message == "published.value is not valid for PublicationMonth"
+        }, result.diagnostics.toString())
+    }
+
+    @Test
+    fun `calendar pattern rejects invalid structured dates in instant and duration properties`() {
+        val result = compile(
+            timeline(
+                "PatternDate",
+                """
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [year, month, day]
+                """.trimIndent(),
+            ),
+            SourceDocument(
+                """
+                ---
+                id: Event
+                kind: NodeType
+                props:
+                  occurredAt:
+                    type: instant
+                    timeline: PatternDate
+                  active:
+                    type: duration
+                    timeline: PatternDate
+                ---
+                """.trimIndent(),
+                "/event-type.md",
+            ),
+            SourceDocument(
+                """
+                ---
+                id: invalid-date
+                kind: Node
+                type: Event
+                props:
+                  occurredAt:
+                    timeline: PatternDate
+                    value: { year: 2023, month: 2, day: 29 }
+                  active:
+                    timeline: PatternDate
+                    from: { year: 2023, month: 2, day: 29 }
+                ---
+                """.trimIndent(),
+                "/invalid-date.md",
+            ),
+        )
+
+        assertTrue(result.diagnostics.any {
+            it.message == "occurredAt.value is not valid for PatternDate"
+        }, result.diagnostics.toString())
+        assertTrue(result.diagnostics.any {
+            it.message == "active.from is not valid for PatternDate"
+        }, result.diagnostics.toString())
+    }
+
+    @Test
+    fun `calendar pattern values normalize in instant and duration properties`() {
+        val result = compile(
+            timeline("CommonEra", "coordinate: gregorian"),
+            timeline(
+                "Birthday",
+                """
+                sameAxisAs: CommonEra
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [month, day]
+                  repeatsEvery: year
+                """.trimIndent(),
+            ),
+            SourceDocument(
+                """
+                ---
+                id: Person
+                kind: NodeType
+                props:
+                  birthday:
+                    type: instant
+                    timeline: Birthday
+                  celebration:
+                    type: duration
+                    timeline: Birthday
+                ---
+                """.trimIndent(),
+                "/person-type.md",
+            ),
+            SourceDocument(
+                """
+                ---
+                id: alice
+                kind: Node
+                type: Person
+                props:
+                  birthday: { timeline: Birthday, value: "08-08" }
+                  celebration:
+                    from: { timeline: Birthday, value: "08-08" }
+                    to: { timeline: Birthday, value: "08-10" }
+                ---
+                """.trimIndent(),
+                "/alice.md",
+            ),
+        )
+        assertTrue(result.diagnostics.isEmpty(), result.diagnostics.toString())
+        val node = result.nodes.single()
+
+        assertIs<TemporalCoordinate.CalendarPattern>(
+            assertIs<InstantValue>(node.props.getValue("birthday")).coordinate,
+        )
+        val duration = assertIs<DurationValue>(node.props.getValue("celebration"))
+        assertIs<TemporalCoordinate.CalendarPattern>(duration.from?.coordinate)
+        assertIs<TemporalCoordinate.CalendarPattern>(duration.to?.coordinate)
+    }
+
+    @Test
+    fun `calendar pattern custom format applies to validTime and object duration endpoints`() {
+        val result = compile(
+            timeline("CommonEra", "coordinate: gregorian"),
+            timeline(
+                "DisplayBirthday",
+                """
+                sameAxisAs: CommonEra
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [month, day]
+                  repeatsEvery: year
+                  format: "{day:02}/{month:02}"
+                """.trimIndent(),
+            ),
+            SourceDocument(
+                """
+                ---
+                id: Event
+                kind: NodeType
+                props:
+                  span:
+                    type: duration
+                    timeline: DisplayBirthday
+                ---
+                """.trimIndent(),
+                "/event-type.md",
+            ),
+            SourceDocument(
+                """
+                ---
+                id: event
+                kind: Node
+                type: Event
+                validTime:
+                  - timeline: DisplayBirthday
+                    from: "08/02"
+                props:
+                  span:
+                    from: { timeline: DisplayBirthday, value: "08/02" }
+                    to: { timeline: DisplayBirthday, value: "09/02" }
+                ---
+                """.trimIndent(),
+                "/event.md",
+            ),
+        )
+
+        assertTrue(result.diagnostics.isEmpty(), result.diagnostics.toString())
+        val node = result.nodes.single()
+        val duration = assertIs<DurationValue>(node.props.getValue("span"))
+        assertEquals(
+            mapOf(CalendarField.Month to 2L, CalendarField.Day to 8L),
+            assertIs<TemporalCoordinate.CalendarPattern>(duration.from?.coordinate).fields,
+        )
+        assertEquals(
+            mapOf(CalendarField.Month to 2L, CalendarField.Day to 9L),
+            assertIs<TemporalCoordinate.CalendarPattern>(duration.to?.coordinate).fields,
+        )
+    }
+
+    @Test
+    fun `non recurring calendar pattern validTime retains reversed range diagnostics`() {
+        val result = compile(
+            timeline(
+                "PublicationMonth",
+                """
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [year, month]
+                """.trimIndent(),
+            ),
+            SourceDocument(
+                """
+                ---
+                id: Item
+                kind: NodeType
+                ---
+                """.trimIndent(),
+                "/item-type.md",
+            ),
+            SourceDocument(
+                """
+                ---
+                id: reversed
+                kind: Node
+                type: Item
+                validTime:
+                  - timeline: PublicationMonth
+                    from: "2026-12"
+                    to: "2026-01"
+                ---
+                """.trimIndent(),
+                "/reversed.md",
+            ),
+        )
+
+        assertTrue(result.diagnostics.any {
+            it.message == "validTime.from is after validTime.to on PublicationMonth"
+        }, result.diagnostics.toString())
+    }
+
+    @Test
     fun `removed Timeline authoring fields report replacements`() {
         val result = compile(
             timeline("Old", "extends: [Base]\ntimecode:\n  type: number\nmappings: []"),
