@@ -5,7 +5,7 @@ import { site } from "../lib/site";
 ---
 
 <WikiLayout title="グラフ">
-  <h1>グラフ</h1>
+  <div class="page-title"><span class="eyebrow">Explore relationships</span><h1>知識グラフ</h1><p>記事間のつながりを視覚的にたどれます。</p></div>
   <GraphApp
     client:only="react"
     elements={[...site.graph.nodes, ...site.graph.edges]}
