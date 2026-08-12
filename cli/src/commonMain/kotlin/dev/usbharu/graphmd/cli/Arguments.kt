@@ -99,6 +99,13 @@ internal sealed interface CliCommand {
         override val paths: List<String>,
     ) : CliCommand
 
+    data class Site(
+        val outputDirectory: String,
+        override val paths: List<String>,
+        val base: String,
+        val force: Boolean,
+    ) : CliCommand
+
     data class Demo(
         val outputDirectory: String,
         val requestedCount: Int,
@@ -224,6 +231,18 @@ internal object CliArguments {
                 parsed.reject(emptySet())
                 CliCommand.Embed(parsed.positionals)
             }
+            "site" -> {
+                parsed.reject(setOf("base", "force"))
+                if (parsed.positionals.isEmpty()) usage("site requires an output directory")
+                val base = parsed.singleValue("base", required = false) ?: "/"
+                if (!base.startsWith('/')) usage("--base must start with /")
+                CliCommand.Site(
+                    outputDirectory = parsed.positionals.first(),
+                    paths = parsed.positionals.drop(1),
+                    base = normalizeBase(base),
+                    force = parsed.flag("force"),
+                )
+            }
             "demo" -> {
                 parsed.reject(setOf("count", "seed"))
                 if (parsed.positionals.size != 1) usage("demo requires exactly one output directory")
@@ -265,12 +284,12 @@ internal object CliArguments {
             val name = token.substringAfter("--").substringBefore("=")
             val inlineValue = token.substringAfter("=", missingDelimiterValue = "").takeIf { "=" in token }
             when (name) {
-                "include-derived", "strict" -> {
+                "include-derived", "strict", "force" -> {
                     if (inlineValue != null) usage("--$name does not take a value")
                     flags += name
                     index++
                 }
-                "kind", "type", "direction", "valid-time", "query-file", "param", "count", "seed" -> {
+                "kind", "type", "direction", "valid-time", "query-file", "param", "count", "seed", "base" -> {
                     val value = inlineValue ?: tokens.getOrNull(index + 1)?.takeUnless { it.startsWith("--") }
                         ?: usage("--$name requires a value")
                     values.getOrPut(name) { mutableListOf() } += value
@@ -355,6 +374,7 @@ internal object CliArguments {
           stats   Show graph statistics
           search  Execute a GMQL query
           embed   Materialize dynamic embed blocks as Markdown tables
+          site    Generate a self-contained Astro static site project
           demo    Generate random, valid GraphMD demo data
 
         Global options:
@@ -377,6 +397,7 @@ internal object CliArguments {
                    graphmd search --query-file FILE [paths...] [--param NAME=VALUE]... [--json]
         """.trimIndent() + "\n"
         "embed" -> "Usage: graphmd embed [paths...] [--json]\n"
+        "site" -> "Usage: graphmd site OUTPUT [paths...] [--base PATH] [--force] [--json]\n"
         "demo" -> "Usage: graphmd demo DIR --count N [--seed INT] [--json]\n"
         else -> rootHelp()
     }
@@ -392,3 +413,8 @@ private class CliUsageException(message: String) : RuntimeException(message)
 
 private val VALID_TIME_PATTERN = Regex("""([A-Za-z_][A-Za-z0-9_.:-]*)(?:\((.*)\))?""")
 private val PARAMETER_NAME = Regex("""[A-Za-z_][A-Za-z0-9_]*""")
+
+private fun normalizeBase(value: String): String = when (value) {
+    "/" -> value
+    else -> value.trimEnd('/') + "/"
+}

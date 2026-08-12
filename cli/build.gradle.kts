@@ -13,6 +13,66 @@ val generatedVersionSource = resources.text.fromString(
     """.trimIndent() + "\n",
 )
 
+val embeddedWebRuntimeSource = layout.projectDirectory.file(
+    "src/commonMain/kotlin/dev/usbharu/graphmd/cli/EmbeddedWebRuntime.kt",
+)
+
+val syncMarkdownCoreVendor by tasks.registering(Sync::class) {
+    dependsOn(":core:jsNodeProductionLibraryDistribution")
+    from(rootProject.layout.projectDirectory.dir("core/build/dist/js/productionLibrary")) {
+        include("graph-md-core.js", "kotlin-kotlin-stdlib.js", "kotlin_org_jetbrains_kotlin_kotlin_dom_api_compat.js")
+    }
+    from(resources.text.fromString("{\n  \"private\": true,\n  \"type\": \"commonjs\"\n}\n")) {
+        rename { "package.json" }
+    }
+    into(rootProject.layout.projectDirectory.dir("markdown-it-graphmd/vendor"))
+}
+
+val bundleMarkdownItGraphMd by tasks.registering(Exec::class) {
+    dependsOn(syncMarkdownCoreVendor)
+    workingDir(rootProject.projectDir)
+    // This bundle is compiled into the multiplatform CLI as generated source.
+    // Keeping development sourcemaps and whitespace here makes every Kotlin
+    // target parse more than a megabyte of string literals during `check`.
+    commandLine("pnpm", "--dir", "markdown-it-graphmd", "exec", "tsup", "--minify", "--sourcemap=false")
+    inputs.files(fileTree(rootProject.file("markdown-it-graphmd/src")) { include("**/*.ts") })
+    outputs.file(rootProject.file("markdown-it-graphmd/dist/index.js"))
+}
+
+val bundledQueryRuntime = layout.buildDirectory.file("webRuntime/graph-md-query-runtime.js")
+val bundleQueryWebRuntime by tasks.registering(Exec::class) {
+    dependsOn(":query:jsProductionLibraryCompileSync")
+    workingDir(rootProject.projectDir)
+    val queryEntry = rootProject.file("query/build/compileSync/js/main/productionLibrary/kotlin/graph-md-query.js")
+    inputs.file(queryEntry)
+    inputs.files(
+        rootProject.file("query/build/compileSync/js/main/productionLibrary/kotlin/graph-md-core.js"),
+        rootProject.file("query/build/compileSync/js/main/productionLibrary/kotlin/kotlin-kotlin-stdlib.js"),
+    )
+    outputs.file(bundledQueryRuntime)
+    commandLine(
+        "pnpm", "exec", "esbuild", queryEntry.absolutePath,
+        "--bundle", "--platform=browser", "--format=iife", "--global-name=GraphMdQueryRuntime",
+        "--minify",
+        "--outfile=${bundledQueryRuntime.get().asFile.absolutePath}",
+    )
+}
+
+val updateEmbeddedWebRuntime by tasks.registering(Exec::class) {
+    group = "build setup"
+    description = "Rebuilds the checked-in browser runtimes (requires pnpm and Node.js)."
+    dependsOn(bundleQueryWebRuntime, bundleMarkdownItGraphMd)
+    val markdownBundle = rootProject.layout.projectDirectory.file("markdown-it-graphmd/dist/index.js")
+    inputs.files(bundledQueryRuntime, markdownBundle)
+    outputs.file(embeddedWebRuntimeSource)
+    commandLine(
+        "node", rootProject.file("scripts/embed-web-runtime.mjs").absolutePath,
+        embeddedWebRuntimeSource.asFile.absolutePath,
+        bundledQueryRuntime.get().asFile.absolutePath,
+        markdownBundle.asFile.absolutePath,
+    )
+}
+
 val generateCliVersion by tasks.registering(Sync::class) {
     inputs.property("version", cliReleaseVersion)
     from(generatedVersionSource) {

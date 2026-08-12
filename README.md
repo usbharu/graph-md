@@ -79,6 +79,26 @@ The `graphmd` CLI is implemented in the `cli` multiplatform module.
 ```
 
 Each successfully processed file is rewritten only after all of its embed blocks have rendered. `--json` returns a structured update/skip summary.
+
+`site` generates a self-contained Astro static-site project with Wiki pages,
+ID-resolved GraphMD links, search data, and a graph view:
+
+```bash
+./gradlew :cli:run --args="site ./wiki ./documents --base /wiki/"
+cd wiki
+pnpm install
+pnpm build
+```
+
+Deploy the generated `dist/` directory to any static host. Use `pnpm dev` for
+local authoring previews. The output directory must be new or empty unless
+`--force` is supplied; `--force` replaces the existing output directory.
+
+The browser runtimes used by `site` are checked into the CLI, so ordinary
+Gradle builds do not require Node.js or pnpm. After changing the query JS API
+or `markdown-it-graphmd`, maintainers can refresh them explicitly with
+`./gradlew :cli:updateEmbeddedWebRuntime`; that maintenance task requires pnpm.
+
 Inline queries and `--query-file` are supported. Repeat `--param NAME=VALUE`
 for prepared-query parameters; `null`, booleans, integers, decimals, and
 quoted JSON strings are inferred, while other values are strings. Results are

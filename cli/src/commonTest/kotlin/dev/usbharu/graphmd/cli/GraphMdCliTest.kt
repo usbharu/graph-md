@@ -11,6 +11,70 @@ import kotlin.test.assertTrue
 
 class GraphMdCliTest {
     @Test
+    fun `site generates a self contained Astro project with document routes and search index`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "/workspace/person.md" to nodeType("Person"),
+                "/workspace/alice.md" to node("alice", "Person", "# Alice\n\nHello @link[Bob](bob friend)"),
+                "/workspace/bob.md" to node("bob", "Person", "# Bob"),
+                "/workspace/friend.md" to """
+                    ---
+                    id: friend
+                    kind: RelType
+                    ---
+                """.trimIndent(),
+            ),
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/site", "/workspace", "--base", "/wiki", "--json"))
+
+        assertEquals(0, result.exitCode, result.stderr)
+        assertTrue(result.stdout.contains("\"documents\":4"))
+        val generated = fileSystem.contentsUnder("/site")
+        assertTrue("/site/astro.config.mjs" in generated)
+        assertTrue("/site/src/pages/documents/[slug].astro" in generated)
+        assertTrue("/site/public/search-index/manifest.json" in generated)
+        assertTrue("/site/runtime-encoded/graph-md-query-runtime.js.gz.b64" in generated)
+        assertTrue("/site/runtime-encoded/markdown-it-graphmd.js.gz.b64" in generated)
+        assertTrue(generated.getValue("/site/astro.config.mjs").contains("gunzipSync"))
+        assertTrue(generated.getValue("/site/src/lib/markdown.ts").contains("graphMdPlugin"))
+        assertTrue(generated.getValue("/site/src/components/SearchApp.tsx").contains("GraphMdWebSearch"))
+        assertTrue(generated.getValue("/site/src/generated/site.json").contains("/wiki/documents/alice/"))
+        assertFalse(generated.getValue("/site/package.json").contains("workspace:"))
+        assertTrue(generated.getValue("/site/package.json").contains("\"@astrojs/react\":\"5.0.7\""))
+        assertTrue(generated.getValue("/site/package.json").contains("\"astro\":\"6.4.8\""))
+    }
+
+    @Test
+    fun `site refuses non-empty output unless force is specified`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "/workspace/person.md" to nodeType("Person"),
+                "/workspace/alice.md" to node("alice", "Person"),
+                "/site/keep.txt" to "keep",
+                "/site/pnpm-lock.yaml" to "stale lockfile",
+            ),
+        )
+        val cli = GraphMdCli(fileSystem)
+
+        val refused = cli.run(listOf("site", "/site", "/workspace"))
+        assertEquals(1, refused.exitCode)
+        assertEquals("keep", fileSystem.contentsUnder("/site").getValue("/site/keep.txt"))
+
+        val replaced = cli.run(listOf("site", "/site", "/workspace", "--force"))
+        assertEquals(0, replaced.exitCode, replaced.stderr)
+        assertFalse("/site/keep.txt" in fileSystem.contentsUnder("/site"))
+        assertFalse("/site/pnpm-lock.yaml" in fileSystem.contentsUnder("/site"))
+    }
+
+    @Test
+    fun `safe site slug encodes non path characters without collisions`() {
+        assertEquals("alice", safeSlug("alice"))
+        assertEquals("a~2Fb", safeSlug("a/b"))
+        assertEquals("~E3~81~82", safeSlug("あ"))
+    }
+
+    @Test
     fun `embed materializes query and backlink tables idempotently`() {
         val fs = FakeFileSystem(
             mapOf(
