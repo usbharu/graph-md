@@ -1,5 +1,23 @@
 /* Graph Markdown preview styling */
 
+.graphmd-embed {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.graphmd-embed th,
+.graphmd-embed td {
+  text-align: left;
+  vertical-align: top;
+}
+
+.graphmd-embed-error {
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid var(--vscode-editorWarning-foreground, #cca700);
+  white-space: pre-wrap;
+}
+
 /* Surface the relation type after relation links so they are visually
    distinct from ordinary links in the built-in Markdown preview. */
 a[data-rel-type]::before {

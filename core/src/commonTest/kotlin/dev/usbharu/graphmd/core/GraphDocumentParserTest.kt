@@ -8,6 +8,23 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class GraphDocumentParserTest {
+    @Test
+    fun `embed blocks are rejected outside Node and Media documents`() {
+        val result = GraphCompiler().parseDocument(
+            """
+            ---
+            id: Person
+            kind: NodeType
+            ---
+            ::: embed:query="MATCH (n) RETURN n"
+            :::
+            """.trimIndent(),
+            "/tmp/Person.md",
+        )
+
+        assertTrue(result.diagnostics.any { it.message == "Embed blocks are only supported in Node and Media documents" })
+    }
+
     private val compiler = GraphCompiler()
 
     @Test

@@ -1113,6 +1113,16 @@ markdown-it実装は、構文的に完全な開始・終了フェンスだけを
 
 検索索引ではフェンス行を本文から除外し、その位置で本文断片を分割する。各本文断片の時間は最内ブロックから継承し、`VALID ON`を含む時間条件へ反映する。静的検索bundleはformat v4で時間座標を有理数として保持し、旧formatはunsupportedとして拒否する。
 
+#### 動的表埋め込み
+
+NodeおよびMediaの本文では、名前付き本文ブロックの特別なheaderとして`embed:query="GMQL"`または`embed:back-link=RelType`を指定できる。queryの値は二重引用符で囲み、`\"`、`\\`、`\n`、`\r`、`\t`をescapeとして使う。back-linkの値はGraphMD IDの構文に従う。
+
+同一headerに空白区切りでembed属性を複数指定した場合は最後の指定を採用する。通常のブロック名または`validTime`とembed属性を併記してはならない。embedブロック内へ別のembedブロックを入れ子にしてはならないが、通常の名前付きブロック内には記述できる。NodeType、RelTypeおよびTimelineではembedブロックを使用してはならない。
+
+`embed:query`はGMQL結果を列名付きの表として描画する。`embed:back-link`は現在のNodeまたはMediaを終点とし、指定RelTypeと完全一致するリンクを`id`、`type`、`validity`列で表示する。id列は解決可能な場合にリンクとする。どちらも最大100行とし、上限を超える実行は診断を返す。
+
+フェンス内部は静的環境用の派生キャッシュである。GraphMDのProperty、Relationおよび検索本文として解釈せず、動的描画が利用できない場合のMarkdown fallbackとして表示する。`graphmd embed`はheaderとフェンスを保持し、ファイル内の全embedが成功したファイルについてのみ内部を最新のMarkdown表で置換する。
+
 #### グラフ志向リンク
 
 RelTypeで定義されたリンクで、Propertyを持つ 各PropertyはvalidTimeで主張するTimelineと期間を表現できる

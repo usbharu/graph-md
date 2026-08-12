@@ -4,6 +4,8 @@ import dev.usbharu.graphmd.core.*
 import dev.usbharu.graphmd.core.model.Diagnostic
 import dev.usbharu.graphmd.core.model.*
 import dev.usbharu.graphmd.query.GraphSearchEngine
+import dev.usbharu.graphmd.query.embed.EmbedEngine
+import dev.usbharu.graphmd.query.embed.EmbedDiagnostic
 import dev.usbharu.graphmd.query.gmql.GmqlExecutionOptions
 import dev.usbharu.graphmd.query.gmql.GmqlExecutionProfile
 import dev.usbharu.graphmd.query.gmql.GmqlValue
@@ -35,6 +37,9 @@ private val COMPLETION_REPLACEMENT_TOKEN_REGEX =
     Regex("""-?\d+(?:\.\d*)?|[A-Za-z_][A-Za-z0-9_]*(?:[.:-][A-Za-z0-9_]+)*""")
 private const val CREATE_DEFINITION_COMMAND = "graphmd.createDefinition"
 
+internal val org.eclipse.lsp4j.Diagnostic.messageText: String
+    get() = if (message.isLeft) message.left else message.right.value
+
 class GraphMdLanguageServer : LanguageServer, LanguageClientAware, GraphMdSearchService {
     private val workspaceIndex = GraphMdWorkspaceIndex()
     private val textDocumentService = GraphMdTextDocumentService(this, workspaceIndex)
@@ -64,6 +69,20 @@ class GraphMdLanguageServer : LanguageServer, LanguageClientAware, GraphMdSearch
                             resolveProvider = false
                         },
                     )
+                    workspace = WorkspaceServerCapabilities().apply {
+                        fileOperations = FileOperationsServerCapabilities().apply {
+                            didRename = FileOperationOptions(
+                                listOf(
+                                    FileOperationFilter(
+                                        FileOperationPattern("**/*.md").apply {
+                                            matches = FileOperationPatternKind.File
+                                        },
+                                        "file",
+                                    ),
+                                ),
+                            )
+                        }
+                    }
                 },
             ),
         )
@@ -95,6 +114,9 @@ class GraphMdLanguageServer : LanguageServer, LanguageClientAware, GraphMdSearch
 
     override fun searchMetadata(): CompletableFuture<GraphMdSearchMetadata> =
         CompletableFuture.supplyAsync { workspaceIndex.searchMetadata() }
+
+    override fun renderEmbed(params: GraphMdEmbedParams): CompletableFuture<GraphMdEmbedResponse> =
+        CompletableFuture.supplyAsync { workspaceIndex.renderEmbed(params) }
 
     @Synchronized
     fun publishDiagnostics() {
@@ -183,6 +205,11 @@ private class GraphMdWorkspaceService(
 
     override fun didChangeWatchedFiles(params: DidChangeWatchedFilesParams) {
         params.changes.forEach(index::updateFromDisk)
+        server.publishDiagnostics()
+    }
+
+    override fun didRenameFiles(params: RenameFilesParams) {
+        index.rename(params.files)
         server.publishDiagnostics()
     }
 }
@@ -276,6 +303,40 @@ internal class GraphMdWorkspaceIndex(
         synchronized(this) {
             if (normalizedUri in openDocuments) return
             replaceNormalized(normalizedUri, document)
+        }
+    }
+
+    fun rename(files: List<FileRename>) {
+        val renames = files
+            .map { normalizeUri(it.oldUri) to normalizeUri(it.newUri) }
+            .filter { (oldUri, newUri) -> oldUri != newUri }
+        synchronized(this) {
+            val sourceUris = renames.mapTo(mutableSetOf()) { it.first }
+            val sourceDocuments = sourceUris.associateWith(documents::get)
+            val openSourceUris = sourceUris.intersect(openDocuments)
+            sourceUris.forEach {
+                documents.remove(it)
+                openDocuments.remove(it)
+            }
+
+            renames.forEach { (oldUri, newUri) ->
+                val source = sourceDocuments[oldUri]
+                val sourceWasOpen = oldUri in openSourceUris
+                val destinationIsOpen = newUri !in sourceUris && newUri in openDocuments
+                val replacement = when {
+                    destinationIsOpen -> documents[newUri]
+                    sourceWasOpen && source != null -> indexedDocument(newUri, source.text)
+                    else -> readDocument(newUri) ?: source?.let { indexedDocument(newUri, it.text) }
+                }
+
+                if (replacement == null) {
+                    documents.remove(newUri)
+                } else {
+                    documents[newUri] = replacement
+                }
+                if (sourceWasOpen) openDocuments += newUri
+            }
+            if (renames.isNotEmpty()) invalidateCompilation()
         }
     }
 
@@ -561,7 +622,7 @@ internal class GraphMdWorkspaceIndex(
         document: IndexedDocument,
         diagnostic: org.eclipse.lsp4j.Diagnostic,
     ): List<CodeAction> = buildList {
-        val message = diagnostic.message
+        val message = diagnostic.messageText
 
         if (message.startsWith("Ambiguous ") && " reference: " in message) {
             return@buildList
@@ -898,7 +959,7 @@ internal class GraphMdWorkspaceIndex(
         diagnostic: org.eclipse.lsp4j.Diagnostic,
     ): CodeAction? {
         val match = Regex("""^([A-Za-z_][A-Za-z0-9_.:-]*)(?:\.[A-Za-z0-9_.:-]+)? must be (string|text|number|array|duration object)$""")
-            .matchEntire(diagnostic.message) ?: return null
+            .matchEntire(diagnostic.messageText) ?: return null
         val key = match.groupValues[1]
         val replacement = when (match.groupValues[2]) {
             "string", "text" -> "\"\""
@@ -915,17 +976,17 @@ internal class GraphMdWorkspaceIndex(
         document: IndexedDocument,
         diagnostic: org.eclipse.lsp4j.Diagnostic,
     ): CodeAction? {
-        if (diagnostic.message == "id MUST be non-empty") {
+        if (diagnostic.messageText == "id MUST be non-empty") {
             val range = document.propertyValueRange("id") ?: return null
             return replaceAction(document, diagnostic, "Use filename as id", range, document.defaultId(), preferred = true)
         }
-        if (diagnostic.message == "validTime.timeline MUST be non-empty") {
+        if (diagnostic.messageText == "validTime.timeline MUST be non-empty") {
             val timeline = completionIds(ReferenceTargetKind.Timeline).firstOrNull() ?: return null
             val range = document.propertyValueRange("timeline") ?: return null
             return replaceAction(document, diagnostic, "Use Timeline '$timeline'", range, timeline, preferred = true)
         }
         val scalar = Regex("""^(.+) MUST be (?:a |an )?(string|boolean|number|integer|mapping)$""")
-            .matchEntire(diagnostic.message)
+            .matchEntire(diagnostic.messageText)
         if (scalar != null) {
             val field = scalar.groupValues[1].substringAfterLast('.')
             val replacement = when (scalar.groupValues[2]) {
@@ -939,11 +1000,11 @@ internal class GraphMdWorkspaceIndex(
             return replaceAction(document, diagnostic, "Replace '$field' with a valid ${scalar.groupValues[2]}", range, replacement, preferred = true)
         }
         val list = Regex("""^(.+?)(?: items)? MUST be (?:a )?(?:non-empty )?list(?: of strings)?$""")
-            .matchEntire(diagnostic.message)
+            .matchEntire(diagnostic.messageText)
         if (list != null) {
             val field = list.groupValues[1].substringAfterLast('.')
             val range = document.propertyValueRange(field) ?: return null
-            val replacement = if ("non-empty" in diagnostic.message || "of strings" in diagnostic.message || "items" in diagnostic.message) "[value]" else "[]"
+            val replacement = if ("non-empty" in diagnostic.messageText || "of strings" in diagnostic.messageText || "items" in diagnostic.messageText) "[value]" else "[]"
             return replaceAction(document, diagnostic, "Replace '$field' with a list", range, replacement, preferred = true)
         }
         return null
@@ -953,7 +1014,7 @@ internal class GraphMdWorkspaceIndex(
         document: IndexedDocument,
         diagnostic: org.eclipse.lsp4j.Diagnostic,
     ): List<CodeAction> = buildList {
-        Regex("""validTime\.from is after validTime\.to on (.+)""").matchEntire(diagnostic.message)?.let {
+        Regex("""validTime\.from is after validTime\.to on (.+)""").matchEntire(diagnostic.messageText)?.let {
             val edits = document.swapValidTimeBounds(it.groupValues[1])
             if (edits != null) {
                 add(
@@ -967,7 +1028,7 @@ internal class GraphMdWorkspaceIndex(
             }
         }
         Regex("""([A-Za-z_][A-Za-z0-9_.:-]*) timeline ([A-Za-z_][A-Za-z0-9_.:-]*) is not allowed""")
-            .matchEntire(diagnostic.message)?.let { match ->
+            .matchEntire(diagnostic.messageText)?.let { match ->
                 val property = match.groupValues[1]
                 val current = match.groupValues[2]
                 val parsed = document.analysis.parsed.document as? NodeDocument
@@ -988,7 +1049,7 @@ internal class GraphMdWorkspaceIndex(
                 }
             }
         Regex("""([A-Za-z_][A-Za-z0-9_.:-]*) duration must define from or to""")
-            .matchEntire(diagnostic.message)?.let { match ->
+            .matchEntire(diagnostic.messageText)?.let { match ->
                 document.durationBoundInsertion(match.groupValues[1])?.let { insertion ->
                     add(
                         replaceAction(
@@ -1003,7 +1064,7 @@ internal class GraphMdWorkspaceIndex(
                 }
             }
         Regex("""Relation (?:source|target) type .+ is not allowed for (.+)""")
-            .matchEntire(diagnostic.message)?.let { match ->
+            .matchEntire(diagnostic.messageText)?.let { match ->
                 val currentRelType = match.groupValues[1]
                 val relReference = document.analysis.references.firstOrNull {
                     it.kind == ReferenceTargetKind.RelType && it.targetId == currentRelType
@@ -1040,7 +1101,7 @@ internal class GraphMdWorkspaceIndex(
         document: IndexedDocument,
         diagnostic: org.eclipse.lsp4j.Diagnostic,
     ): CodeAction? {
-        val message = diagnostic.message
+        val message = diagnostic.messageText
         if (message in setOf("@props only accepts validTime=...", "@link only accepts validTime=...")) {
             val marker = if (message.startsWith("@props")) "@props(" else "@link("
             val start = document.text.lastIndexOf(marker)
@@ -1187,7 +1248,7 @@ internal class GraphMdWorkspaceIndex(
             Either.forLeft(
                 TextDocumentEdit(
                     VersionedTextDocumentIdentifier(newUri, null),
-                    listOf(TextEdit(Range(Position(0, 0), Position(0, 0)), content)),
+                    listOf(Either.forLeft(TextEdit(Range(Position(0, 0), Position(0, 0)), content))),
                 ),
             ),
         )
@@ -1330,7 +1391,7 @@ private fun ReferenceTargetKind.displayName(): String = when (this) {
                     Severity.Error -> DiagnosticSeverity.Error
                     Severity.Warning -> DiagnosticSeverity.Warning
                 }
-                message = diagnostic.message
+                message = Either.forLeft(diagnostic.message)
                 source = "graphmd"
                 code = Either.forLeft(diagnostic.category.name)
                 range = inferredDiagnosticLspRange(document, diagnostic)
@@ -1356,7 +1417,7 @@ private fun ReferenceTargetKind.displayName(): String = when (this) {
                 if (message != null) {
                     diagnostics.getOrPut(document.uri) { mutableListOf() } += org.eclipse.lsp4j.Diagnostic().apply {
                         severity = DiagnosticSeverity.Error
-                        this.message = message
+                        this.message = Either.forLeft(message)
                         source = "graphmd"
                         code = Either.forLeft(DiagnosticCategory.ReferenceError.name)
                         range = document.analysisRangeOf(reference.range)
@@ -1657,6 +1718,43 @@ private fun ReferenceTargetKind.displayName(): String = when (this) {
         }
         return GraphMdSearchResponse(columns, rows, diagnostics)
     }
+
+    fun renderEmbed(params: GraphMdEmbedParams): GraphMdEmbedResponse {
+        val document = synchronized(this) { documents[normalizeUri(params.uri)] }
+            ?: return embedError("GRAPHMD_EMBED_DOCUMENT", "Document is not indexed.")
+        val parsed = GraphCompiler().parseDocument(document.text, document.path.toString())
+        val node = parsed.document as? NodeDocument
+            ?: return embedError("GRAPHMD_EMBED_DOCUMENT", "Embed blocks are only supported in Node and Media documents.")
+        val directive = when (params.kind) {
+            "query" -> EmbedDirective.Query(params.value)
+            "back-link" -> EmbedDirective.BackLink(params.value)
+            else -> return embedError("GRAPHMD_EMBED_KIND", "Unknown embed kind '${params.kind}'.")
+        }
+        val (workspace, engine) = stableSearchWorkspace()
+        if (workspace.generation != synchronized(this) { workspaceGeneration }) {
+            return embedError("GRAPHMD_EMBED_STALE", "The workspace changed while rendering the embed.")
+        }
+        val compileDiagnostics = workspace.compilation.diagnostics
+            .filter { it.severity == Severity.Error }
+            .map {
+                GraphMdSearchDiagnostic(
+                    code = "GRAPHMD_COMPILE",
+                    kind = it.category.name.lowercase(),
+                    message = it.message,
+                )
+            }
+        val result = runSearchSuspend { EmbedEngine(engine).render(directive, node.id) }
+        return GraphMdEmbedResponse(
+            columns = result.table?.columns.orEmpty().map { GraphMdEmbedColumn(it.name, it.type) },
+            rows = result.table?.rows.orEmpty().map { row ->
+                GraphMdEmbedRow(row.cells.map { GraphMdEmbedCell(it.text, it.targetId) })
+            },
+            diagnostics = compileDiagnostics + result.diagnostics.map(EmbedDiagnostic::toSearchDiagnostic),
+        )
+    }
+
+    private fun embedError(code: String, message: String): GraphMdEmbedResponse =
+        GraphMdEmbedResponse(diagnostics = listOf(GraphMdSearchDiagnostic(code, "embed", message)))
 
     fun searchMetadata(): GraphMdSearchMetadata {
         val compiled = compiledWorkspace()
@@ -2037,6 +2135,9 @@ private fun ReferenceTargetKind.displayName(): String = when (this) {
     }
 }
 
+private fun EmbedDiagnostic.toSearchDiagnostic(): GraphMdSearchDiagnostic =
+    GraphMdSearchDiagnostic(code, "embed", message)
+
 private fun TemporalCoordinateSpec.displayName(): String = when (this) {
     TemporalCoordinateSpec.Number -> "number"
     is TemporalCoordinateSpec.Calendar -> "calendar:${calendar.name.lowercase()}"
@@ -2226,6 +2327,12 @@ internal class FrontMatterCompletionResolver(
     private val timelineIds: List<String>,
     private val nodePropsSchema: Map<String, ResolvedPropSchema> = emptyMap(),
 ) {
+    private val lineSeparator = when {
+        "\r\n" in text -> "\r\n"
+        '\r' in text -> "\r"
+        else -> "\n"
+    }
+
     fun resolve(): List<CompletionEntry>? {
         val normalizedText = text.replace("\r\n", "\n").replace('\r', '\n')
         val normalizedOffset = text
@@ -2334,7 +2441,8 @@ internal class FrontMatterCompletionResolver(
                 enumCompletions(valuePrefix, listOf("number", "string", "text", "instant", "duration", "array"), "prop type")
             hasColon && path.lastOrNull() == "timeline" && isPropSchemaPath(path.dropLast(1), documentKind) ->
                 timelineSelectorCompletions(valuePrefix)
-            hasColon && valuePrefix.isEmpty() -> nestedKeyCompletions(path, "", lines, lineIndex, documentKind)
+            hasColon && valuePrefix.isEmpty() ->
+                nestedKeyCompletions(path, "", lines, lineIndex, documentKind, insertOnNextLine = true)
             indent == 0 -> topLevelKeyCompletions(keyCandidate, usedTopLevelKeys, documentKind)
             else -> nestedKeyCompletions(path, currentKeyPrefix, lines, lineIndex, documentKind)
         }
@@ -2446,6 +2554,7 @@ internal class FrontMatterCompletionResolver(
         lines: List<String>,
         lineIndex: Int,
         documentKind: DocumentKind?,
+        insertOnNextLine: Boolean = false,
     ): List<CompletionEntry>? {
         if (
             path.lastOrNull() == "validTime" &&
@@ -2485,11 +2594,16 @@ internal class FrontMatterCompletionResolver(
             .filter { it.startsWith(prefix) && (it !in usedKeys || it == prefix) }
             .map { key ->
                 val schemaField = isPropSchemaPath(path, documentKind)
-                val insertText = when {
+                val fieldText = when {
                     schemaField && key == "type" -> "type: \${1:string}"
                     schemaField && key == "required" -> "required: \${1:false}"
                     schemaField && key == "items" -> "items: \${1:string}"
                     else -> "$key: "
+                }
+                val insertText = if (schemaField && insertOnNextLine) {
+                    lineSeparator + " ".repeat(indentOf(lines[lineIndex]) + 2) + fieldText
+                } else {
+                    fieldText
                 }
                 CompletionEntry(
                     key,

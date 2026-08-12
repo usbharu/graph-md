@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import MarkdownIt from "markdown-it";
+import type { Env } from "markdown-it";
 import { graphMdPlugin, type GraphMdOptions } from "../src/index";
 
-function render(input: string, options?: GraphMdOptions, env?: unknown): string {
+function render(input: string, options?: GraphMdOptions, env?: Env): string {
   const md = new MarkdownIt();
   md.use(graphMdPlugin, options);
   return md.render(input, env);
@@ -222,6 +223,87 @@ describe("@props", () => {
   it("serialises text key annotations", () => {
     const html = render('@props{name(key="lang:ja")="アリス",name(key="lang:us")="Alice"}');
     expect(JSON.parse(dataProps(html) ?? "null").name).toEqual({ "lang:ja": "アリス", "lang:us": "Alice" });
+  });
+});
+
+describe("embed blocks", () => {
+  it("renders the saved Markdown as a fallback without a resolver", () => {
+    const html = render('::: embed:query="MATCH (n) RETURN n"\n\n| old |\n| --- |\n| value |\n:::\n');
+
+    expect(html).toContain("<table>");
+    expect(html).toContain("value");
+    expect(html).not.toContain("graphmd-embed");
+  });
+
+  it("uses the last embed attribute and replaces fallback with a dynamic table", () => {
+    const html = render(
+      '::: embed:back-link=friendOf embed:query="MATCH (n) RETURN n"\nold\n:::\n',
+      {
+        hrefTransform: (target) => `./${target}.md`,
+        embedResolver: (directive) => ({
+          status: "ready",
+          table: {
+            columns: [{ name: "id", type: "string" }],
+            rows: [{ cells: [{ text: "<alice>", targetId: "alice" }] }],
+          },
+        }),
+      },
+    );
+
+    expect(html).toContain('data-embed-kind="query"');
+    expect(html).toContain('href="./alice.md"');
+    expect(html).toContain("&lt;alice&gt;");
+    expect(html).not.toContain("old");
+  });
+
+  it("renders an unresolved back-link id as plain text", () => {
+    const html = render('::: embed:back-link=friendOf\nold\n:::\n', {
+      hrefTransform: (target) => target,
+      embedHrefTransform: () => null,
+      embedResolver: () => ({
+        status: "ready",
+        table: {
+          columns: [{ name: "id", type: "string" }],
+          rows: [{ cells: [{ text: "missing", targetId: "missing" }] }],
+        },
+      }),
+    });
+
+    expect(html).toContain("<td>missing</td>");
+    expect(html).not.toContain("<a ");
+  });
+
+  it("keeps fallback and prepends an escaped diagnostic on failure", () => {
+    const html = render('::: embed:back-link=friendOf\nfallback\n:::\n', {
+      embedResolver: () => ({ status: "error", message: "bad <query>" }),
+    });
+
+    expect(html).toContain("graphmd-embed-error");
+    expect(html).toContain("bad &lt;query&gt;");
+    expect(html).toContain("fallback");
+  });
+
+  it("resolves again when a cached token stream is rendered", () => {
+    let resolution: ReturnType<NonNullable<GraphMdOptions["embedResolver"]>> = { status: "pending" };
+    const md = new MarkdownIt();
+    md.use(graphMdPlugin, { embedResolver: () => resolution });
+    const env = {};
+    const tokens = md.parse('::: embed:query="MATCH (n) RETURN n"\nfallback\n:::\n', env);
+
+    expect(md.renderer.render(tokens, md.options, env)).toContain("fallback");
+
+    resolution = {
+      status: "ready",
+      table: {
+        columns: [{ name: "id", type: "string" }],
+        rows: [{ cells: [{ text: "alice" }] }],
+      },
+    };
+    const refreshed = md.renderer.render(tokens, md.options, env);
+
+    expect(refreshed).toContain('data-embed-kind="query"');
+    expect(refreshed).toContain("alice");
+    expect(refreshed).not.toContain("fallback");
   });
 });
 

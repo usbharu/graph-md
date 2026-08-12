@@ -28,6 +28,20 @@
           "end": "$",
           "patterns": [
             {
+              "match": "\\b(embed:)(query|back-link)(=)",
+              "captures": {
+                "1": {
+                  "name": "keyword.control.graphmd"
+                },
+                "2": {
+                  "name": "variable.other.property.graphmd"
+                },
+                "3": {
+                  "name": "keyword.operator.assignment"
+                }
+              }
+            },
+            {
               "match": "\\b(validTime)(\\s*)(=)",
               "captures": {
                 "1": {

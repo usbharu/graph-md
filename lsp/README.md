@@ -1,5 +1,10 @@
 # GraphMD LSP
 
+The server exposes `graphmd/renderEmbed` for VS Code Markdown preview. The
+extension caches results per document and workspace revision, refreshes the
+preview when an asynchronous result arrives, and retains the saved Markdown
+inside the block as a loading/error fallback.
+
 `core` を使って GraphMD 文書を解析する Kotlin/JVM の LSP サーバです。VSCode 用の薄いクライアントは `lsp/vscode` にあります。
 
 ## 対応内容
