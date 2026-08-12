@@ -37,6 +37,9 @@ private val COMPLETION_REPLACEMENT_TOKEN_REGEX =
     Regex("""-?\d+(?:\.\d*)?|[A-Za-z_][A-Za-z0-9_]*(?:[.:-][A-Za-z0-9_]+)*""")
 private const val CREATE_DEFINITION_COMMAND = "graphmd.createDefinition"
 
+internal val org.eclipse.lsp4j.Diagnostic.messageText: String
+    get() = if (message.isLeft) message.left else message.right.value
+
 class GraphMdLanguageServer : LanguageServer, LanguageClientAware, GraphMdSearchService {
     private val workspaceIndex = GraphMdWorkspaceIndex()
     private val textDocumentService = GraphMdTextDocumentService(this, workspaceIndex)
@@ -619,7 +622,7 @@ internal class GraphMdWorkspaceIndex(
         document: IndexedDocument,
         diagnostic: org.eclipse.lsp4j.Diagnostic,
     ): List<CodeAction> = buildList {
-        val message = diagnostic.message
+        val message = diagnostic.messageText
 
         if (message.startsWith("Ambiguous ") && " reference: " in message) {
             return@buildList
@@ -956,7 +959,7 @@ internal class GraphMdWorkspaceIndex(
         diagnostic: org.eclipse.lsp4j.Diagnostic,
     ): CodeAction? {
         val match = Regex("""^([A-Za-z_][A-Za-z0-9_.:-]*)(?:\.[A-Za-z0-9_.:-]+)? must be (string|text|number|array|duration object)$""")
-            .matchEntire(diagnostic.message) ?: return null
+            .matchEntire(diagnostic.messageText) ?: return null
         val key = match.groupValues[1]
         val replacement = when (match.groupValues[2]) {
             "string", "text" -> "\"\""
@@ -973,17 +976,17 @@ internal class GraphMdWorkspaceIndex(
         document: IndexedDocument,
         diagnostic: org.eclipse.lsp4j.Diagnostic,
     ): CodeAction? {
-        if (diagnostic.message == "id MUST be non-empty") {
+        if (diagnostic.messageText == "id MUST be non-empty") {
             val range = document.propertyValueRange("id") ?: return null
             return replaceAction(document, diagnostic, "Use filename as id", range, document.defaultId(), preferred = true)
         }
-        if (diagnostic.message == "validTime.timeline MUST be non-empty") {
+        if (diagnostic.messageText == "validTime.timeline MUST be non-empty") {
             val timeline = completionIds(ReferenceTargetKind.Timeline).firstOrNull() ?: return null
             val range = document.propertyValueRange("timeline") ?: return null
             return replaceAction(document, diagnostic, "Use Timeline '$timeline'", range, timeline, preferred = true)
         }
         val scalar = Regex("""^(.+) MUST be (?:a |an )?(string|boolean|number|integer|mapping)$""")
-            .matchEntire(diagnostic.message)
+            .matchEntire(diagnostic.messageText)
         if (scalar != null) {
             val field = scalar.groupValues[1].substringAfterLast('.')
             val replacement = when (scalar.groupValues[2]) {
@@ -997,11 +1000,11 @@ internal class GraphMdWorkspaceIndex(
             return replaceAction(document, diagnostic, "Replace '$field' with a valid ${scalar.groupValues[2]}", range, replacement, preferred = true)
         }
         val list = Regex("""^(.+?)(?: items)? MUST be (?:a )?(?:non-empty )?list(?: of strings)?$""")
-            .matchEntire(diagnostic.message)
+            .matchEntire(diagnostic.messageText)
         if (list != null) {
             val field = list.groupValues[1].substringAfterLast('.')
             val range = document.propertyValueRange(field) ?: return null
-            val replacement = if ("non-empty" in diagnostic.message || "of strings" in diagnostic.message || "items" in diagnostic.message) "[value]" else "[]"
+            val replacement = if ("non-empty" in diagnostic.messageText || "of strings" in diagnostic.messageText || "items" in diagnostic.messageText) "[value]" else "[]"
             return replaceAction(document, diagnostic, "Replace '$field' with a list", range, replacement, preferred = true)
         }
         return null
@@ -1011,7 +1014,7 @@ internal class GraphMdWorkspaceIndex(
         document: IndexedDocument,
         diagnostic: org.eclipse.lsp4j.Diagnostic,
     ): List<CodeAction> = buildList {
-        Regex("""validTime\.from is after validTime\.to on (.+)""").matchEntire(diagnostic.message)?.let {
+        Regex("""validTime\.from is after validTime\.to on (.+)""").matchEntire(diagnostic.messageText)?.let {
             val edits = document.swapValidTimeBounds(it.groupValues[1])
             if (edits != null) {
                 add(
@@ -1025,7 +1028,7 @@ internal class GraphMdWorkspaceIndex(
             }
         }
         Regex("""([A-Za-z_][A-Za-z0-9_.:-]*) timeline ([A-Za-z_][A-Za-z0-9_.:-]*) is not allowed""")
-            .matchEntire(diagnostic.message)?.let { match ->
+            .matchEntire(diagnostic.messageText)?.let { match ->
                 val property = match.groupValues[1]
                 val current = match.groupValues[2]
                 val parsed = document.analysis.parsed.document as? NodeDocument
@@ -1046,7 +1049,7 @@ internal class GraphMdWorkspaceIndex(
                 }
             }
         Regex("""([A-Za-z_][A-Za-z0-9_.:-]*) duration must define from or to""")
-            .matchEntire(diagnostic.message)?.let { match ->
+            .matchEntire(diagnostic.messageText)?.let { match ->
                 document.durationBoundInsertion(match.groupValues[1])?.let { insertion ->
                     add(
                         replaceAction(
@@ -1061,7 +1064,7 @@ internal class GraphMdWorkspaceIndex(
                 }
             }
         Regex("""Relation (?:source|target) type .+ is not allowed for (.+)""")
-            .matchEntire(diagnostic.message)?.let { match ->
+            .matchEntire(diagnostic.messageText)?.let { match ->
                 val currentRelType = match.groupValues[1]
                 val relReference = document.analysis.references.firstOrNull {
                     it.kind == ReferenceTargetKind.RelType && it.targetId == currentRelType
@@ -1098,7 +1101,7 @@ internal class GraphMdWorkspaceIndex(
         document: IndexedDocument,
         diagnostic: org.eclipse.lsp4j.Diagnostic,
     ): CodeAction? {
-        val message = diagnostic.message
+        val message = diagnostic.messageText
         if (message in setOf("@props only accepts validTime=...", "@link only accepts validTime=...")) {
             val marker = if (message.startsWith("@props")) "@props(" else "@link("
             val start = document.text.lastIndexOf(marker)
@@ -1245,7 +1248,7 @@ internal class GraphMdWorkspaceIndex(
             Either.forLeft(
                 TextDocumentEdit(
                     VersionedTextDocumentIdentifier(newUri, null),
-                    listOf(TextEdit(Range(Position(0, 0), Position(0, 0)), content)),
+                    listOf(Either.forLeft(TextEdit(Range(Position(0, 0), Position(0, 0)), content))),
                 ),
             ),
         )
@@ -1388,7 +1391,7 @@ private fun ReferenceTargetKind.displayName(): String = when (this) {
                     Severity.Error -> DiagnosticSeverity.Error
                     Severity.Warning -> DiagnosticSeverity.Warning
                 }
-                message = diagnostic.message
+                message = Either.forLeft(diagnostic.message)
                 source = "graphmd"
                 code = Either.forLeft(diagnostic.category.name)
                 range = inferredDiagnosticLspRange(document, diagnostic)
@@ -1414,7 +1417,7 @@ private fun ReferenceTargetKind.displayName(): String = when (this) {
                 if (message != null) {
                     diagnostics.getOrPut(document.uri) { mutableListOf() } += org.eclipse.lsp4j.Diagnostic().apply {
                         severity = DiagnosticSeverity.Error
-                        this.message = message
+                        this.message = Either.forLeft(message)
                         source = "graphmd"
                         code = Either.forLeft(DiagnosticCategory.ReferenceError.name)
                         range = document.analysisRangeOf(reference.range)
