@@ -94,11 +94,12 @@ export default function graphMdIntegration(options = {}) {
         queued = setTimeout(async () => {
           try {
             await rebuild();
-            for (const id of Object.values(VIRTUAL_MODULES)) {
-              const module = server.moduleGraph.getModuleById(
-                `${RESOLVED_PREFIX}${id.slice("virtual:graphmd/".length)}`,
-              );
-              if (module) server.moduleGraph.invalidateModule(module);
+            if (server.environments) {
+              for (const environment of Object.values(server.environments)) {
+                environment.moduleGraph.invalidateAll();
+              }
+            } else {
+              server.moduleGraph.invalidateAll();
             }
             server.ws.send({ type: "full-reload" });
           } catch (error) {
@@ -114,12 +115,12 @@ export default function graphMdIntegration(options = {}) {
       server.watcher.on("add", refresh);
       server.watcher.on("change", refresh);
       server.watcher.on("unlink", refresh);
-      return () => {
+      server.httpServer?.once("close", () => {
         clearTimeout(queued);
         server.watcher.off("add", refresh);
         server.watcher.off("change", refresh);
         server.watcher.off("unlink", refresh);
-      };
+      });
     },
   };
 
