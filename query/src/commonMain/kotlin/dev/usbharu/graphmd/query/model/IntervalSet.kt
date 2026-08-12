@@ -433,7 +433,12 @@ class TimelineCatalog private constructor(
             val patternSpec = timeline.coordinateSystem.coordinate as? TemporalCoordinateSpec.CalendarPattern
             if (patternSpec != null) {
                 fun parse(point: TimePoint?): TemporalCoordinate.CalendarPattern? = point?.coordinate?.let { coordinate ->
-                    engine.coerceCoordinate(validTime.timeline, coordinate) as? TemporalCoordinate.CalendarPattern
+                    val parsed = if (coordinate is TemporalCoordinate.Label) {
+                        runCatching { engine.parse(validTime.timeline, coordinate.value).coordinate }.getOrNull()
+                    } else {
+                        coordinate
+                    } ?: return@let null
+                    engine.coerceCoordinate(validTime.timeline, parsed) as? TemporalCoordinate.CalendarPattern
                 }
                 val from = parse(validTime.from)
                 val to = parse(validTime.to)
@@ -448,10 +453,20 @@ class TimelineCatalog private constructor(
                 return@mapNotNull materializePattern(extent, null)
             }
             val from = validTime.from?.let { point ->
-                runCatching { engine.normalizeToAxis(validTime.timeline, point.coordinate) }.getOrNull()
+                runCatching {
+                    val coordinate = (point.coordinate as? TemporalCoordinate.Label)?.let {
+                        engine.parse(validTime.timeline, it.value).coordinate
+                    } ?: point.coordinate
+                    engine.normalizeToAxis(validTime.timeline, coordinate)
+                }.getOrNull()
             }
             val to = validTime.to?.let { point ->
-                runCatching { engine.normalizeToAxis(validTime.timeline, point.coordinate) }.getOrNull()
+                runCatching {
+                    val coordinate = (point.coordinate as? TemporalCoordinate.Label)?.let {
+                        engine.parse(validTime.timeline, it.value).coordinate
+                    } ?: point.coordinate
+                    engine.normalizeToAxis(validTime.timeline, coordinate)
+                }.getOrNull()
             }
             if (from != null && to != null && from > to) return@mapNotNull null
             IntervalSet.of(

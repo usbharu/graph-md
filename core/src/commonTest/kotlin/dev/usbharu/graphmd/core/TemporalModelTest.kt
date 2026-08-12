@@ -567,6 +567,66 @@ class TemporalModelTest {
     }
 
     @Test
+    fun `calendar pattern custom format applies to validTime and object duration endpoints`() {
+        val result = compile(
+            timeline("CommonEra", "coordinate: gregorian"),
+            timeline(
+                "DisplayBirthday",
+                """
+                sameAxisAs: CommonEra
+                coordinate:
+                  kind: calendar-pattern
+                  fields: [month, day]
+                  repeatsEvery: year
+                  format: "{day:02}/{month:02}"
+                """.trimIndent(),
+            ),
+            SourceDocument(
+                """
+                ---
+                id: Event
+                kind: NodeType
+                props:
+                  span:
+                    type: duration
+                    timeline: DisplayBirthday
+                ---
+                """.trimIndent(),
+                "/event-type.md",
+            ),
+            SourceDocument(
+                """
+                ---
+                id: event
+                kind: Node
+                type: Event
+                validTime:
+                  - timeline: DisplayBirthday
+                    from: "08/02"
+                props:
+                  span:
+                    from: { timeline: DisplayBirthday, value: "08/02" }
+                    to: { timeline: DisplayBirthday, value: "09/02" }
+                ---
+                """.trimIndent(),
+                "/event.md",
+            ),
+        )
+
+        assertTrue(result.diagnostics.isEmpty(), result.diagnostics.toString())
+        val node = result.nodes.single()
+        val duration = assertIs<DurationValue>(node.props.getValue("span"))
+        assertEquals(
+            mapOf(CalendarField.Month to 2L, CalendarField.Day to 8L),
+            assertIs<TemporalCoordinate.CalendarPattern>(duration.from?.coordinate).fields,
+        )
+        assertEquals(
+            mapOf(CalendarField.Month to 2L, CalendarField.Day to 9L),
+            assertIs<TemporalCoordinate.CalendarPattern>(duration.to?.coordinate).fields,
+        )
+    }
+
+    @Test
     fun `non recurring calendar pattern validTime retains reversed range diagnostics`() {
         val result = compile(
             timeline(

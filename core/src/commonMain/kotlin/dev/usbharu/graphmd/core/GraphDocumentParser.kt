@@ -142,6 +142,7 @@ class GraphDocumentParser {
         diagnostics: MutableList<Diagnostic>,
         documentId: String,
     ): TimePoint? {
+        if (value is YamlString) return TimePoint(TemporalCoordinate.Label(value.value))
         parseTemporalCoordinate(value, sourcePath, diagnostics, documentId, field)?.let { return TimePoint(it) }
         val map = value as? YamlMap ?: run {
             diagnostics += schemaError("$field MUST be a temporal coordinate", sourcePath, documentId)

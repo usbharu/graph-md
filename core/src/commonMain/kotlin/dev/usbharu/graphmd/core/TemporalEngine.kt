@@ -251,7 +251,11 @@ class TemporalEngine(
         val system = coordinateSystems[timeline] ?: return null
         return when (val spec = system.coordinate) {
             TemporalCoordinateSpec.Number -> {
-                val value = (coordinate as? TemporalCoordinate.Rational)?.value ?: return null
+                val value = when (coordinate) {
+                    is TemporalCoordinate.Rational -> coordinate.value
+                    is TemporalCoordinate.Label -> runCatching { ExactRational.parse(coordinate.value) }.getOrNull()
+                    else -> null
+                } ?: return null
                 if (system.parentTimelineId == null) {
                     value
                 } else {
@@ -283,6 +287,9 @@ class TemporalEngine(
                 val frame = when (coordinate) {
                     is TemporalCoordinate.FrameIndex -> coordinate.value
                     is TemporalCoordinate.Rational -> coordinate.value.takeIf { it.denominator == 1L }?.numerator
+                    is TemporalCoordinate.Label -> runCatching { ExactRational.parse(coordinate.value) }.getOrNull()
+                        ?.takeIf { it.denominator == 1L }
+                        ?.numerator
                     else -> null
                 } ?: return null
                 ExactRational.of(frame - spec.start)
@@ -408,7 +415,13 @@ class TemporalEngine(
         }
         val normalizedStart = calendarToDayIndex(start, calendar) ?: return null
         val normalizedEnd = calendarToDayIndex(endExclusive, calendar) ?: return null
-        return runCatching { TemporalExpansionWindow(normalizedStart, normalizedEnd) }.getOrNull()
+        val expansion = runCatching { TemporalExpansionWindow(normalizedStart, normalizedEnd) }.getOrNull() ?: return null
+        val first = dayIndexToCalendar(expansion.start.numerator, calendar) ?: return null
+        val last = dayIndexToCalendar(expansion.endExclusive.numerator - 1, calendar) ?: return null
+        val firstYear = toAstronomicalYear(first.year, calendar.numbering) ?: return null
+        val lastYear = toAstronomicalYear(last.year, calendar.numbering) ?: return null
+        if (lastYear < firstYear || lastYear - firstYear >= MAX_CALENDAR_EXPANSION_YEARS) return null
+        return expansion
     }
 
     private fun compareCoordinates(
@@ -924,7 +937,9 @@ private fun resolveCalendarPattern(
     val to = dayIndexToCalendar(expansion.endExclusive.numerator - 1, calendar) ?: return null
     val fromAstronomical = toAstronomicalYear(from.year, spec.numbering) ?: return null
     val toAstronomical = toAstronomicalYear(to.year, spec.numbering) ?: return null
-    if (toAstronomical < fromAstronomical || toAstronomical - fromAstronomical >= 10_000L) return null
+    if (toAstronomical < fromAstronomical ||
+        toAstronomical - fromAstronomical >= MAX_CALENDAR_EXPANSION_YEARS
+    ) return null
     val expansionMargin = recurrenceContextYears.toLong() + 2L
     if (fromAstronomical < Long.MIN_VALUE + expansionMargin || toAstronomical > Long.MAX_VALUE - expansionMargin) {
         return null
@@ -1020,6 +1035,8 @@ private fun isoWeekOneMonday(
     val weekday = floorMod(januaryFourth.numerator, 7).toInt() + 1
     return januaryFourth - ExactRational.of((weekday - 1).toLong())
 }
+
+private const val MAX_CALENDAR_EXPANSION_YEARS = 10_000L
 
 private fun eraToCalendarDate(
     coordinate: TemporalCoordinate.EraDate,

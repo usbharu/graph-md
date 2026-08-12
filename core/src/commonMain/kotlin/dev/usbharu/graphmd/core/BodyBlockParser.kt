@@ -443,7 +443,7 @@ private fun rawValidTime(raw: RawValue): ValidTime {
 private fun rawTimePoint(raw: RawValue): TimePoint = when (raw) {
     is RawInteger -> TimePoint(TemporalCoordinate.Rational(ExactRational.of(raw.value)))
     is RawNumber -> TimePoint(TemporalCoordinate.Rational(ExactRational.fromDouble(raw.value)))
-    is RawString -> TimePoint(parseGenericTemporalCoordinate(raw.value))
+    is RawString -> TimePoint(TemporalCoordinate.Label(raw.value))
     is RawObject -> {
         val legacy = raw.values["timecode"] ?: throw InlinePropsParseException("Unknown timePoint coordinate shape")
         val point = rawTimePoint(legacy)

@@ -639,6 +639,15 @@ class GmqlEngineTest {
         )
         val invalidExpansionIndexed = runSuspend { localEngine.search(invalidExpansionQuery) }
         val invalidExpansionReference = runSuspend { localEngine.scan(invalidExpansionQuery) }
+        val oversizedExpansionQuery = apiQuery.copy(
+            expansionWindow = CalendarExpansionWindow(
+                TimelineId("Birthday"),
+                TemporalCoordinate.CalendarDate(1, 1, 1),
+                TemporalCoordinate.CalendarDate(10_002, 1, 1),
+            ),
+        )
+        val oversizedExpansionIndexed = runSuspend { localEngine.search(oversizedExpansionQuery) }
+        val oversizedExpansionReference = runSuspend { localEngine.scan(oversizedExpansionQuery) }
         val missingLeapEnd = runSuspend {
             localEngine.queryGmql(
                 """MATCH (n:LeapRange)
@@ -660,6 +669,14 @@ class GmqlEngineTest {
                 """MATCH (n:Person)
                    VALID ON Birthday AT "02-29"
                    WITHIN ["999999999999999999999-01-01", "2002-01-01")
+                   RETURN ID(n) AS id""",
+            )
+        }
+        val oversizedWithin = runSuspend {
+            localEngine.queryGmql(
+                """MATCH (n:Person)
+                   VALID ON Birthday AT "02-29"
+                   WITHIN ["0001-01-01", "10002-01-01")
                    RETURN ID(n) AS id""",
             )
         }
@@ -720,11 +737,15 @@ class GmqlEngineTest {
         assertEquals(QueryDiagnosticCode.UNKNOWN_TIMELINE, unknownExpansionIndexed.diagnostics.single().code)
         assertEquals(invalidExpansionReference, invalidExpansionIndexed)
         assertEquals(QueryDiagnosticCode.INVALID_TEMPORAL_WINDOW, invalidExpansionIndexed.diagnostics.single().code)
+        assertEquals(oversizedExpansionReference, oversizedExpansionIndexed)
+        assertEquals(QueryDiagnosticCode.INVALID_TEMPORAL_WINDOW, oversizedExpansionIndexed.diagnostics.single().code)
         assertTrue(missingLeapEnd.isSuccess, missingLeapEnd.diagnostics.toString())
         assertTrue(missingLeapEnd.rows.isEmpty(), missingLeapEnd.toString())
         assertEquals(listOf("leap-end"), presentLeapEnd.stringColumn())
         assertFalse(overflowingWithin.isSuccess)
         assertEquals("GMQL4005", overflowingWithin.diagnostics.single().code)
+        assertFalse(oversizedWithin.isSuccess)
+        assertEquals("GMQL4005", oversizedWithin.diagnostics.single().code)
         assertTrue(halfOpenSameDay.isSuccess, halfOpenSameDay.diagnostics.toString())
         assertTrue(halfOpenSameDay.rows.isEmpty(), halfOpenSameDay.toString())
         assertTrue(openClosedSameDay.isSuccess, openClosedSameDay.diagnostics.toString())

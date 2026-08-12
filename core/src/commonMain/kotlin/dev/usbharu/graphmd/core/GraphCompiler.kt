@@ -373,11 +373,14 @@ class GraphCompiler(
             val timeline = timelineById[validTime.timeline]
             val patternSpec = timeline?.coordinate as? TemporalCoordinateSpec.CalendarPattern
             fun validate(point: TimePoint?): ExactRational? = point?.let {
+                val parsedCoordinate = runCatching {
+                    (it.coordinate as? TemporalCoordinate.Label)?.let { label ->
+                        temporalEngine.parse(validTime.timeline, label.value).coordinate
+                    } ?: it.coordinate
+                }.getOrNull() ?: return@let null
                 if (patternSpec != null) {
                     val coordinate = runCatching {
-                        val raw = (it.coordinate as? TemporalCoordinate.Label)?.value
-                        if (raw != null) temporalEngine.parse(validTime.timeline, raw).coordinate
-                        else temporalEngine.coerceCoordinate(validTime.timeline, it.coordinate) ?: error("invalid coordinate")
+                        temporalEngine.coerceCoordinate(validTime.timeline, parsedCoordinate) ?: error("invalid coordinate")
                     }.getOrNull() ?: return@let null
                     if (patternSpec.repeatsEvery != null) return@let ExactRational.ZERO
                     when (val selection = temporalEngine.resolveToAxis(validTime.timeline, coordinate)) {
@@ -386,7 +389,7 @@ class GraphCompiler(
                         is TemporalSelection.Recurrence, null -> null
                     }
                 } else {
-                    runCatching { temporalEngine.normalizeToAxis(validTime.timeline, it.coordinate) }.getOrNull()
+                    runCatching { temporalEngine.normalizeToAxis(validTime.timeline, parsedCoordinate) }.getOrNull()
                 }
             }
             val from = validate(validTime.from)
@@ -1739,6 +1742,7 @@ class GraphCompiler(
         diagnostics: MutableList<Diagnostic>,
     ): TimePoint? {
         if (raw == null) return null
+        if (raw is RawString) return TimePoint(TemporalCoordinate.Label(raw.value))
         parseRawTemporalCoordinate(raw)?.let { return TimePoint(it) }
         val obj = raw as? RawObject ?: run {
             diagnostics += typeError("$field must be a temporal coordinate", sourcePath, documentId)
@@ -2113,10 +2117,6 @@ class GraphCompiler(
             return null
         }
         val coordinateRaw = obj.values["timecode"] ?: obj.values["value"]
-        var coordinate = parseRawTemporalCoordinate(coordinateRaw) ?: run {
-            diagnostics += typeError("$field.value must be a temporal coordinate", sourcePath, documentId)
-            return null
-        }
         val timeline = (obj.values["timeline"] as? RawString)?.value
         if (timeline != null) {
             val diagnosticsForReference = referenceDiagnostics(
@@ -2131,6 +2131,20 @@ class GraphCompiler(
                 diagnostics += diagnosticsForReference
                 return null
             }
+        }
+        val parsingTimeline = timeline ?: defaultTimeline
+        var coordinate = if (
+            coordinateRaw is RawString &&
+            timelineById[parsingTimeline]?.coordinate is TemporalCoordinateSpec.CalendarPattern
+        ) {
+            runCatching {
+                temporalEngine(timelineById.values).parse(checkNotNull(parsingTimeline), coordinateRaw.value).coordinate
+            }.getOrNull()
+        } else {
+            parseRawTemporalCoordinate(coordinateRaw)
+        } ?: run {
+            diagnostics += typeError("$field.value must be a temporal coordinate", sourcePath, documentId)
+            return null
         }
         val unknown = obj.values.keys - setOf("timeline", "value", "timecode")
         if (unknown.isNotEmpty()) diagnostics += typeError("$field has unknown fields: ${unknown.joinToString()}", sourcePath, documentId)
