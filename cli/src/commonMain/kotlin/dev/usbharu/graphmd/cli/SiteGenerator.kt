@@ -33,14 +33,14 @@ internal fun GraphMdCli.site(command: CliCommand.Site, json: Boolean): CliResult
     }
 
     val documents = parsed.mapNotNull { it.document }.sortedBy { it.id }
+    val sourceRoots = command.paths.ifEmpty { listOf(".") }
+        .map(fileSystem::canonical)
+        .distinct()
     val files = generatedSiteTemplateFiles.toMutableMap().apply {
         put(
             "graphmd.config.mjs",
-            "export default { base: ${jsonString(command.base).encode()}, roots: [\"documents\"] };\n",
+            "export default { base: ${jsonString(command.base).encode()}, roots: ${jsonArray(sourceRoots.map(::jsonString)).encode()} };\n",
         )
-        parsed.zip(sources).forEach { (result, source) ->
-            result.document?.let { document -> put("documents/${safeSlug(document.id)}.md", source.text) }
-        }
     }
 
     try {

@@ -11,7 +11,7 @@ import kotlin.test.assertTrue
 
 class GraphMdCliTest {
     @Test
-    fun `site generates a self contained Astro project with live Markdown sources`() {
+    fun `site generates an Astro project linked to live Markdown sources`() {
         val fileSystem = FakeFileSystem(
             mapOf(
                 "/workspace/person.md" to nodeType("Person"),
@@ -33,7 +33,7 @@ class GraphMdCliTest {
         val generated = fileSystem.contentsUnder("/site")
         assertTrue("/site/astro.config.mjs" in generated)
         assertTrue("/site/src/pages/documents/[slug].astro" in generated)
-        assertTrue("/site/documents/alice.md" in generated)
+        assertFalse(generated.keys.any { it.startsWith("/site/documents/") })
         assertTrue("/site/vendor/graph-md-astro/integration.mjs" in generated)
         assertTrue("/site/runtime-encoded/graph-md-query-runtime.js.gz.b64" in generated)
         assertTrue("/site/runtime-encoded/markdown-it-graphmd.js.gz.b64" in generated)
@@ -41,6 +41,7 @@ class GraphMdCliTest {
         assertTrue(generated.getValue("/site/src/lib/markdown.ts").contains("graphMdPlugin"))
         assertTrue(generated.getValue("/site/src/components/SearchApp.tsx").contains("GraphMdWebSearch"))
         assertTrue(generated.getValue("/site/graphmd.config.mjs").contains("base: \"/wiki"))
+        assertTrue(generated.getValue("/site/graphmd.config.mjs").contains("roots: [\"/workspace\"]"))
         assertTrue(generated.getValue("/site/src/lib/site.ts").contains("virtual:graphmd/site"))
         assertFalse("/site/src/generated/site.json" in generated)
         assertFalse(generated.getValue("/site/package.json").contains("workspace:"))
@@ -50,7 +51,7 @@ class GraphMdCliTest {
     }
 
     @Test
-    fun `site preserves structured Markdown for Astro compilation`() {
+    fun `site references structured Markdown without copying it`() {
         val fileSystem = FakeFileSystem(
             mapOf(
                 "/workspace/Person.md" to """
@@ -115,9 +116,8 @@ class GraphMdCliTest {
 
         assertEquals(0, result.exitCode, result.stderr)
         val generated = fileSystem.contentsUnder("/site")
-        assertTrue(generated.getValue("/site/documents/Person.md").contains("name: { type: string, required: true }"))
-        assertTrue(generated.getValue("/site/documents/alice.md").contains("name: Alice"))
-        assertTrue(generated.getValue("/site/documents/IfWorld.md").contains("mapsTo: Reality"))
+        assertFalse(generated.keys.any { it.startsWith("/site/documents/") })
+        assertTrue(generated.getValue("/site/graphmd.config.mjs").contains("roots: [\"/workspace\"]"))
     }
 
     @Test

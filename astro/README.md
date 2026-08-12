@@ -21,5 +21,6 @@ Pages and components can import these build-time virtual modules:
 - `virtual:graphmd/search`
 - `virtual:graphmd/diagnostics`
 
-The integration recompiles and reloads the page whenever a source Markdown file
-is added, changed, or removed.
+Roots may be files or directories outside the Astro project. The integration
+recompiles and reloads the page whenever a source Markdown file is added,
+changed, or removed; source files do not need to be copied into the site.

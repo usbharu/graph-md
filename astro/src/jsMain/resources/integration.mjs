@@ -151,6 +151,18 @@ async function readSources(roots, extensions, projectRoot) {
 }
 
 async function walk(directory, extensions, output) {
+  let metadata;
+  try {
+    metadata = await fs.stat(directory);
+  } catch (error) {
+    if (error.code === "ENOENT") return;
+    throw error;
+  }
+  if (metadata.isFile()) {
+    if (extensions.has(path.extname(directory))) output.push(directory);
+    return;
+  }
+  if (!metadata.isDirectory()) return;
   let entries;
   try {
     entries = await fs.readdir(directory, { withFileTypes: true });

@@ -17,7 +17,7 @@ export interface GraphMdDiagnostic {
 }
 
 export interface GraphMdIntegrationOptions {
-  /** Paths relative to Astro's root. Defaults to `["documents"]`. */
+  /** Source files or directories, absolute or relative to Astro's root. Defaults to `["documents"]`. */
   roots?: string[];
   /** File extensions compiled as Graph Markdown. Defaults to `.md`. */
   extensions?: string[];
