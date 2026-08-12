@@ -2,6 +2,56 @@ plugins {
     alias(libs.plugins.kotlinMultiplatform)
 }
 
+fun resolveDevelopmentExecutable(name: String): File? {
+    val isWindows = System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
+    val executableNames = if (isWindows) {
+        listOf("$name.cmd", "$name.exe", name)
+    } else {
+        listOf(name)
+    }
+    val propertyName = "${name}Executable"
+    val environmentName = "${name.uppercase()}_EXECUTABLE"
+    val explicitCandidates = listOfNotNull(
+        providers.gradleProperty(propertyName).orNull,
+        providers.environmentVariable(environmentName).orNull,
+    )
+    val pathCandidates = providers.environmentVariable("PATH").orNull
+        .orEmpty()
+        .split(File.pathSeparator)
+        .filter(String::isNotBlank)
+        .flatMap { directory -> executableNames.map { File(directory, it).path } }
+    val userHome = providers.systemProperty("user.home").orNull
+    val managedCandidates = if (userHome == null) {
+        emptyList()
+    } else {
+        listOf(
+            "$userHome/.local/share/pnpm",
+            "$userHome/.local/share/mise/shims",
+            "$userHome/.local/share/mise/installs/$name/latest",
+            "$userHome/.asdf/shims",
+            "$userHome/.volta/bin",
+        ).flatMap { directory -> executableNames.map { "$directory/$it" } }
+    }
+    return (explicitCandidates + pathCandidates + managedCandidates)
+        .asSequence()
+        .map(::File)
+        .firstOrNull { it.isFile && (isWindows || it.canExecute()) }
+}
+
+val pnpmExecutable = resolveDevelopmentExecutable("pnpm")
+val nodeExecutable = resolveDevelopmentExecutable("node")
+val developmentToolPath = buildList {
+    pnpmExecutable?.parentFile?.absolutePath?.let(::add)
+    nodeExecutable?.parentFile?.absolutePath?.let(::add)
+    providers.environmentVariable("PATH").orNull?.let(::add)
+}.distinct().joinToString(File.pathSeparator)
+
+fun Exec.configureDevelopmentTools() {
+    if (developmentToolPath.isNotEmpty()) {
+        environment("PATH", developmentToolPath)
+    }
+}
+
 version = providers.gradleProperty("releaseVersion").orElse("0.1.0-SNAPSHOT").get()
 val cliReleaseVersion = version.toString()
 val generatedVersionDirectory = layout.buildDirectory.dir("generated/cliVersion")
@@ -37,7 +87,8 @@ val bundleMarkdownItGraphMd by tasks.registering(Exec::class) {
     // This bundle is compiled into the multiplatform CLI as generated source.
     // Keeping development sourcemaps and whitespace here makes every Kotlin
     // target parse more than a megabyte of string literals during `check`.
-    commandLine("pnpm", "--dir", "markdown-it-graphmd", "exec", "tsup", "--minify", "--sourcemap=false")
+    configureDevelopmentTools()
+    commandLine(pnpmExecutable?.absolutePath ?: "pnpm", "--dir", "markdown-it-graphmd", "exec", "tsup", "--minify", "--sourcemap=false")
     inputs.files(fileTree(rootProject.file("markdown-it-graphmd/src")) { include("**/*.ts") })
     outputs.file(rootProject.file("markdown-it-graphmd/dist/index.js"))
 }
@@ -53,8 +104,9 @@ val bundleQueryWebRuntime by tasks.registering(Exec::class) {
         rootProject.file("query/build/compileSync/js/main/productionLibrary/kotlin/kotlin-kotlin-stdlib.js"),
     )
     outputs.file(bundledQueryRuntime)
+    configureDevelopmentTools()
     commandLine(
-        "pnpm", "exec", "esbuild", queryEntry.absolutePath,
+        pnpmExecutable?.absolutePath ?: "pnpm", "exec", "esbuild", queryEntry.absolutePath,
         "--bundle", "--platform=browser", "--format=iife", "--global-name=GraphMdQueryRuntime",
         "--minify",
         "--outfile=${bundledQueryRuntime.get().asFile.absolutePath}",
@@ -71,8 +123,9 @@ val updateEmbeddedWebRuntime by tasks.registering(Exec::class) {
         embeddedWebRuntimeDirectory.file("graph-md-query-runtime.js.gz.b64"),
         embeddedWebRuntimeDirectory.file("markdown-it-graphmd.js.gz.b64"),
     )
+    configureDevelopmentTools()
     commandLine(
-        "node", rootProject.file("scripts/embed-web-runtime.mjs").absolutePath,
+        nodeExecutable?.absolutePath ?: "node", rootProject.file("scripts/embed-web-runtime.mjs").absolutePath,
         embeddedWebRuntimeDirectory.asFile.absolutePath,
         bundledQueryRuntime.get().asFile.absolutePath,
         markdownBundle.asFile.absolutePath,

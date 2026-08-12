@@ -97,7 +97,8 @@ local authoring previews. The output directory must be new or empty unless
 The browser runtimes used by `site` are checked into the CLI, so ordinary
 Gradle builds do not require Node.js or pnpm. After changing the query JS API
 or `markdown-it-graphmd`, maintainers can refresh them explicitly with
-`./gradlew :cli:updateEmbeddedWebRuntime`; that maintenance task requires pnpm.
+`./gradlew :cli:updateEmbeddedWebRuntime`; that maintenance task requires pnpm. If pnpm or Node.js is managed by a tool that is not visible to the Gradle daemon, their paths can be supplied explicitly with
+`-PpnpmExecutable=/path/to/pnpm -PnodeExecutable=/path/to/node`.
 
 The generated site's source lives in `site-template/` as a regular Astro
 project. Work on the Wiki UI directly with `cd site-template && pnpm install &&
