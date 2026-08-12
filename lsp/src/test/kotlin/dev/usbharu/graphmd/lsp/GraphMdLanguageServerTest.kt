@@ -4246,6 +4246,54 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `property schema field completion starts a nested line after the property declaration`() {
+        fun assertCompletion(
+            kind: String,
+            lineSeparator: String,
+            label: String,
+            expectedField: String,
+        ) {
+            val lines = mutableListOf(
+                "---",
+                "id: Example",
+                "kind: $kind",
+            )
+            if (kind == "RelType") {
+                lines += "from: [Node]"
+                lines += "to: [Node]"
+            }
+            lines += listOf("props:", "  name:", "---")
+            val text = lines.joinToString(lineSeparator)
+            val uri = "file:///workspace/$kind.md"
+            val fixture = serverFixture(mapOf(uri to text))
+            val cursor = text.indexOf("  name:") + "  name:".length
+
+            val item = fixture.completions(uri, cursor).single { it.label == label }
+            val edit = assertNotNull(item.textEdit?.left)
+            val propertyLine = lines.indexOf("  name:")
+            val expectedText = buildList {
+                addAll(lines.subList(0, propertyLine + 1))
+                add("    $expectedField")
+                addAll(lines.subList(propertyLine + 1, lines.size))
+            }.joinToString(lineSeparator)
+
+            assertEquals(lineSeparator + "    " + expectedField, edit.newText)
+            assertEquals(
+                Range(Position(propertyLine, "  name:".length), Position(propertyLine, "  name:".length)),
+                edit.range,
+            )
+            assertEquals(
+                expectedText,
+                text.replaceRange(cursor, cursor, edit.newText),
+            )
+            assertEquals(InsertTextFormat.Snippet, item.insertTextFormat)
+        }
+
+        assertCompletion("NodeType", "\n", "type", "type: \${1:string}")
+        assertCompletion("RelType", "\r\n", "required", "required: \${1:false}")
+    }
+
+    @Test
     fun `front matter type completion distinguishes document type from property schema type`() {
         fun complete(markedText: String): List<CompletionEntry> {
             val marker = "<cursor>"

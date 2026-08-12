@@ -2225,6 +2225,12 @@ internal class FrontMatterCompletionResolver(
     private val timelineIds: List<String>,
     private val nodePropsSchema: Map<String, ResolvedPropSchema> = emptyMap(),
 ) {
+    private val lineSeparator = when {
+        "\r\n" in text -> "\r\n"
+        '\r' in text -> "\r"
+        else -> "\n"
+    }
+
     fun resolve(): List<CompletionEntry>? {
         val normalizedText = text.replace("\r\n", "\n").replace('\r', '\n')
         val normalizedOffset = text
@@ -2333,7 +2339,8 @@ internal class FrontMatterCompletionResolver(
                 enumCompletions(valuePrefix, listOf("number", "string", "text", "instant", "duration", "array"), "prop type")
             hasColon && path.lastOrNull() == "timeline" && isPropSchemaPath(path.dropLast(1), documentKind) ->
                 timelineSelectorCompletions(valuePrefix)
-            hasColon && valuePrefix.isEmpty() -> nestedKeyCompletions(path, "", lines, lineIndex, documentKind)
+            hasColon && valuePrefix.isEmpty() ->
+                nestedKeyCompletions(path, "", lines, lineIndex, documentKind, insertOnNextLine = true)
             indent == 0 -> topLevelKeyCompletions(keyCandidate, usedTopLevelKeys, documentKind)
             else -> nestedKeyCompletions(path, currentKeyPrefix, lines, lineIndex, documentKind)
         }
@@ -2445,6 +2452,7 @@ internal class FrontMatterCompletionResolver(
         lines: List<String>,
         lineIndex: Int,
         documentKind: DocumentKind?,
+        insertOnNextLine: Boolean = false,
     ): List<CompletionEntry>? {
         if (
             path.lastOrNull() == "validTime" &&
@@ -2484,11 +2492,16 @@ internal class FrontMatterCompletionResolver(
             .filter { it.startsWith(prefix) && (it !in usedKeys || it == prefix) }
             .map { key ->
                 val schemaField = isPropSchemaPath(path, documentKind)
-                val insertText = when {
+                val fieldText = when {
                     schemaField && key == "type" -> "type: \${1:string}"
                     schemaField && key == "required" -> "required: \${1:false}"
                     schemaField && key == "items" -> "items: \${1:string}"
                     else -> "$key: "
+                }
+                val insertText = if (schemaField && insertOnNextLine) {
+                    lineSeparator + " ".repeat(indentOf(lines[lineIndex]) + 2) + fieldText
+                } else {
+                    fieldText
                 }
                 CompletionEntry(
                     key,
