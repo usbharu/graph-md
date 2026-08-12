@@ -31,7 +31,14 @@ internal object SystemCliFileSystem : CliFileSystem {
         }
     }
 
-    override fun canonical(path: String): String = SystemFileSystem.resolve(Path(path)).toString()
+    override fun canonical(path: String): String {
+        val requested = Path(path)
+        if (SystemFileSystem.metadataOrNull(requested) != null) {
+            return SystemFileSystem.resolve(requested).toString()
+        }
+        val parent = requested.parent ?: Path(".")
+        return Path(canonical(parent.toString()), requested.name).toString()
+    }
 
     override fun children(path: String): List<String> =
         SystemFileSystem.list(Path(path)).map { it.toString() }
