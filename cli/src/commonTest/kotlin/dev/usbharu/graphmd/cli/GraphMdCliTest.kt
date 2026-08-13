@@ -145,9 +145,85 @@ class GraphMdCliTest {
     }
 
     @Test
+    fun `site force refuses to replace an input directory`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "/workspace/docs/person.md" to nodeType("Person"),
+                "/workspace/docs/keep.txt" to "must survive",
+            ),
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/workspace/docs", "/workspace/docs", "--force"))
+
+        assertEquals(2, result.exitCode)
+        assertTrue(result.stderr.contains("Refusing unsafe site output directory"))
+        assertEquals("must survive", fileSystem.contentsUnder("/workspace/docs").getValue("/workspace/docs/keep.txt"))
+    }
+
+    @Test
+    fun `site force refuses an ancestor of the current directory`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "/workspace/person.md" to nodeType("Person"),
+                "/keep.txt" to "must survive",
+            ),
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/", "/workspace", "--force"))
+
+        assertEquals(2, result.exitCode)
+        assertEquals("must survive", fileSystem.contentsUnder("/").getValue("/keep.txt"))
+    }
+
+    @Test
+    fun `site creates nested template paths with Windows separators`() {
+        val fileSystem = FakeFileSystem(
+            mapOf("/workspace/person.md" to nodeType("Person")),
+            emittedSeparator = '\\',
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/site", "/workspace"))
+
+        assertEquals(0, result.exitCode, result.stderr)
+        assertTrue("/site/src/pages/documents/[slug].astro" in fileSystem.contentsUnder("/site"))
+    }
+
+    @Test
+    fun `site rejects unsafe base paths`() {
+        val fileSystem = FakeFileSystem(mapOf("/workspace/person.md" to nodeType("Person")))
+        val unsafe = listOf("//evil.example", "/a/../b", "/wiki?x", "/wiki#x", "/wiki\\x", "/wiki%2fadmin")
+
+        unsafe.forEach { base ->
+            val result = GraphMdCli(fileSystem).run(listOf("site", "/site", "/workspace", "--base", base))
+            assertEquals(2, result.exitCode, "base=$base")
+            assertTrue(result.stderr.contains("--base must be a safe absolute URL path"), "base=$base")
+        }
+    }
+
+    @Test
+    fun `site force preserves the existing output when generation fails`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "/workspace/person.md" to nodeType("Person"),
+                "/site/old.txt" to "old site",
+            ),
+            failWriteAt = 2,
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/site", "/workspace", "--force"))
+
+        assertEquals(1, result.exitCode)
+        assertEquals(mapOf("/site/old.txt" to "old site"), fileSystem.contentsUnder("/site"))
+        assertFalse(fileSystem.allPaths().any { ".graphmd-tmp-" in it || ".graphmd-backup-" in it })
+    }
+
+    @Test
     fun `safe site slug encodes non path characters without collisions`() {
         assertEquals("alice", safeSlug("alice"))
+        assertEquals("~41lice", safeSlug("Alice"))
         assertEquals("a~2Fb", safeSlug("a/b"))
+        assertEquals("~2E", safeSlug("."))
+        assertEquals("~2E~2E", safeSlug(".."))
         assertEquals("~E3~81~82", safeSlug("あ"))
     }
 
@@ -1579,6 +1655,7 @@ private class FakeFileSystem(
     files: Map<String, String>,
     private val aliases: Map<String, String> = emptyMap(),
     private val failWriteAt: Int? = null,
+    private val emittedSeparator: Char = '/',
 ) : CliFileSystem {
     private val mutableFiles = files.toMutableMap()
     private var writeCount = 0
@@ -1601,9 +1678,10 @@ private class FakeFileSystem(
     }
 
     override fun canonical(path: String): String {
-        val absolute = when (path) {
+        val normalized = path.replace('\\', '/')
+        val absolute = when (normalized) {
             "." -> "/workspace"
-            else -> path.removeSuffix("/").ifEmpty { "/" }
+            else -> normalized.removeSuffix("/").ifEmpty { "/" }
         }
         return aliases[absolute] ?: absolute
     }
@@ -1620,6 +1698,7 @@ private class FakeFileSystem(
 
     override fun child(path: String, name: String): String =
         canonical(path).let { if (it == "/") "/$name" else "$it/$name" }
+            .let { if (emittedSeparator == '\\') it.replace('/', '\\') else it }
 
     override fun createDirectories(path: String) {
         val canonical = canonical(path)
@@ -1643,6 +1722,18 @@ private class FakeFileSystem(
         if (mustExist && !removed) error("Path does not exist: $path")
     }
 
+    override fun atomicMove(source: String, destination: String) {
+        val from = canonical(source)
+        val to = canonical(destination)
+        if (kind(from) == null || kind(to) != null) error("Cannot move $source to $destination")
+        val movedFiles = mutableFiles.filterKeys { it == from || it.startsWith("$from/") }
+        val movedDirectories = directories.filter { it == from || it.startsWith("$from/") }
+        mutableFiles.keys.removeAll(movedFiles.keys)
+        directories.removeAll(movedDirectories.toSet())
+        movedDirectories.forEach { directories += to + it.removePrefix(from) }
+        movedFiles.forEach { (path, content) -> mutableFiles[to + path.removePrefix(from)] = content }
+    }
+
     fun contentsUnder(path: String): Map<String, String> {
         val prefix = canonical(path).let { if (it == "/") "/" else "$it/" }
         return mutableFiles.entries
@@ -1650,4 +1741,6 @@ private class FakeFileSystem(
             .sortedBy { it.key }
             .associateTo(linkedMapOf()) { it.toPair() }
     }
+
+    fun allPaths(): Set<String> = mutableFiles.keys + directories
 }

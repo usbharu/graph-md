@@ -4,6 +4,7 @@ import dev.usbharu.graphmd.core.model.SourceDocument
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class GraphMdAstroCompilerTest {
@@ -86,6 +87,31 @@ class GraphMdAstroCompilerTest {
         assertTrue(site.contains("\"kind\":\"query\",\"value\":\"MATCH (n:Person) RETURN ID(n) AS id ORDER BY id\",\"status\":\"ready\""))
         assertTrue(site.contains("\"kind\":\"back-link\",\"value\":\"friend\",\"status\":\"ready\""))
         assertTrue(site.contains("\"targetId\":\"alice\""))
+    }
+
+    @Test
+    fun `site view rejects executable document URLs`() {
+        val result = GraphMdAstroCompiler().compile(
+            listOf(
+                source("Person", "NodeType"),
+                source("alice", "Node", "type: Person\nurl: javascript:alert(1)"),
+                source("bob", "Node", "type: Person\nurl: https://example.com/bob"),
+            ),
+        )
+
+        val site = WikiSiteEncoder("/", result.documents, result.graph, result.sources).encode()
+
+        assertTrue(site.contains("\"id\":\"alice\",\"slug\":\"alice\""))
+        assertTrue(site.contains("\"url\":null"))
+        assertTrue(site.contains("\"url\":\"https://example.com/bob\""))
+    }
+
+    @Test
+    fun `site slugs remain distinct on case insensitive filesystems`() {
+        assertEquals("alice", safeSlug("alice"))
+        assertEquals("~41lice", safeSlug("Alice"))
+        assertEquals("~2E", safeSlug("."))
+        assertEquals("~2E~2E", safeSlug(".."))
     }
 
     private fun source(id: String, kind: String, fields: String = "", body: String = "") = SourceDocument(

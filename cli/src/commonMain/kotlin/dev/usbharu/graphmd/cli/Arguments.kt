@@ -235,7 +235,6 @@ internal object CliArguments {
                 parsed.reject(setOf("base", "force"))
                 if (parsed.positionals.isEmpty()) usage("site requires an output directory")
                 val base = parsed.singleValue("base", required = false) ?: "/"
-                if (!base.startsWith('/')) usage("--base must start with /")
                 CliCommand.Site(
                     outputDirectory = parsed.positionals.first(),
                     paths = parsed.positionals.drop(1),
@@ -414,7 +413,17 @@ private class CliUsageException(message: String) : RuntimeException(message)
 private val VALID_TIME_PATTERN = Regex("""([A-Za-z_][A-Za-z0-9_.:-]*)(?:\((.*)\))?""")
 private val PARAMETER_NAME = Regex("""[A-Za-z_][A-Za-z0-9_]*""")
 
-private fun normalizeBase(value: String): String = when (value) {
-    "/" -> value
-    else -> value.trimEnd('/') + "/"
+private fun normalizeBase(value: String): String {
+    if (value == "/") return value
+    if (!value.startsWith('/') || value.startsWith("//") || '\\' in value || '?' in value || '#' in value || '%' in value) {
+        throw CliUsageException("--base must be a safe absolute URL path")
+    }
+    val normalized = value.removeSuffix("/")
+    val segments = normalized.removePrefix("/").split('/')
+    if (segments.any { it.isEmpty() || it == "." || it == ".." || !BASE_SEGMENT.matches(it) }) {
+        throw CliUsageException("--base must be a safe absolute URL path")
+    }
+    return "$normalized/"
 }
+
+private val BASE_SEGMENT = Regex("[A-Za-z0-9_~.-]+")

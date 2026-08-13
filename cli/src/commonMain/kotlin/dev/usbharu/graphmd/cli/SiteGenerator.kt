@@ -20,8 +20,12 @@ internal fun GraphMdCli.site(command: CliCommand.Site, json: Boolean): CliResult
         stderr = "Output parent directory does not exist: ${command.outputDirectory}\n",
         exitCode = 2,
     )
-    val current = fileSystem.canonical(".")
-    if (output == "/" || output == current || sources.any { fileSystem.canonical(it.sourcePath) == output }) {
+    val protectedPaths = buildList {
+        add(fileSystem.canonical("."))
+        command.paths.ifEmpty { listOf(".") }.mapTo(this, fileSystem::canonical)
+        sources.mapTo(this) { fileSystem.canonical(it.sourcePath) }
+    }
+    if (isFileSystemRoot(output) || protectedPaths.any { isSameOrAncestor(output, it) }) {
         return CliResult(stderr = "Refusing unsafe site output directory: ${command.outputDirectory}\n", exitCode = 2)
     }
     when (fileSystem.kind(output)) {
@@ -43,15 +47,20 @@ internal fun GraphMdCli.site(command: CliCommand.Site, json: Boolean): CliResult
         )
     }
 
+    val staging = unusedSibling(fileSystem, output, "graphmd-tmp")
     try {
-        if (fileSystem.kind(output) == FileKind.Directory && command.force) clearOutput(fileSystem, output)
-        fileSystem.createDirectories(output)
+        fileSystem.createDirectories(staging)
         files.forEach { (relative, content) ->
-            val target = relative.split('/').fold(output) { parent, child -> fileSystem.child(parent, child) }
-            fileSystem.createDirectories(target.substringBeforeLast('/', output))
+            val segments = relative.split('/')
+            val parent = segments.dropLast(1).fold(staging) { directory, child ->
+                fileSystem.child(directory, child).also(fileSystem::createDirectories)
+            }
+            val target = fileSystem.child(parent, segments.last())
             fileSystem.writeText(target, content)
         }
+        installStagedSite(fileSystem, staging, output)
     } catch (exception: Throwable) {
+        runCatching { deleteTree(fileSystem, staging) }
         return CliResult(stderr = "Cannot generate site in $output: ${exception.message ?: "I/O error"}\n", exitCode = 1)
     }
 
@@ -77,14 +86,43 @@ private fun GraphMdCli.resolveSiteOutput(command: CliCommand.Site): String? {
     return fileSystem.child(fileSystem.canonical(parent), name)
 }
 
-private fun clearOutput(fileSystem: CliFileSystem, output: String) {
-    fileSystem.children(output).forEach { child ->
-        val name = child.replace('\\', '/').substringAfterLast('/')
-        if (name != "node_modules") deleteTree(fileSystem, child)
+private fun installStagedSite(fileSystem: CliFileSystem, staging: String, output: String) {
+    if (fileSystem.kind(output) != FileKind.Directory) {
+        fileSystem.atomicMove(staging, output)
+        return
     }
+    val backup = unusedSibling(fileSystem, output, "graphmd-backup")
+    fileSystem.atomicMove(output, backup)
+    val oldModules = fileSystem.child(backup, "node_modules")
+    val stagedModules = fileSystem.child(staging, "node_modules")
+    var modulesMoved = false
+    try {
+        if (fileSystem.kind(oldModules) == FileKind.Directory) {
+            fileSystem.atomicMove(oldModules, stagedModules)
+            modulesMoved = true
+        }
+        fileSystem.atomicMove(staging, output)
+    } catch (exception: Throwable) {
+        if (modulesMoved && fileSystem.kind(stagedModules) == FileKind.Directory) {
+            runCatching { fileSystem.atomicMove(stagedModules, oldModules) }
+        }
+        if (fileSystem.kind(output) == FileKind.Directory) runCatching { deleteTree(fileSystem, output) }
+        if (fileSystem.kind(backup) == FileKind.Directory) runCatching { fileSystem.atomicMove(backup, output) }
+        throw exception
+    }
+    deleteTree(fileSystem, backup)
+}
+
+private fun unusedSibling(fileSystem: CliFileSystem, output: String, suffix: String): String {
+    for (index in 0..999) {
+        val candidate = "$output.$suffix-$index"
+        if (fileSystem.kind(candidate) == null) return candidate
+    }
+    throw CliIoException("Cannot allocate a temporary output directory beside $output")
 }
 
 private fun deleteTree(fileSystem: CliFileSystem, path: String) {
+    if (fileSystem.kind(path) == null) return
     if (fileSystem.kind(path) == FileKind.Directory) fileSystem.children(path).forEach { child ->
         val canonical = runCatching { fileSystem.canonical(child) }.getOrNull()
         if (canonical != null && canonical.replace('\\', '/') != child.replace('\\', '/')) {
@@ -98,12 +136,33 @@ private fun deleteTree(fileSystem: CliFileSystem, path: String) {
     }
 }
 
+private fun isFileSystemRoot(path: String): Boolean {
+    val normalized = normalizeSafetyPath(path)
+    return normalized == "/" || WINDOWS_VOLUME_ROOT.matches(normalized) || UNC_ROOT.matches(normalized)
+}
+
+private fun isSameOrAncestor(ancestor: String, candidate: String): Boolean {
+    val normalizedAncestor = normalizeSafetyPath(ancestor)
+    val normalizedCandidate = normalizeSafetyPath(candidate)
+    val ignoreCase = WINDOWS_PATH.matches(normalizedAncestor) || WINDOWS_PATH.matches(normalizedCandidate)
+    return normalizedCandidate.equals(normalizedAncestor, ignoreCase) ||
+        normalizedCandidate.startsWith("$normalizedAncestor/", ignoreCase)
+}
+
+private fun normalizeSafetyPath(path: String): String {
+    val normalized = path.replace('\\', '/')
+    return if (normalized == "/") normalized else normalized.trimEnd('/')
+}
+
+private val WINDOWS_PATH = Regex("^[A-Za-z]:/.*")
+private val WINDOWS_VOLUME_ROOT = Regex("^[A-Za-z]:$")
+private val UNC_ROOT = Regex("^//[^/]+/[^/]+$")
+
 internal fun safeSlug(id: String): String = buildString {
     id.encodeToByteArray().forEach { byte ->
         val value = byte.toInt() and 0xff
         val character = value.toChar()
-        if (character in 'A'..'Z' || character in 'a'..'z' || character in '0'..'9' ||
-            character in setOf('_', '-', '.')
+        if (character in 'a'..'z' || character in '0'..'9' || character in setOf('_', '-')
         ) append(character) else append('~').append(value.toString(16).uppercase().padStart(2, '0'))
     }
 }

@@ -25,27 +25,32 @@ export default function graphMdIntegration(options = {}) {
   let siteBase = "/";
   let roots = [];
   let snapshot;
+  let rebuildQueue = Promise.resolve();
 
-  async function rebuild() {
-    const sources = await readSources(roots, extensions, projectRoot);
-    const compilation = graphMd.dev.usbharu.graphmd.astro.GraphMdAstro.compile(
-      JSON.stringify(sources),
-    );
-    const diagnostics = JSON.parse(compilation.diagnosticsJson());
+  function rebuild() {
+    const pending = rebuildQueue.then(async () => {
+      const sources = await readSources(roots, extensions, projectRoot);
+      const compilation = graphMd.dev.usbharu.graphmd.astro.GraphMdAstro.compile(
+        JSON.stringify(sources),
+      );
+      const diagnostics = JSON.parse(compilation.diagnosticsJson());
+      const nextSnapshot = {
+        successful: compilation.successful,
+        diagnostics,
+        graph: JSON.parse(compilation.graphJson()),
+        site: JSON.parse(compilation.siteJson(siteBase)),
+        search: JSON.parse(compilation.searchFilesJson()),
+        sources,
+      };
 
-    snapshot = {
-      successful: compilation.successful,
-      diagnostics,
-      graph: JSON.parse(compilation.graphJson()),
-      site: JSON.parse(compilation.siteJson(siteBase)),
-      search: JSON.parse(compilation.searchFilesJson()),
-      sources,
-    };
-
-    if (!snapshot.successful) {
-      throw new Error(formatDiagnostics(diagnostics));
-    }
-    return snapshot;
+      if (!nextSnapshot.successful) {
+        throw new Error(formatDiagnostics(diagnostics));
+      }
+      snapshot = nextSnapshot;
+      return snapshot;
+    });
+    rebuildQueue = pending.then(() => undefined, () => undefined);
+    return pending;
   }
 
   const vitePlugin = {
@@ -130,7 +135,7 @@ export default function graphMdIntegration(options = {}) {
     hooks: {
       "astro:config:setup": ({ config, updateConfig }) => {
         projectRoot = path.normalize(fileURLToPath(config.root));
-        siteBase = config.base;
+        siteBase = normalizeBase(config.base);
         roots = configuredRoots.map((root) => path.resolve(projectRoot, root));
         updateConfig({ vite: { plugins: [vitePlugin] } });
       },
@@ -232,4 +237,9 @@ function formatDiagnostics(diagnostics) {
 
 function normalizePath(value) {
   return value.split(path.sep).join("/");
+}
+
+function normalizeBase(value) {
+  const trimmed = value.trim().replace(/^\/+|\/+$/g, "");
+  return trimmed ? `/${trimmed}/` : "/";
 }

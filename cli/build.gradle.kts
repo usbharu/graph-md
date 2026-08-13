@@ -210,7 +210,7 @@ kotlin {
     sourceSets {
         commonMain {
             kotlin.srcDir(generateCliVersion)
-            kotlin.srcDir(generatedSiteTemplateDirectory)
+            kotlin.srcDir(files(generatedSiteTemplateDirectory).builtBy(generateSiteTemplate))
             dependencies {
                 implementation(project(":core"))
                 implementation(project(":query"))
@@ -223,10 +223,6 @@ kotlin {
             }
         }
     }
-}
-
-tasks.matching { it.name.startsWith("compileKotlin") }.configureEach {
-    dependsOn(generateSiteTemplate)
 }
 
 tasks.register<JavaExec>("run") {

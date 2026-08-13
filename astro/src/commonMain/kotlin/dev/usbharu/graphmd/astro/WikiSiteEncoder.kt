@@ -117,7 +117,7 @@ internal class WikiSiteEncoder(
             "title" to jsonString(firstHeading(document.body) ?: document.id),
             "kind" to jsonString(document.kind.name),
             "type" to jsonNullableString(node?.type),
-            "url" to jsonNullableString(node?.url),
+            "url" to jsonNullableString(node?.url?.let(::safeDocumentUrl)),
             "body" to jsonString(document.body),
             "embeds" to encodeEmbeds(document),
             "properties" to properties,
@@ -262,10 +262,19 @@ internal fun safeSlug(id: String): String = buildString {
     id.encodeToByteArray().forEach { byte ->
         val value = byte.toInt() and 0xff
         val character = value.toChar()
-        if (character.isLetterOrDigit() && value < 128 || character in setOf('_', '-', '.')) append(character)
+        if (character in 'a'..'z' || character in '0'..'9' || character in setOf('_', '-')) append(character)
         else append('~').append(value.toString(16).uppercase().padStart(2, '0'))
     }
 }
+
+private fun safeDocumentUrl(url: String): String? {
+    val value = url.trim()
+    if (value.isEmpty() || value.startsWith("//") || '\\' in value || value.any { it.code < 0x20 }) return null
+    val scheme = URL_SCHEME.find(value)?.groupValues?.get(1)?.lowercase()
+    return if (scheme == null || scheme == "http" || scheme == "https") value else null
+}
+
+private val URL_SCHEME = Regex("^([A-Za-z][A-Za-z0-9+.-]*):")
 
 private fun firstHeading(body: String): String? = body.lineSequence().map(String::trim)
     .firstOrNull { it.startsWith("# ") }?.removePrefix("# ")?.trim()?.trimEnd('#')?.trim()
