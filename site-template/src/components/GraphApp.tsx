@@ -21,6 +21,29 @@ function colorFor(value: string) {
   return palette[Math.abs(hash) % palette.length];
 }
 
+function graphStyle(dark: boolean): any[] {
+  const colors = dark ? {
+    label: "#e8edf4", nodeBorder: "#1b2027", edge: "#657284", arrow: "#7f8da0",
+    selectedEdge: "#79a6ff", edgeLabel: "#e8edf4", edgeLabelBackground: "#252c35",
+    contextEdge: "#9aabc0", search: "#f6c85f",
+  } : {
+    label: "#29313d", nodeBorder: "#ffffff", edge: "#b9c2d0", arrow: "#9aa6b7",
+    selectedEdge: "#4f7cff", edgeLabel: "#29313d", edgeLabelBackground: "#ffffff",
+    contextEdge: "#7c8da8", search: "#f5b942",
+  };
+  return [
+    { selector: "node", style: { label: "data(label)", "background-color": "data(color)", width: 36, height: 36, "border-width": 4, "border-color": colors.nodeBorder, "border-opacity": .95, color: colors.label, "font-size": 11, "font-weight": 600, "text-valign": "bottom", "text-margin-y": 9, "text-outline-color": dark ? "#171c22" : "#f8fafc", "text-outline-width": dark ? 2 : 1, "text-wrap": "ellipsis", "text-max-width": 130, "overlay-opacity": 0, "transition-property": "width height opacity border-width", "transition-duration": .18 } },
+    { selector: "node:selected", style: { width: 52, height: 52, "border-width": 7, "border-color": "data(color)", "border-opacity": .35, "font-size": 13, "font-weight": 700, "z-index": 20 } },
+    { selector: "node.hovered", style: { width: 44, height: 44, "z-index": 15 } },
+    { selector: "edge", style: { width: 1.4, "line-color": colors.edge, "target-arrow-color": colors.arrow, "target-arrow-shape": "triangle", "arrow-scale": .7, "curve-style": "unbundled-bezier", "control-point-distances": 24, "control-point-weights": .5, opacity: dark ? .78 : .68, "overlay-opacity": 0, "transition-property": "opacity width line-color", "transition-duration": .18 } },
+    { selector: "edge:selected", style: { width: 3, "line-color": colors.selectedEdge, "target-arrow-color": colors.selectedEdge, opacity: 1, label: "data(label)", color: colors.edgeLabel, "font-size": 9, "text-background-color": colors.edgeLabelBackground, "text-background-opacity": .96, "text-background-padding": 3 } },
+    { selector: ".context-dim", style: { opacity: dark ? .12 : .08 } },
+    { selector: ".context-edge", style: { width: 2.8, "line-color": colors.contextEdge, "target-arrow-color": colors.contextEdge, opacity: 1 } },
+    { selector: ".search-match", style: { width: 48, height: 48, "border-width": 7, "border-color": colors.search, "border-opacity": .65 } },
+    { selector: ".filtered-out", style: { display: "none" } },
+  ];
+}
+
 export default function GraphApp({ elements }: { elements: any[] }) {
   const container = useRef<HTMLDivElement>(null);
   const graphRef = useRef<cytoscape.Core | null>(null);
@@ -87,17 +110,7 @@ export default function GraphApp({ elements }: { elements: any[] }) {
       minZoom: .18,
       maxZoom: 3.2,
       boxSelectionEnabled: true,
-      style: [
-        { selector: "node", style: { label: "data(label)", "background-color": "data(color)", width: 36, height: 36, "border-width": 4, "border-color": "#ffffff", "border-opacity": .9, color: "#29313d", "font-size": 11, "font-weight": 600, "text-valign": "bottom", "text-margin-y": 9, "text-wrap": "ellipsis", "text-max-width": 130, "overlay-opacity": 0, "transition-property": "width height opacity border-width", "transition-duration": .18 } },
-        { selector: "node:selected", style: { width: 52, height: 52, "border-width": 7, "border-color": "data(color)", "border-opacity": .2, "font-size": 13, "font-weight": 700, "z-index": 20 } },
-        { selector: "node.hovered", style: { width: 44, height: 44, "z-index": 15 } },
-        { selector: "edge", style: { width: 1.4, "line-color": "#b9c2d0", "target-arrow-color": "#9aa6b7", "target-arrow-shape": "triangle", "arrow-scale": .7, "curve-style": "unbundled-bezier", "control-point-distances": 24, "control-point-weights": .5, opacity: .68, "overlay-opacity": 0, "transition-property": "opacity width line-color", "transition-duration": .18 } },
-        { selector: "edge:selected", style: { width: 3, "line-color": "#4f7cff", "target-arrow-color": "#4f7cff", opacity: 1, label: "data(label)", "font-size": 9, "text-background-color": "#fff", "text-background-opacity": .92, "text-background-padding": 3 } },
-        { selector: ".context-dim", style: { opacity: .08 } },
-        { selector: ".context-edge", style: { width: 2.8, "line-color": "#7c8da8", "target-arrow-color": "#7c8da8", opacity: .9 } },
-        { selector: ".search-match", style: { width: 48, height: 48, "border-width": 7, "border-color": "#f5b942", "border-opacity": .45 } },
-        { selector: ".filtered-out", style: { display: "none" } },
-      ] as any,
+      style: graphStyle(document.documentElement.dataset.theme === "dark") as any,
       layout: { name: "cose", animate: false, idealEdgeLength: 120, nodeRepulsion: 8500, gravity: .35 },
     });
     graphRef.current = graph;
@@ -112,7 +125,11 @@ export default function GraphApp({ elements }: { elements: any[] }) {
     });
     graph.on("dbltap", "node", (event) => { const route = event.target.data("route"); if (route) location.href = route; });
     graph.on("tap", (event) => { if (event.target === graph) { graph.elements().removeClass("context-dim context-edge").unselect(); setSelected(null); } });
-    return () => { graphRef.current = null; graph.destroy(); };
+    const themeObserver = new MutationObserver(() => {
+      graph.style(graphStyle(document.documentElement.dataset.theme === "dark") as any);
+    });
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => { themeObserver.disconnect(); graphRef.current = null; graph.destroy(); };
   }, [decoratedElements]);
 
   useEffect(() => {
