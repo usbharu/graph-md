@@ -16,13 +16,21 @@ This is the suggested way to use Gradle in production projects.
 
 [Learn more about Gradle tasks](https://docs.gradle.org/current/userguide/command_line_interface.html#common_tasks).
 
-The Gradle build consists of the `core`, `query`, `lsp`, and `cli` subprojects.
+The Gradle build consists of the `core`, `query`, `astro`, `lsp`, and `cli`
+subprojects.
 
 ## Documentation
 
+- [Documentation index](docs/README.md) links all project and submodule guides.
 - [Timeline guide](docs/timeline-guide.md) explains the temporal model with practical GraphMD examples.
 - [GraphMD specification](docs/spec.md) defines the normative syntax and semantics.
 - [Query module guide](query/README.md) covers search, GMQL, and static indexes.
+- [Static Wiki generation](docs/site-generation.md) covers the CLI, Astro SSG,
+  template packaging, Gradle tasks, development, and deployment.
+- [CLI guide](cli/README.md), [Astro integration](astro/README.md), and
+  [Wiki template development](site-template/README.md) contain module-specific
+  instructions. The [Markdown renderer guide](markdown-it-graphmd/README.md)
+  covers GraphMD rendering and its embedded browser asset.
 
 ## Graph search engine
 
@@ -86,6 +94,27 @@ index, but rejects a non-empty directory containing unrelated files.
 ```
 
 Each successfully processed file is rewritten only after all of its embed blocks have rendered. `--json` returns a structured update/skip summary.
+
+`site` generates an Astro static-site project with Wiki pages,
+ID-resolved GraphMD links, search data, and a graph view:
+
+```bash
+./gradlew :cli:run --args="site ./wiki ./documents --base /wiki/"
+cd wiki
+pnpm install
+pnpm build
+```
+
+Deploy the generated `dist/` directory to any static host. Use `pnpm dev` for
+local authoring previews. The output directory must be new or empty unless
+`--force` is supplied; `--force` replaces the existing output directory.
+
+The generated project reads the configured GraphMD source roots during
+`pnpm dev` and `pnpm build`; the completed `dist/` is self-contained. See
+[Static Wiki generation](docs/site-generation.md) for the architecture and
+Gradle tasks, [the CLI guide](cli/README.md) for command behavior, and
+[the template guide](site-template/README.md) for direct UI development.
+
 Inline queries and `--query-file` are supported. Repeat `--param NAME=VALUE`
 for prepared-query parameters; `null`, booleans, integers, decimals, and
 quoted JSON strings are inferred, while other values are strings. Results are

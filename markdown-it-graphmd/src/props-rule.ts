@@ -129,66 +129,86 @@ export function renderPropsInline(tokens: any[], idx: number): string {
 }
 
 function renderBoundProps(tag: "div" | "span", propsJson: string | null): string {
-  if (!propsJson) return `<${tag} class="graphmd-props"></${tag}>`;
+  const variant = tag === "div" ? "block" : "inline";
+  const classes = `graphmd-props graphmd-props--${variant}`;
+  if (!propsJson) return `<${tag} class="${classes}"></${tag}>`;
   let props: Record<string, unknown>;
   try {
     props = JSON.parse(propsJson) as Record<string, unknown>;
   } catch {
-    return `<${tag} class="graphmd-props"></${tag}>`;
+    return `<${tag} class="${classes}"></${tag}>`;
   }
   const values = Object.entries(props).map(([name, value]) => {
-    return `<span data-props-name="${escapeAttr(name)}"><span class="graphmd-prop-value">${renderPropertyValue(value)}</span><span class="graphmd-prop-annotations"><sub class="graphmd-prop-name">${escapeText(name)}</sub></span></span>`;
+    const hiddenLabel = variant === "inline" ? ' aria-hidden="true"' : "";
+    return `<span class="graphmd-prop" data-props-name="${escapeAttr(name)}"><span class="graphmd-prop-name"${hiddenLabel}>${escapeText(name)}</span><span class="graphmd-prop-values">${renderPropertyValue(value)}</span></span>`;
   }).join("");
-  return `<${tag} class="graphmd-props" data-props-bind="${escapeAttr(propsJson)}">${values}</${tag}>`;
+  return `<${tag} class="${classes}" data-props-bind="${escapeAttr(propsJson)}">${values}</${tag}>`;
 }
 
 function renderPropertyValue(value: unknown): string {
   if (!isPropertyAssertions(value)) {
-    return escapeText(displayValue(value));
+    return renderAssertionValue(value, "plain");
   }
 
-  if (value.length === 1) {
-    const entry = value[0];
-    return `${escapeText(displayValue(entry.value))}${renderTimelines(entry)}`;
-  }
+  const hasAlternatives = value.length > 1;
+  return value.map((entry) => {
+    const validities = renderValidities(entry);
+    const kind = validities ? "temporal" : "default";
+    const alternativeClass = hasAlternatives ? " graphmd-prop-assertion--alternative" : "";
+    return `<span class="graphmd-prop-assertion graphmd-prop-assertion--${kind}${alternativeClass}">${renderAssertionValue(entry.value, kind)}${validities}</span>`;
+  }).join("");
+}
 
-  const entries = value.map((entry) => {
-    return `${escapeText(displayArrayEntry(entry.value))}${renderTimelines(entry)}`;
+function renderAssertionValue(value: unknown, kind: "plain" | "default" | "temporal"): string {
+  return `<span class="graphmd-prop-value graphmd-prop-value--${kind}">${renderHumanValue(value)}</span>`;
+}
+
+function renderValidities(entry: Record<string, unknown>): string {
+  if (!Array.isArray(entry.validTime)) return "";
+  const seen = new Set<string>();
+  const validities = entry.validTime.flatMap((validTime) => {
+    if (!isRecord(validTime) || typeof validTime.timeline !== "string") return [];
+    const key = JSON.stringify(validTime);
+    if (seen.has(key)) return [];
+    seen.add(key);
+
+    const hasRange = "from" in validTime || "to" in validTime;
+    const range = hasRange
+      ? `<span class="graphmd-prop-valid-range"><span>${renderRangeEnd(validTime.from, "始点なし")}</span><span class="graphmd-prop-range-separator" aria-hidden="true">–</span><span>${renderRangeEnd(validTime.to, "継続中")}</span></span>`
+      : "";
+    return [`<span class="graphmd-prop-validity"><span class="graphmd-prop-timeline">${escapeText(validTime.timeline)}</span>${range}</span>`];
   });
-  return `[${entries.join(",")}]`;
+  return validities.length > 0 ? `<span class="graphmd-prop-validities">${validities.join("")}</span>` : "";
 }
 
-function renderTimelines(entry: Record<string, unknown>): string {
-  const timelines = displayTimelines(entry);
-  return timelines.length > 0
-    ? `<sup class="graphmd-prop-valid-time">${escapeText(timelines.join(","))}</sup>`
-    : "";
+function renderRangeEnd(value: unknown, fallback: string): string {
+  return value === undefined || value === null
+    ? `<span class="graphmd-prop-open-time">${fallback}</span>`
+    : renderHumanValue(value);
 }
 
-function displayArrayEntry(value: unknown): string {
-  const serialised = JSON.stringify(value);
-  return serialised === undefined ? String(value) : serialised;
-}
-
-function displayValue(value: unknown): string {
+function renderHumanValue(value: unknown): string {
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return String(value);
+    return escapeText(String(value));
   }
-  if (isRecord(value) && typeof value.default === "string") {
-    return value.default;
+  if (value === null || value === undefined) {
+    return `<span class="graphmd-prop-empty">—</span>`;
   }
-  return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return `<span class="graphmd-prop-list">${value.map((item) => `<span>${renderHumanValue(item)}</span>`).join("")}</span>`;
+  }
+  if (isRecord(value)) {
+    const entries = Object.entries(value);
+    if (entries.length === 1 && entries[0][0] === "default") {
+      return renderHumanValue(entries[0][1]);
+    }
+    return `<span class="graphmd-prop-fields">${entries.map(([key, fieldValue]) => `<span class="graphmd-prop-field"><span class="graphmd-prop-field-name">${escapeText(formatFieldName(key))}</span><span class="graphmd-prop-field-value">${renderHumanValue(fieldValue)}</span></span>`).join("")}</span>`;
+  }
+  return escapeText(String(value));
 }
 
-function displayTimelines(entry: Record<string, unknown>): string[] {
-  if (!Array.isArray(entry.validTime)) return [];
-  const timelines: string[] = [];
-  for (const validTime of entry.validTime) {
-    if (isRecord(validTime) && typeof validTime.timeline === "string" && !timelines.includes(validTime.timeline)) {
-      timelines.push(validTime.timeline);
-    }
-  }
-  return timelines;
+function formatFieldName(name: string): string {
+  return name.startsWith("lang:") ? name.slice("lang:".length) : name;
 }
 
 function isPropertyAssertions(value: unknown): value is Record<string, unknown>[] {

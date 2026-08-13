@@ -16,6 +16,357 @@ import kotlin.test.assertTrue
 
 class GraphMdCliTest {
     @Test
+    fun `site generates an Astro project linked to live Markdown sources`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "/workspace/person.md" to nodeType("Person"),
+                "/workspace/alice.md" to node("alice", "Person", "# Alice\n\nHello @link[Bob](bob friend)"),
+                "/workspace/bob.md" to node("bob", "Person", "# Bob"),
+                "/workspace/friend.md" to """
+                    ---
+                    id: friend
+                    kind: RelType
+                    ---
+                """.trimIndent(),
+            ),
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/site", "/workspace", "--base", "/wiki", "--json"))
+
+        assertEquals(0, result.exitCode, result.stderr)
+        assertTrue(result.stdout.contains("\"documents\":4"))
+        val generated = fileSystem.contentsUnder("/site")
+        assertTrue("/site/astro.config.mjs" in generated)
+        assertTrue("/site/src/pages/documents/[slug].astro" in generated)
+        assertFalse(generated.keys.any { it.startsWith("/site/documents/") })
+        assertTrue("/site/vendor/graph-md-astro/integration.mjs" in generated)
+        assertTrue("/site/runtime-encoded/graph-md-query-runtime.js.gz.b64" in generated)
+        assertTrue("/site/runtime-encoded/markdown-it-graphmd.js.gz.b64" in generated)
+        assertTrue(generated.getValue("/site/astro.config.mjs").contains("gunzipSync"))
+        assertTrue(generated.getValue("/site/src/lib/markdown.ts").contains("graphMdPlugin"))
+        assertTrue(generated.getValue("/site/src/components/SearchApp.tsx").contains("GraphMdWebSearch"))
+        assertTrue(generated.getValue("/site/graphmd.config.mjs").contains("base: \"/wiki"))
+        assertTrue(generated.getValue("/site/graphmd.config.mjs").contains("roots: [\"/workspace\"]"))
+        assertTrue(generated.getValue("/site/src/lib/site.ts").contains("virtual:graphmd/site"))
+        assertFalse("/site/src/generated/site.json" in generated)
+        assertFalse(generated.getValue("/site/package.json").contains("workspace:"))
+        assertTrue(generated.getValue("/site/package.json").contains("file:./vendor/graph-md-astro"))
+        assertFalse(generated.getValue("/site/package.json").contains("test:prototype-keys"))
+        assertFalse(generated.getValue("/site/pnpm-lock.yaml").contains("astro/build/dist"))
+        assertTrue(generated.getValue("/site/pnpm-lock.yaml").contains("directory: ./vendor/graph-md-astro"))
+        assertTrue(generated.getValue("/site/package.json").contains("\"@astrojs/react\": \"5.0.7\""))
+        assertTrue(generated.getValue("/site/package.json").contains("\"astro\": \"6.4.8\""))
+    }
+
+    @Test
+    fun `site references structured Markdown without copying it`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "/workspace/Person.md" to """
+                    ---
+                    id: Person
+                    kind: NodeType
+                    extends: [Living]
+                    props:
+                      name: { type: string, required: true }
+                    ---
+                """.trimIndent(),
+                "/workspace/Living.md" to nodeType("Living"),
+                "/workspace/Idol.md" to """
+                    ---
+                    id: Idol
+                    kind: NodeType
+                    extends: [Person]
+                    ---
+                """.trimIndent(),
+                "/workspace/alice.md" to """
+                    ---
+                    id: alice
+                    kind: Node
+                    type: Person
+                    props:
+                      name: Alice
+                    ---
+                    @link[Bob](bob friend)
+                """.trimIndent(),
+                "/workspace/bob.md" to """
+                    ---
+                    id: bob
+                    kind: Node
+                    type: Person
+                    props:
+                      name: Bob
+                    ---
+                """.trimIndent(),
+                "/workspace/friend.md" to """
+                    ---
+                    id: friend
+                    kind: RelType
+                    from: [Person]
+                    to: [Person]
+                    ---
+                """.trimIndent(),
+                "/workspace/Reality.md" to timeline("Reality"),
+                "/workspace/IfWorld.md" to """
+                    ---
+                    id: IfWorld
+                    kind: Timeline
+                    derivedFrom:
+                      timeline: Reality
+                      kind: fork
+                    mapsTo: Reality
+                    ---
+                """.trimIndent(),
+            ),
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/site", "/workspace", "--json"))
+
+        assertEquals(0, result.exitCode, result.stderr)
+        val generated = fileSystem.contentsUnder("/site")
+        assertFalse(generated.keys.any { it.startsWith("/site/documents/") })
+        assertTrue(generated.getValue("/site/graphmd.config.mjs").contains("roots: [\"/workspace\"]"))
+    }
+
+    @Test
+    fun `site refuses non-empty output unless force is specified`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "/workspace/person.md" to nodeType("Person"),
+                "/workspace/alice.md" to node("alice", "Person"),
+                "/site/keep.txt" to "keep",
+                "/site/pnpm-lock.yaml" to "stale lockfile",
+            ),
+        )
+        val cli = GraphMdCli(fileSystem)
+
+        val refused = cli.run(listOf("site", "/site", "/workspace"))
+        assertEquals(1, refused.exitCode)
+        assertEquals("keep", fileSystem.contentsUnder("/site").getValue("/site/keep.txt"))
+
+        val replaced = cli.run(listOf("site", "/site", "/workspace", "--force"))
+        assertEquals(0, replaced.exitCode, replaced.stderr)
+        assertFalse("/site/keep.txt" in fileSystem.contentsUnder("/site"))
+        assertTrue(fileSystem.contentsUnder("/site").getValue("/site/pnpm-lock.yaml") != "stale lockfile")
+    }
+
+    @Test
+    fun `site force refuses to replace an input directory`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "/workspace/docs/person.md" to nodeType("Person"),
+                "/workspace/docs/keep.txt" to "must survive",
+            ),
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/workspace/docs", "/workspace/docs", "--force"))
+
+        assertEquals(2, result.exitCode)
+        assertTrue(result.stderr.contains("Refusing unsafe site output directory"))
+        assertEquals("must survive", fileSystem.contentsUnder("/workspace/docs").getValue("/workspace/docs/keep.txt"))
+    }
+
+    @Test
+    fun `site force refuses an ancestor of the current directory`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "/workspace/person.md" to nodeType("Person"),
+                "/keep.txt" to "must survive",
+            ),
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/", "/workspace", "--force"))
+
+        assertEquals(2, result.exitCode)
+        assertEquals("must survive", fileSystem.contentsUnder("/").getValue("/keep.txt"))
+    }
+
+    @Test
+    fun `site force compares UNC paths case insensitively`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "//server/share/docs/person.md" to nodeType("Person"),
+                "//SERVER/Share/docs/keep.txt" to "must survive",
+            ),
+            aliases = mapOf(
+                "/source" to "//server/share/docs",
+                "/output" to "//SERVER/Share/docs",
+            ),
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/output", "/source", "--force"))
+
+        assertEquals(2, result.exitCode)
+        assertEquals("must survive", fileSystem.contentsUnder("//SERVER/Share/docs").getValue("//SERVER/Share/docs/keep.txt"))
+    }
+
+    @Test
+    fun `site creates nested template paths with Windows separators`() {
+        val fileSystem = FakeFileSystem(
+            mapOf("/workspace/person.md" to nodeType("Person")),
+            emittedSeparator = '\\',
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/site", "/workspace"))
+
+        assertEquals(0, result.exitCode, result.stderr)
+        assertTrue("/site/src/pages/documents/[slug].astro" in fileSystem.contentsUnder("/site"))
+    }
+
+    @Test
+    fun `site rejects unsafe base paths`() {
+        val fileSystem = FakeFileSystem(mapOf("/workspace/person.md" to nodeType("Person")))
+        val unsafe = listOf("//evil.example", "/a/../b", "/wiki?x", "/wiki#x", "/wiki\\x", "/wiki%2fadmin")
+
+        unsafe.forEach { base ->
+            val result = GraphMdCli(fileSystem).run(listOf("site", "/site", "/workspace", "--base", base))
+            assertEquals(2, result.exitCode, "base=$base")
+            assertTrue(result.stderr.contains("--base must be a safe absolute URL path"), "base=$base")
+        }
+    }
+
+    @Test
+    fun `site force preserves the existing output when generation fails`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "/workspace/person.md" to nodeType("Person"),
+                "/site/old.txt" to "old site",
+            ),
+            failWriteAt = 2,
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/site", "/workspace", "--force"))
+
+        assertEquals(1, result.exitCode)
+        assertEquals(mapOf("/site/old.txt" to "old site"), fileSystem.contentsUnder("/site"))
+        assertFalse(fileSystem.allPaths().any { ".graphmd-tmp-" in it || ".graphmd-backup-" in it })
+    }
+
+    @Test
+    fun `site force restores the complete output when preserving node modules fails`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "/workspace/person.md" to nodeType("Person"),
+                "/site/old.txt" to "old site",
+                "/site/node_modules/package/index.js" to "old dependency",
+            ),
+            failAtomicMoveAt = setOf(3),
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/site", "/workspace", "--force"))
+
+        assertEquals(1, result.exitCode)
+        assertEquals("old site", fileSystem.contentsUnder("/site").getValue("/site/old.txt"))
+        assertEquals(
+            "old dependency",
+            fileSystem.contentsUnder("/site").getValue("/site/node_modules/package/index.js"),
+        )
+    }
+
+    @Test
+    fun `site force restores output when the first backup restore attempt fails`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "/workspace/person.md" to nodeType("Person"),
+                "/site/old.txt" to "old site",
+                "/site/node_modules/package/index.js" to "old dependency",
+            ),
+            failAtomicMoveAt = setOf(3, 5),
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/site", "/workspace", "--force"))
+
+        assertEquals(1, result.exitCode)
+        assertEquals("old site", fileSystem.contentsUnder("/site").getValue("/site/old.txt"))
+        assertEquals(
+            "old dependency",
+            fileSystem.contentsUnder("/site").getValue("/site/node_modules/package/index.js"),
+        )
+        assertFalse(fileSystem.allPaths().any { ".graphmd-backup-" in it })
+    }
+
+    @Test
+    fun `site force restores output when moving the failed installation aside needs fallback`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "/workspace/person.md" to nodeType("Person"),
+                "/site/old.txt" to "old site",
+                "/site/node_modules/package/index.js" to "old dependency",
+            ),
+            failAtomicMoveAt = setOf(3, 4),
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/site", "/workspace", "--force"))
+
+        assertEquals(1, result.exitCode)
+        assertEquals("old site", fileSystem.contentsUnder("/site").getValue("/site/old.txt"))
+        assertEquals(
+            "old dependency",
+            fileSystem.contentsUnder("/site").getValue("/site/node_modules/package/index.js"),
+        )
+        assertFalse(fileSystem.allPaths().any { ".graphmd-backup-" in it })
+    }
+
+    @Test
+    fun `site force preserves the backup and reports its path when rollback cannot complete`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "/workspace/person.md" to nodeType("Person"),
+                "/site/old.txt" to "old site",
+                "/site/node_modules/package/index.js" to "old dependency",
+            ),
+            failAtomicMoveAt = setOf(3, 4),
+            failMoveAt = setOf(1),
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/site", "/workspace", "--force"))
+
+        assertEquals(1, result.exitCode)
+        assertTrue(result.stderr.contains("rollback failed"), result.stderr)
+        assertTrue(result.stderr.contains("/site.graphmd-backup-0"), result.stderr)
+        assertEquals(
+            "old site",
+            fileSystem.contentsUnder("/site.graphmd-backup-0").getValue("/site.graphmd-backup-0/old.txt"),
+        )
+        assertEquals(
+            "old dependency",
+            fileSystem.contentsUnder("/site.graphmd-backup-0")
+                .getValue("/site.graphmd-backup-0/node_modules/package/index.js"),
+        )
+    }
+
+    @Test
+    fun `site resolves a missing Windows drive absolute output from the drive root`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "C:/repo/docs/person.md" to nodeType("Person"),
+                "C:/repo/site/keep.txt" to "unrelated existing directory",
+            ),
+            currentDirectory = "C:/repo",
+            windowsDriveCurrentDirectories = mapOf("C:" to "C:/repo"),
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "C:\\site", "C:/repo/docs", "--force"))
+
+        assertEquals(0, result.exitCode, result.stderr)
+        assertEquals(
+            "unrelated existing directory",
+            fileSystem.contentsUnder("C:/repo/site").getValue("C:/repo/site/keep.txt"),
+        )
+        assertTrue("C:/site/package.json" in fileSystem.contentsUnder("C:/site"))
+    }
+
+    @Test
+    fun `safe site slug encodes non path characters without collisions`() {
+        assertEquals("alice", safeSlug("alice"))
+        assertEquals("~41lice", safeSlug("Alice"))
+        assertEquals("a~2Fb", safeSlug("a/b"))
+        assertEquals("~2E", safeSlug("."))
+        assertEquals("~2E~2E", safeSlug(".."))
+        assertEquals("~E3~81~82", safeSlug("あ"))
+    }
+
+    @Test
     fun `calendar pattern JSON preserves year numbering`() {
         fun json(numbering: YearNumbering): String = TemporalCoordinateSpec.CalendarPattern(
             CalendarKind.Gregorian,
@@ -1614,9 +1965,16 @@ private class FakeFileSystem(
     files: Map<String, String>,
     private val aliases: Map<String, String> = emptyMap(),
     failWriteAt: Int? = null,
+    private val emittedSeparator: Char = '/',
+    private val failAtomicMoveAt: Set<Int> = emptySet(),
+    private val failMoveAt: Set<Int> = emptySet(),
+    private val currentDirectory: String = "/workspace",
+    private val windowsDriveCurrentDirectories: Map<String, String> = emptyMap(),
 ) : CliFileSystem {
     private val mutableFiles = files.toMutableMap()
     private var writeCount = 0
+    private var atomicMoveCount = 0
+    private var moveCount = 0
     private var failureWriteNumber = failWriteAt
     private val directories: MutableSet<String> = buildSet {
         add("/")
@@ -1625,6 +1983,10 @@ private class FakeFileSystem(
             while (current.isNotEmpty()) {
                 add(current)
                 if (current == "/") break
+                if (WINDOWS_TEST_DRIVE_PREFIX.matches(current)) {
+                    add("$current/")
+                    break
+                }
                 current = current.substringBeforeLast('/', missingDelimiterValue = "/")
             }
         }
@@ -1637,9 +1999,11 @@ private class FakeFileSystem(
     }
 
     override fun canonical(path: String): String {
-        val absolute = when (path) {
-            "." -> "/workspace"
-            else -> path.removeSuffix("/").ifEmpty { "/" }
+        val normalized = path.replace('\\', '/')
+        val absolute = when (normalized) {
+            "." -> currentDirectory
+            in windowsDriveCurrentDirectories -> windowsDriveCurrentDirectories.getValue(normalized)
+            else -> if (WINDOWS_TEST_DRIVE_ROOT.matches(normalized)) normalized else normalized.removeSuffix("/").ifEmpty { "/" }
         }
         return aliases[absolute] ?: absolute
     }
@@ -1655,7 +2019,14 @@ private class FakeFileSystem(
     override fun readText(path: String): String = mutableFiles.getValue(canonical(path))
 
     override fun child(path: String, name: String): String =
-        canonical(path).let { if (it == "/") "/$name" else "$it/$name" }
+        canonical(path).let {
+            when {
+                it == "/" -> "/$name"
+                WINDOWS_TEST_DRIVE_ROOT.matches(it) -> "$it$name"
+                else -> "$it/$name"
+            }
+        }
+            .let { if (emittedSeparator == '\\') it.replace('/', '\\') else it }
 
     override fun createDirectories(path: String) {
         val canonical = canonical(path)
@@ -1678,6 +2049,8 @@ private class FakeFileSystem(
     }
 
     override fun move(source: String, destination: String) {
+        moveCount++
+        if (moveCount in failMoveAt) error("simulated move failure")
         val canonicalSource = canonical(source)
         val canonicalDestination = canonical(destination)
         check(kind(canonicalDestination) == null) { "Destination already exists: $destination" }
@@ -1711,6 +2084,20 @@ private class FakeFileSystem(
         if (mustExist && !removed) error("Path does not exist: $path")
     }
 
+    override fun atomicMove(source: String, destination: String) {
+        atomicMoveCount++
+        if (atomicMoveCount in failAtomicMoveAt) error("simulated atomic move failure")
+        val from = canonical(source)
+        val to = canonical(destination)
+        if (kind(from) == null || kind(to) != null) error("Cannot move $source to $destination")
+        val movedFiles = mutableFiles.filterKeys { it == from || it.startsWith("$from/") }
+        val movedDirectories = directories.filter { it == from || it.startsWith("$from/") }
+        mutableFiles.keys.removeAll(movedFiles.keys)
+        directories.removeAll(movedDirectories.toSet())
+        movedDirectories.forEach { directories += to + it.removePrefix(from) }
+        movedFiles.forEach { (path, content) -> mutableFiles[to + path.removePrefix(from)] = content }
+    }
+
     fun contentsUnder(path: String): Map<String, String> {
         val prefix = canonical(path).let { if (it == "/") "/" else "$it/" }
         return mutableFiles.entries
@@ -1718,4 +2105,9 @@ private class FakeFileSystem(
             .sortedBy { it.key }
             .associateTo(linkedMapOf()) { it.toPair() }
     }
+
+    fun allPaths(): Set<String> = mutableFiles.keys + directories
 }
+
+private val WINDOWS_TEST_DRIVE_PREFIX = Regex("^[A-Za-z]:$")
+private val WINDOWS_TEST_DRIVE_ROOT = Regex("^[A-Za-z]:/$")
