@@ -21,6 +21,10 @@ function colorFor(value: string) {
   return palette[Math.abs(hash) % palette.length];
 }
 
+function nodeSize(linkCount: number) {
+  return Math.round(30 + Math.min(28, Math.sqrt(linkCount) * 7));
+}
+
 function graphStyle(dark: boolean): any[] {
   const colors = dark ? {
     label: "#e8edf4", nodeBorder: "#1b2027", edge: "#657284", arrow: "#7f8da0",
@@ -32,14 +36,14 @@ function graphStyle(dark: boolean): any[] {
     contextEdge: "#7c8da8", search: "#f5b942",
   };
   return [
-    { selector: "node", style: { label: "data(label)", "background-color": "data(color)", width: 36, height: 36, "border-width": 4, "border-color": colors.nodeBorder, "border-opacity": .95, color: colors.label, "font-size": 11, "font-weight": 600, "text-valign": "bottom", "text-margin-y": 9, "text-outline-color": dark ? "#171c22" : "#f8fafc", "text-outline-width": dark ? 2 : 1, "text-wrap": "ellipsis", "text-max-width": 130, "overlay-opacity": 0, "transition-property": "width height opacity border-width", "transition-duration": .18 } },
-    { selector: "node:selected", style: { width: 52, height: 52, "border-width": 7, "border-color": "data(color)", "border-opacity": .35, "font-size": 13, "font-weight": 700, "z-index": 20 } },
-    { selector: "node.hovered", style: { width: 44, height: 44, "z-index": 15 } },
+    { selector: "node", style: { label: "data(label)", "background-color": "data(color)", width: "data(size)", height: "data(size)", "border-width": 4, "border-color": colors.nodeBorder, "border-opacity": .95, color: colors.label, "font-size": 11, "font-weight": 600, "text-valign": "bottom", "text-margin-y": 9, "text-outline-color": dark ? "#171c22" : "#f8fafc", "text-outline-width": dark ? 2 : 1, "text-wrap": "ellipsis", "text-max-width": 130, "overlay-opacity": 0, "transition-property": "width height opacity border-width", "transition-duration": .18 } },
+    { selector: "node:selected", style: { width: "data(selectedSize)", height: "data(selectedSize)", "border-width": 7, "border-color": "data(color)", "border-opacity": .35, "font-size": 13, "font-weight": 700, "z-index": 20 } },
+    { selector: "node.hovered", style: { width: "data(hoverSize)", height: "data(hoverSize)", "z-index": 15 } },
     { selector: "edge", style: { width: 1.4, "line-color": colors.edge, "target-arrow-color": colors.arrow, "target-arrow-shape": "triangle", "arrow-scale": .7, "curve-style": "unbundled-bezier", "control-point-distances": 24, "control-point-weights": .5, opacity: dark ? .78 : .68, "overlay-opacity": 0, "transition-property": "opacity width line-color", "transition-duration": .18 } },
     { selector: "edge:selected", style: { width: 3, "line-color": colors.selectedEdge, "target-arrow-color": colors.selectedEdge, opacity: 1, label: "data(label)", color: colors.edgeLabel, "font-size": 9, "text-background-color": colors.edgeLabelBackground, "text-background-opacity": .96, "text-background-padding": 3 } },
     { selector: ".context-dim", style: { opacity: dark ? .12 : .08 } },
     { selector: ".context-edge", style: { width: 2.8, "line-color": colors.contextEdge, "target-arrow-color": colors.contextEdge, opacity: 1 } },
-    { selector: ".search-match", style: { width: 48, height: 48, "border-width": 7, "border-color": colors.search, "border-opacity": .65 } },
+    { selector: ".search-match", style: { width: "data(searchSize)", height: "data(searchSize)", "border-width": 7, "border-color": colors.search, "border-opacity": .65 } },
     { selector: ".filtered-out", style: { display: "none" } },
   ];
 }
@@ -55,11 +59,26 @@ export default function GraphApp({ elements }: { elements: any[] }) {
   const nodeData = useMemo(() => elements.filter((element) => !element.data?.source).map((element) => element.data), [elements]);
   const edgeCount = elements.length - nodeData.length;
   const types = useMemo(() => [...new Set(nodeData.map((node) => String(node.type ?? node.kind ?? "Node")))].sort(), [nodeData]);
-  const decoratedElements = useMemo(() => elements.map((element) => {
-    if (element.data?.source) return element;
-    const type = String(element.data.type ?? element.data.kind ?? "Node");
-    return { ...element, data: { ...element.data, type, color: colorFor(type) } };
-  }), [elements]);
+  const decoratedElements = useMemo(() => {
+    const linkCounts = new Map<string, number>();
+    for (const element of elements) {
+      const source = element.data?.source;
+      const target = element.data?.target;
+      if (!source || !target) continue;
+      linkCounts.set(String(source), (linkCounts.get(String(source)) ?? 0) + 1);
+      if (target !== source) linkCounts.set(String(target), (linkCounts.get(String(target)) ?? 0) + 1);
+    }
+    return elements.map((element) => {
+      if (element.data?.source) return element;
+      const type = String(element.data.type ?? element.data.kind ?? "Node");
+      const links = linkCounts.get(String(element.data.id)) ?? 0;
+      const size = nodeSize(links);
+      return {
+        ...element,
+        data: { ...element.data, type, color: colorFor(type), links, size, hoverSize: size + 7, searchSize: size + 12, selectedSize: size + 14 },
+      };
+    });
+  }, [elements]);
   const matches = useMemo(() => {
     const value = query.trim().toLocaleLowerCase();
     if (!value) return [];
