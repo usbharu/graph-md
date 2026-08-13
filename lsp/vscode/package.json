@@ -115,6 +115,6 @@
     "esbuild": "^0.28.1",
     "markdown-it-graphmd": "file:../../markdown-it-graphmd",
     "typescript": "^7.0.0",
-    "vscode-languageclient": "^9.0.1"
+    "vscode-languageclient": "^10.0.0"
   }
 }

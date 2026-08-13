@@ -215,6 +215,8 @@ private class GraphMdWorkspaceService(
 }
 
 internal class GraphMdWorkspaceIndex(
+    private val buildSearchEngine: (GraphCompilationResult, List<SourceDocument>) -> GraphSearchEngine =
+        GraphSearchEngine::build,
     private val compileSources: (List<SourceDocument>) -> GraphCompilationResult = GraphCompiler()::compileSources,
 ) {
     private data class WorkspaceSnapshot(
@@ -1865,7 +1867,7 @@ private fun ReferenceTargetKind.displayName(): String = when (this) {
                 ?.takeIf { it.generation == workspace.generation }
                 ?.let { return it.engine }
         }
-        val candidate = GraphSearchEngine.build(
+        val candidate = buildSearchEngine(
             workspace.compilation,
             workspace.documents.toSourceDocuments(),
         )
@@ -2141,6 +2143,7 @@ private fun EmbedDiagnostic.toSearchDiagnostic(): GraphMdSearchDiagnostic =
 private fun TemporalCoordinateSpec.displayName(): String = when (this) {
     TemporalCoordinateSpec.Number -> "number"
     is TemporalCoordinateSpec.Calendar -> "calendar:${calendar.name.lowercase()}"
+    is TemporalCoordinateSpec.CalendarPattern -> "calendar-pattern:${fields.joinToString(",") { it.name.replaceFirstChar(Char::lowercase) }}"
     is TemporalCoordinateSpec.Frame -> "frame"
     is TemporalCoordinateSpec.Timecode -> "timecode:${actualFps}"
     is TemporalCoordinateSpec.Era -> "era"

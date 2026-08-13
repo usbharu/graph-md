@@ -251,6 +251,7 @@ private fun comparePositiveFractions(
 sealed interface TemporalCoordinate {
     data class Rational(val value: ExactRational) : TemporalCoordinate
     data class CalendarDate(val year: Long, val month: Int, val day: Int) : TemporalCoordinate
+    data class CalendarPattern(val fields: Map<CalendarField, Long>) : TemporalCoordinate
     data class EraDate(val era: String, val year: Long, val month: Int, val day: Int) : TemporalCoordinate
     data class FrameIndex(val value: Long) : TemporalCoordinate
     data class Timecode(val hours: Int, val minutes: Int, val seconds: Int, val frames: Int) : TemporalCoordinate
@@ -263,6 +264,16 @@ sealed interface TemporalCoordinateSpec {
         val calendar: CalendarKind,
         val numbering: YearNumbering = YearNumbering.CommonEra,
     ) : TemporalCoordinateSpec
+    data class CalendarPattern(
+        val calendar: CalendarKind,
+        val fields: List<CalendarField>,
+        val numbering: YearNumbering = YearNumbering.CommonEra,
+        val granularity: CalendarGranularity,
+        val repeatsEvery: CalendarRepeat? = null,
+        val format: String? = null,
+        val quarterStartMonth: Int = 1,
+        val quarterYearLabel: QuarterYearLabel = QuarterYearLabel.Start,
+    ) : TemporalCoordinateSpec
     data class Frame(val start: Long = 0) : TemporalCoordinateSpec
     data class Timecode(
         val actualFps: ExactRational,
@@ -274,6 +285,44 @@ sealed interface TemporalCoordinateSpec {
 }
 
 enum class CalendarKind { Gregorian, Julian }
+
+enum class CalendarField {
+    Year,
+    Month,
+    Day,
+    Quarter,
+    WeekYear,
+    Week,
+}
+
+enum class CalendarGranularity { Day, Week, Month, Quarter, Year }
+
+enum class CalendarRepeat { Year }
+
+enum class QuarterYearLabel { Start, End }
+
+data class TemporalAxisPeriod(
+    val start: ExactRational,
+    val endExclusive: ExactRational,
+)
+
+data class TemporalExpansionWindow(
+    val start: ExactRational,
+    val endExclusive: ExactRational,
+) {
+    init {
+        require(start < endExclusive) { "temporal expansion window must be non-empty" }
+    }
+}
+
+sealed interface TemporalSelection {
+    data class Instant(val value: ExactRational) : TemporalSelection
+    data class Period(val value: TemporalAxisPeriod) : TemporalSelection
+    data class Recurrence(
+        val repeatsEvery: CalendarRepeat,
+        val occurrences: List<TemporalAxisPeriod>,
+    ) : TemporalSelection
+}
 
 sealed interface YearNumbering {
     data object CommonEra : YearNumbering

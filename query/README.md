@@ -111,6 +111,21 @@ pass `person.biography` to `FULLTEXT` to search all of its members.
 require `VALID ON <timeline>`. Bounds may be numbers or quoted date/timecode
 strings and are parsed using that Timeline's coordinate.
 
+Recurring `calendar-pattern` values additionally require a finite, half-open
+calendar expansion window. The bounds are complete dates interpreted with the
+Timeline's calendar and numbering, independently of its custom value format:
+
+```gmql
+MATCH (n:Person)
+VALID ON Birthday AT "08-08"
+WITHIN ["2000-01-01", "2031-01-01")
+RETURN n
+```
+
+`VALID ON Birthday ANYTIME WITHIN [...]` is available when a query needs to join recurring
+assertions without selecting a narrower temporal value. Omitting `WITHIN` when
+recurring validity participates in evaluation returns `GMQL4004`.
+
 ## Temporal behavior
 
 GraphMD source `validTime.from` and `validTime.to` remain inclusive.
@@ -156,3 +171,15 @@ analyzer version, referenced shards, checksum, and assertion references before
 the index can execute.
 The current bundle format is v4 and serializes temporal rationals as
 `{numerator, denominator}`. Older bundle versions are rejected and must be regenerated.
+
+The multiplatform CLI exposes the same format without adding a filesystem
+dependency to this module:
+
+```sh
+graphmd index --output ./search-index ./documents
+graphmd search 'MATCH (n) WHERE FULLTEXT(n, "archive") RETURN ID(n), SCORE()' --index ./search-index
+```
+
+An explicitly supplied index is authoritative. The CLI does not compare it to
+the source Markdown, and rejects missing, modified, incompatible, or unlisted
+shard files while loading it.

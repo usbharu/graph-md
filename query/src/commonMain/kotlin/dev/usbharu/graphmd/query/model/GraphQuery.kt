@@ -65,18 +65,23 @@ sealed interface TemporalWindow {
         val endInclusive: Double? get() = (endInclusiveCoordinate as? TemporalCoordinate.Rational)?.value?.toDouble()
     }
 
-    fun toIntervalSet(catalog: TimelineCatalog): IntervalSet {
+    fun toIntervalSet(
+        catalog: TimelineCatalog,
+        expansionWindow: TemporalExpansionWindow? = null,
+    ): IntervalSet {
         return when (this) {
             is At -> catalog.searchIntervals(
                 timelineId,
                 coordinate to true,
                 coordinate to true,
+                expansionWindow,
             )
             is Range -> {
                 catalog.searchIntervals(
                     timelineId,
                     startCoordinate?.let { it to true },
                     endExclusiveCoordinate?.let { it to false },
+                    expansionWindow,
                 )
             }
             is ClosedRange -> {
@@ -84,11 +89,18 @@ sealed interface TemporalWindow {
                     timelineId,
                     startCoordinate?.let { it to true },
                     endInclusiveCoordinate?.let { it to true },
+                    expansionWindow,
                 )
             }
         }
     }
 }
+
+data class CalendarExpansionWindow(
+    val timelineId: TimelineId,
+    val start: TemporalCoordinate.CalendarDate,
+    val endExclusive: TemporalCoordinate.CalendarDate,
+)
 
 enum class TemporalOperator {
     AT,
@@ -192,6 +204,7 @@ data class GraphQuery(
     } else {
         TemporalOperator.OVERLAPS
     },
+    val expansionWindow: CalendarExpansionWindow? = null,
     val offset: Int = 0,
     val limit: Int = 100,
 ) {

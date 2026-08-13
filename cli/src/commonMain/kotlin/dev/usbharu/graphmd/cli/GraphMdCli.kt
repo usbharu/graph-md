@@ -10,6 +10,9 @@ import dev.usbharu.graphmd.query.gmql.*
 import dev.usbharu.graphmd.query.model.IntervalSet
 import dev.usbharu.graphmd.query.model.TimelineId
 import dev.usbharu.graphmd.query.model.TimelineCatalog
+import dev.usbharu.graphmd.query.persistence.SearchIndexFormatOptions
+import dev.usbharu.graphmd.query.persistence.StaticSearchBundle
+import dev.usbharu.graphmd.query.persistence.StaticSearchIndexCodec
 import kotlin.coroutines.*
 
 data class CliResult(
@@ -36,12 +39,12 @@ class GraphMdCli internal constructor(
             } catch (exception: CliIoException) {
                 usageError(
                     exception.message ?: "I/O error",
-                    if (parsed.command is CliCommand.Demo || parsed.command is CliCommand.Embed) 1 else 2,
+                    if (parsed.command.generatesFiles()) 1 else 2,
                 )
             } catch (exception: Throwable) {
                 usageError(
                     exception.message ?: "Unexpected error",
-                    if (parsed.command is CliCommand.Demo || parsed.command is CliCommand.Embed) 1 else 2,
+                    if (parsed.command.generatesFiles()) 1 else 2,
                 )
             }
         }
@@ -51,6 +54,9 @@ class GraphMdCli internal constructor(
         val command = invocation.command
         if (command is CliCommand.Demo) return demo(command, invocation.json)
         if (command is CliCommand.Site) return site(command, invocation.json)
+        if (command is CliCommand.Search && command.indexDirectory != null) {
+            return search(loadStaticEngine(command.indexDirectory), emptyList(), command, invocation.json)
+        }
         val sources = WorkspaceLoader(fileSystem).load(command.paths)
         val options = if (command is CliCommand.Lint && command.strict) {
             CompileOptions(mode = ValidationMode.Strict)
@@ -65,11 +71,59 @@ class GraphMdCli internal constructor(
             is CliCommand.Links -> links(compilation, command, invocation.json)
             is CliCommand.Lint -> lint(compilation, command, invocation.json)
             is CliCommand.Stats -> stats(compilation, command, invocation.json)
-            is CliCommand.Search -> search(compilation, sources, command, invocation.json)
+            is CliCommand.Search -> search(
+                GraphSearchEngine.build(compilation, sources),
+                compilation.diagnostics.filter { it.severity == Severity.Error },
+                command,
+                invocation.json,
+            )
+            is CliCommand.Index -> index(compilation, sources, command, invocation.json)
             is CliCommand.Embed -> embed(compilation, sources, invocation.json)
             is CliCommand.Site -> error("site is executed before workspace loading")
             is CliCommand.Demo -> error("demo is executed before workspace loading")
         }
+    }
+
+    private fun index(
+        compilation: GraphCompilationResult,
+        sources: List<SourceDocument>,
+        command: CliCommand.Index,
+        json: Boolean,
+    ): CliResult {
+        val errors = compilation.diagnostics.filter { it.severity == Severity.Error }
+        if (errors.isNotEmpty()) {
+            val stderr = if (json) {
+                jsonArray(errors.map(Diagnostic::toJson)).encode() + "\n"
+            } else {
+                errors.joinToString(separator = "", transform = ::renderDiagnostic)
+            }
+            return CliResult(stderr = stderr, exitCode = 1)
+        }
+
+        val engine = GraphSearchEngine.build(compilation, sources)
+        val bundle = engine.exportStatic(SearchIndexFormatOptions(compilerVersion = cliVersion))
+        writeStaticBundle(command.outputDirectory, bundle)
+        val graph = engine.graph
+        val output = if (json) {
+            jsonObject(
+                "outputDirectory" to jsonString(command.outputDirectory),
+                "files" to jsonNumber(bundle.files().size),
+                "nodes" to jsonNumber(graph.nodes.size),
+                "propertyAssertions" to jsonNumber(graph.propertyAssertions.size),
+                "relationAssertions" to jsonNumber(graph.relationAssertions.size),
+                "textAssertions" to jsonNumber(graph.textAssertions.size),
+            ).encode() + "\n"
+        } else {
+            buildString {
+                append("Built search index in ").append(command.outputDirectory).append('\n')
+                append("files\t").append(bundle.files().size).append('\n')
+                append("nodes\t").append(graph.nodes.size).append('\n')
+                append("property-assertions\t").append(graph.propertyAssertions.size).append('\n')
+                append("relation-assertions\t").append(graph.relationAssertions.size).append('\n')
+                append("text-assertions\t").append(graph.textAssertions.size).append('\n')
+            }
+        }
+        return CliResult(stdout = output)
     }
 
     private fun embed(
@@ -233,8 +287,8 @@ class GraphMdCli internal constructor(
     }
 
     private fun search(
-        graph: GraphCompilationResult,
-        sources: List<SourceDocument>,
+        engine: GraphSearchEngine,
+        graphDiagnostics: List<Diagnostic>,
         command: CliCommand.Search,
         json: Boolean,
     ): CliResult {
@@ -245,9 +299,8 @@ class GraphMdCli internal constructor(
             return usageError(exception.message ?: "Invalid parameter")
         }
         val result = runCliSuspend {
-            GraphSearchEngine.build(graph, sources).queryGmql(query, parameters)
+            engine.queryGmql(query, parameters)
         }
-        val graphDiagnostics = graph.diagnostics.filter { it.severity == Severity.Error }
         val output = if (json) {
             jsonArray(result.rows.map { row ->
                 JsonValue.Object(
@@ -269,6 +322,107 @@ class GraphMdCli internal constructor(
                 result.diagnostics.joinToString(separator = "", transform = ::renderGmqlDiagnostic)
         }
         return CliResult(output, stderr, if (hasErrors) 1 else 0)
+    }
+
+    private fun loadStaticEngine(directory: String): GraphSearchEngine {
+        if (fileSystem.kind(directory) != FileKind.Directory) {
+            throw CliIoException("Search index directory does not exist: $directory")
+        }
+        val entries = fileSystem.children(directory)
+        val files = linkedMapOf<String, String>()
+        entries.forEach { path ->
+            if (fileSystem.kind(path) != FileKind.File) {
+                throw CliIoException("Search index contains a non-file entry: $path")
+            }
+            val name = path.replace('\\', '/').substringAfterLast('/')
+            files[name] = try {
+                fileSystem.readText(path)
+            } catch (exception: Throwable) {
+                throw CliIoException("Cannot read search index file $path: ${exception.message ?: "I/O error"}")
+            }
+        }
+        val manifestName = StaticSearchBundle.MANIFEST_FILE_NAME
+        val manifest = files[manifestName]
+            ?: throw CliIoException("Search index manifest does not exist: ${fileSystem.child(directory, manifestName)}")
+        val bundle = StaticSearchBundle(manifest, files - manifestName)
+        val metadata = try {
+            StaticSearchIndexCodec.readManifest(bundle)
+        } catch (exception: Throwable) {
+            throw CliIoException("Invalid search index manifest: ${exception.message ?: "cannot decode manifest"}")
+        }
+        val expectedFiles = metadata.shards.values.flatten().toSet() + manifestName
+        val actualFiles = files.keys
+        if (actualFiles != expectedFiles) {
+            val unexpected = (actualFiles - expectedFiles).sorted()
+            val missing = (expectedFiles - actualFiles).sorted()
+            val detail = buildList {
+                if (unexpected.isNotEmpty()) add("unexpected files: ${unexpected.joinToString()}")
+                if (missing.isNotEmpty()) add("missing files: ${missing.joinToString()}")
+            }.joinToString("; ")
+            throw CliIoException("Search index directory does not match its manifest ($detail)")
+        }
+        return try {
+            GraphSearchEngine.loadStatic(bundle)
+        } catch (exception: Throwable) {
+            throw CliIoException("Invalid search index: ${exception.message ?: "cannot load index"}")
+        }
+    }
+
+    private fun writeStaticBundle(directory: String, bundle: StaticSearchBundle) {
+        val target = fileSystem.canonical(directory)
+        when (fileSystem.kind(target)) {
+            null -> Unit
+            FileKind.Directory -> if (fileSystem.children(target).isNotEmpty()) loadStaticEngine(target)
+            else -> throw CliIoException("Search index output is not a directory: $directory")
+        }
+
+        val staging = availableSibling(target, "tmp")
+        try {
+            fileSystem.createDirectories(staging)
+            bundle.files().forEach { (name, contents) ->
+                fileSystem.writeText(fileSystem.child(staging, name), contents)
+            }
+            loadStaticEngine(staging)
+        } catch (exception: Throwable) {
+            runCatching { deleteTree(staging) }
+            throw exception
+        }
+
+        val targetExists = fileSystem.kind(target) != null
+        val backup = if (targetExists) availableSibling(target, "backup") else null
+        if (backup != null) {
+            try {
+                fileSystem.move(target, backup)
+            } catch (exception: Throwable) {
+                runCatching { deleteTree(staging) }
+                throw CliIoException("Cannot prepare existing search index for replacement: ${exception.message ?: "I/O error"}")
+            }
+        }
+        try {
+            fileSystem.move(staging, target)
+        } catch (exception: Throwable) {
+            val restored = backup == null || runCatching { fileSystem.move(backup, target) }.isSuccess
+            runCatching { deleteTree(staging) }
+            val suffix = if (restored) "" else "; the previous index could not be restored from $backup"
+            throw CliIoException("Cannot install search index at $directory: ${exception.message ?: "I/O error"}$suffix")
+        }
+        if (backup != null) runCatching { deleteTree(backup) }
+    }
+
+    private fun availableSibling(path: String, label: String): String {
+        var suffix = 0
+        while (true) {
+            val candidate = "$path.graphmd-$label${if (suffix == 0) "" else "-$suffix"}"
+            if (fileSystem.kind(candidate) == null) return candidate
+            suffix++
+        }
+    }
+
+    private fun deleteTree(path: String) {
+        if (fileSystem.kind(path) == FileKind.Directory) {
+            fileSystem.children(path).forEach(::deleteTree)
+        }
+        fileSystem.delete(path, mustExist = false)
     }
 
     private fun readQueryFile(path: String): String {
@@ -557,6 +711,9 @@ class GraphMdCli internal constructor(
     private fun usageError(message: String, exitCode: Int = 2): CliResult =
         CliResult(stderr = "error: $message\nTry 'graphmd --help' for usage.\n", exitCode = exitCode)
 }
+
+private fun CliCommand.generatesFiles(): Boolean =
+    this is CliCommand.Demo || this is CliCommand.Embed || this is CliCommand.Index
 
 private class TemporalView(
     graph: GraphCompilationResult,
@@ -1237,6 +1394,14 @@ private fun renderValidTimePoint(value: TimePoint): String =
 private fun renderCoordinate(value: TemporalCoordinate): String = when (value) {
     is TemporalCoordinate.Rational -> value.value.toString()
     is TemporalCoordinate.CalendarDate -> "${value.year}-${value.month.toString().padStart(2, '0')}-${value.day.toString().padStart(2, '0')}"
+    is TemporalCoordinate.CalendarPattern -> value.fields.entries.sortedBy { it.key.ordinal }.joinToString("-") { (field, fieldValue) ->
+        when (field) {
+            CalendarField.Year, CalendarField.WeekYear -> fieldValue.toString().padStart(4, '0')
+            CalendarField.Month, CalendarField.Day -> fieldValue.toString().padStart(2, '0')
+            CalendarField.Quarter -> "Q$fieldValue"
+            CalendarField.Week -> "W${fieldValue.toString().padStart(2, '0')}"
+        }
+    }
     is TemporalCoordinate.EraDate -> "${value.era} ${value.year}-${value.month.toString().padStart(2, '0')}-${value.day.toString().padStart(2, '0')}"
     is TemporalCoordinate.FrameIndex -> value.value.toString()
     is TemporalCoordinate.Timecode -> "${value.hours.toString().padStart(2, '0')}:${value.minutes.toString().padStart(2, '0')}:" +
@@ -1247,6 +1412,7 @@ private fun renderCoordinate(value: TemporalCoordinate): String = when (value) {
 private fun renderCoordinateSpec(value: TemporalCoordinateSpec): String = when (value) {
     TemporalCoordinateSpec.Number -> "number"
     is TemporalCoordinateSpec.Calendar -> "calendar:${value.calendar.name.lowercase()}"
+    is TemporalCoordinateSpec.CalendarPattern -> "calendar-pattern:${value.fields.joinToString(",") { it.name.replaceFirstChar(Char::lowercase) }}"
     is TemporalCoordinateSpec.Frame -> "frame"
     is TemporalCoordinateSpec.Timecode -> "timecode:${value.actualFps}"
     is TemporalCoordinateSpec.Era -> "era"

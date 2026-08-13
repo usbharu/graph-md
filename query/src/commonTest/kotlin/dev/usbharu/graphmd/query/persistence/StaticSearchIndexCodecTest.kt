@@ -108,6 +108,27 @@ class StaticSearchIndexCodecTest {
         assertFailsWith<IllegalArgumentException> { StaticSearchIndexCodec.decode(modified) }
     }
 
+    @Test
+    fun `rejects invalid manifest and unsupported format or analyzer versions`() {
+        val bundle = StaticSearchIndexCodec.encode(SearchIndexBuilder().build(indexedFixtureGraph()))
+        val unsupportedFormat = bundle.copy(
+            manifest = bundle.manifest.replace(
+                "\"formatVersion\":${StaticSearchIndexCodec.FORMAT_VERSION}",
+                "\"formatVersion\":999",
+            ),
+        )
+        val unsupportedAnalyzer = bundle.copy(
+            manifest = bundle.manifest.replace(
+                Regex("\"analyzerVersion\":\"[^\"]+\""),
+                "\"analyzerVersion\":\"unsupported\"",
+            ),
+        )
+
+        assertFailsWith<IllegalArgumentException> { StaticSearchIndexCodec.decode(bundle.copy(manifest = "{")) }
+        assertFailsWith<IllegalArgumentException> { StaticSearchIndexCodec.decode(unsupportedFormat) }
+        assertFailsWith<IllegalArgumentException> { StaticSearchIndexCodec.decode(unsupportedAnalyzer) }
+    }
+
     private fun graphWithAllValueKinds() = indexedFixtureGraph().let { graph ->
         val owner = AssertionOwner.Node(NodeId("alice"))
         val source = SourceInfo("/graph/values.md")

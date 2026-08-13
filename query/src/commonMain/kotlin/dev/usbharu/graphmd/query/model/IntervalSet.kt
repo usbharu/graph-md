@@ -105,15 +105,40 @@ data class TemporalInterval(
     }
 }
 
+data class CalendarPatternExtent(
+    val timelineId: TimelineId,
+    val assertionTimelineId: TimelineId,
+    val from: TemporalCoordinate.CalendarPattern?,
+    val to: TemporalCoordinate.CalendarPattern?,
+    val fromInclusive: Boolean = true,
+    val toInclusive: Boolean = true,
+)
+
+sealed interface DeferredTemporalSet {
+    data class Finite(
+        val intervals: List<TemporalInterval>,
+        val isUniversal: Boolean,
+    ) : DeferredTemporalSet
+
+    data class Pattern(val extent: CalendarPatternExtent) : DeferredTemporalSet
+    data class Intersection(val left: DeferredTemporalSet, val right: DeferredTemporalSet) : DeferredTemporalSet
+    data class Union(val left: DeferredTemporalSet, val right: DeferredTemporalSet) : DeferredTemporalSet
+    data class Difference(val left: DeferredTemporalSet, val right: DeferredTemporalSet) : DeferredTemporalSet
+}
+
 @ConsistentCopyVisibility
 data class IntervalSet private constructor(
     val intervals: List<TemporalInterval>,
     val isUniversal: Boolean,
+    val deferred: DeferredTemporalSet? = null,
 ) {
     val isEmpty: Boolean
-        get() = !isUniversal && intervals.isEmpty()
+        get() = deferred == null && !isUniversal && intervals.isEmpty()
 
     infix fun intersect(other: IntervalSet): IntervalSet {
+        if (deferred != null || other.deferred != null) {
+            return fromDeferred(DeferredTemporalSet.Intersection(asDeferred(), other.asDeferred()))
+        }
         if (isEmpty || other.isEmpty) return empty()
         if (isUniversal) return other
         if (other.isUniversal) return this
@@ -121,11 +146,17 @@ data class IntervalSet private constructor(
     }
 
     infix fun union(other: IntervalSet): IntervalSet {
+        if (deferred != null || other.deferred != null) {
+            return fromDeferred(DeferredTemporalSet.Union(asDeferred(), other.asDeferred()))
+        }
         if (isUniversal || other.isUniversal) return universal()
         return of(intervals + other.intervals)
     }
 
     fun subtract(other: IntervalSet): IntervalSet {
+        if (deferred != null || other.deferred != null) {
+            return fromDeferred(DeferredTemporalSet.Difference(asDeferred(), other.asDeferred()))
+        }
         if (isEmpty || other.isEmpty) return this
         if (other.isUniversal) return empty()
         require(!isUniversal) {
@@ -138,7 +169,9 @@ data class IntervalSet private constructor(
         return of(remaining)
     }
 
-    fun contains(other: IntervalSet): Boolean = when {
+    fun contains(other: IntervalSet): Boolean {
+        require(deferred == null && other.deferred == null) { "Deferred temporal sets must be materialized first" }
+        return when {
         isUniversal -> true
         other.isUniversal -> false
         other.isEmpty -> true
@@ -146,9 +179,12 @@ data class IntervalSet private constructor(
             intervals.any { it.contains(candidate) }
         }
     }
+    }
 
-    fun contains(timelineId: TimelineId, value: ExactRational): Boolean =
-        isUniversal || intervals.any { it.timelineId == timelineId && it.contains(value) }
+    fun contains(timelineId: TimelineId, value: ExactRational): Boolean {
+        require(deferred == null) { "Deferred temporal sets must be materialized first" }
+        return isUniversal || intervals.any { it.timelineId == timelineId && it.contains(value) }
+    }
 
     fun contains(timelineId: TimelineId, value: Double): Boolean = contains(timelineId, ExactRational.fromDouble(value))
 
@@ -156,6 +192,12 @@ data class IntervalSet private constructor(
         fun empty(): IntervalSet = IntervalSet(emptyList(), isUniversal = false)
 
         fun universal(): IntervalSet = IntervalSet(emptyList(), isUniversal = true)
+
+        fun pattern(extent: CalendarPatternExtent): IntervalSet =
+            fromDeferred(DeferredTemporalSet.Pattern(extent))
+
+        internal fun fromDeferred(value: DeferredTemporalSet): IntervalSet =
+            IntervalSet(emptyList(), isUniversal = false, deferred = value)
 
         fun of(vararg intervals: TemporalInterval): IntervalSet = of(intervals.asList())
 
@@ -206,6 +248,9 @@ data class IntervalSet private constructor(
             else -> IntervalBoundary(left.exactValue, left.inclusive || right.inclusive)
         }
     }
+
+    private fun asDeferred(): DeferredTemporalSet = deferred
+        ?: DeferredTemporalSet.Finite(intervals, isUniversal)
 }
 
 data class QueryTimeline(
@@ -287,10 +332,28 @@ class TimelineCatalog private constructor(
         timelineId: TimelineId,
         start: Pair<TemporalCoordinate, Boolean>?,
         end: Pair<TemporalCoordinate, Boolean>?,
+        expansionWindow: TemporalExpansionWindow? = null,
     ): IntervalSet {
         val source = requireNotNull(byId[timelineId]) { "Unknown Timeline: ${timelineId.value}" }
         if (start == null && end == null) {
             return IntervalSet.of(TemporalInterval(source.assertionScopeId))
+        }
+        if (start?.first is TemporalCoordinate.CalendarPattern || end?.first is TemporalCoordinate.CalendarPattern) {
+            val patternStart = start?.first as? TemporalCoordinate.CalendarPattern
+            val patternEnd = end?.first as? TemporalCoordinate.CalendarPattern
+            require(start == null || patternStart != null) { "calendar-pattern ranges cannot mix coordinate kinds" }
+            require(end == null || patternEnd != null) { "calendar-pattern ranges cannot mix coordinate kinds" }
+            return materializePattern(
+                CalendarPatternExtent(
+                    timelineId,
+                    source.assertionScopeId,
+                    patternStart,
+                    patternEnd,
+                    start?.second ?: true,
+                    end?.second ?: true,
+                ),
+                expansionWindow,
+            )
         }
         val normalizedStart = start?.let { engine.normalizeToAxis(timelineId.value, it.first) }
         val normalizedEnd = end?.let { engine.normalizeToAxis(timelineId.value, it.first) }
@@ -336,6 +399,20 @@ class TimelineCatalog private constructor(
         return engine.parse(timelineId.value, raw).coordinate
     }
 
+    fun formatCoordinate(timelineId: TimelineId, coordinate: TemporalCoordinate): String? {
+        if (timelineId !in byId) return null
+        return runCatching { engine.format(timelineId.value, coordinate) }.getOrNull()
+    }
+
+    fun expansionWindow(value: CalendarExpansionWindow): TemporalExpansionWindow? {
+        if (value.timelineId !in byId) return null
+        return engine.expansionWindow(value.timelineId.value, value.start, value.endExclusive)
+    }
+
+    fun requiresExpansion(timelineId: TimelineId): Boolean =
+        (byId[timelineId]?.coordinateSystem?.coordinate as? TemporalCoordinateSpec.CalendarPattern)
+            ?.repeatsEvery != null
+
     internal fun normalizeCoordinate(
         timelineId: TimelineId,
         coordinate: TemporalCoordinate,
@@ -346,20 +423,135 @@ class TimelineCatalog private constructor(
 
     fun fromValidTimes(validTimes: List<ValidTime>): IntervalSet {
         if (validTimes.isEmpty()) return IntervalSet.universal()
-        return IntervalSet.of(validTimes.mapNotNull { validTime ->
+        return validTimes.mapNotNull { validTime ->
             val timelineId = TimelineId(validTime.timeline)
             if (timelineId !in byId) return@mapNotNull null
+            val timeline = requireNotNull(byId[timelineId])
+            if (validTime.from == null && validTime.to == null) {
+                return@mapNotNull IntervalSet.of(TemporalInterval(timeline.assertionScopeId))
+            }
+            val patternSpec = timeline.coordinateSystem.coordinate as? TemporalCoordinateSpec.CalendarPattern
+            if (patternSpec != null) {
+                fun parse(point: TimePoint?): TemporalCoordinate.CalendarPattern? = point?.coordinate?.let { coordinate ->
+                    val parsed = if (coordinate is TemporalCoordinate.Label) {
+                        runCatching { engine.parse(validTime.timeline, coordinate.value).coordinate }.getOrNull()
+                    } else {
+                        coordinate
+                    } ?: return@let null
+                    engine.coerceCoordinate(validTime.timeline, parsed) as? TemporalCoordinate.CalendarPattern
+                }
+                val from = parse(validTime.from)
+                val to = parse(validTime.to)
+                if (validTime.from != null && from == null || validTime.to != null && to == null) return@mapNotNull null
+                val extent = CalendarPatternExtent(
+                    timelineId,
+                    timeline.assertionScopeId,
+                    from,
+                    to,
+                )
+                if (patternSpec.repeatsEvery != null) return@mapNotNull IntervalSet.pattern(extent)
+                return@mapNotNull materializePattern(extent, null)
+            }
             val from = validTime.from?.let { point ->
-                runCatching { engine.normalizeToAxis(validTime.timeline, point.coordinate) }.getOrNull()
+                runCatching {
+                    val coordinate = (point.coordinate as? TemporalCoordinate.Label)?.let {
+                        engine.parse(validTime.timeline, it.value).coordinate
+                    } ?: point.coordinate
+                    engine.normalizeToAxis(validTime.timeline, coordinate)
+                }.getOrNull()
             }
             val to = validTime.to?.let { point ->
-                runCatching { engine.normalizeToAxis(validTime.timeline, point.coordinate) }.getOrNull()
+                runCatching {
+                    val coordinate = (point.coordinate as? TemporalCoordinate.Label)?.let {
+                        engine.parse(validTime.timeline, it.value).coordinate
+                    } ?: point.coordinate
+                    engine.normalizeToAxis(validTime.timeline, coordinate)
+                }.getOrNull()
             }
             if (from != null && to != null && from > to) return@mapNotNull null
+            IntervalSet.of(
+                TemporalInterval(
+                    timelineId = requireNotNull(byId[timelineId]).assertionScopeId,
+                    start = from?.let { IntervalBoundary(it, inclusive = true) },
+                    end = to?.let { IntervalBoundary(it, inclusive = true) },
+                ),
+            )
+        }.fold(IntervalSet.empty(), IntervalSet::union)
+    }
+
+    fun materialize(
+        value: IntervalSet,
+        window: TemporalExpansionWindow?,
+    ): IntervalSet {
+        val deferred = value.deferred ?: return value
+        fun evaluate(expression: DeferredTemporalSet): IntervalSet = when (expression) {
+            is DeferredTemporalSet.Finite -> if (expression.isUniversal) {
+                IntervalSet.universal()
+            } else {
+                IntervalSet.of(expression.intervals)
+            }
+            is DeferredTemporalSet.Pattern -> materializePattern(
+                expression.extent,
+                requireNotNull(window) { "Recurring calendar-pattern validity requires a finite expansion window" },
+            )
+            is DeferredTemporalSet.Intersection -> evaluate(expression.left) intersect evaluate(expression.right)
+            is DeferredTemporalSet.Union -> evaluate(expression.left) union evaluate(expression.right)
+            is DeferredTemporalSet.Difference -> evaluate(expression.left).subtract(evaluate(expression.right))
+        }
+        return evaluate(deferred)
+    }
+
+    private fun materializePattern(
+        extent: CalendarPatternExtent,
+        window: TemporalExpansionWindow?,
+    ): IntervalSet {
+        val rangeContextYears = if (extent.from != null && extent.to != null && window != null) {
+            CALENDAR_PATTERN_RANGE_CONTEXT_YEARS
+        } else {
+            0
+        }
+        fun resolve(coordinate: TemporalCoordinate.CalendarPattern): TemporalSelection? =
+            engine.resolveToAxis(extent.timelineId.value, coordinate, window, rangeContextYears)
+
+        fun periods(selection: TemporalSelection?): List<TemporalAxisPeriod> = when (selection) {
+            is TemporalSelection.Instant -> listOf(
+                TemporalAxisPeriod(selection.value, selection.value + ExactRational.ONE),
+            )
+            is TemporalSelection.Period -> listOf(selection.value)
+            is TemporalSelection.Recurrence -> selection.occurrences
+            null -> emptyList()
+        }
+
+        val from = extent.from?.let { periods(resolve(it)) }.orEmpty()
+        val to = extent.to?.let { periods(resolve(it)) }.orEmpty()
+        val ranges = when {
+            extent.from != null && extent.to != null -> from.mapNotNull { start ->
+                val rangeStart = if (extent.fromInclusive) start.start else start.endExclusive
+                val latestEnd = start.start + ExactRational.of(CALENDAR_PATTERN_MAX_YEAR_CYCLE_DAYS)
+                val end = to.firstOrNull {
+                    it.endExclusive > start.start && it.endExclusive <= latestEnd
+                } ?: return@mapNotNull null
+                val rangeEnd = if (extent.toInclusive) end.endExclusive else end.start
+                if (rangeStart < rangeEnd) TemporalAxisPeriod(rangeStart, rangeEnd) else null
+            }
+            extent.from != null -> from.mapNotNull { period ->
+                val start = if (extent.fromInclusive) period.start else period.endExclusive
+                if (start < period.endExclusive) TemporalAxisPeriod(start, period.endExclusive) else null
+            }
+            extent.to != null -> to.mapNotNull { period ->
+                val end = if (extent.toInclusive) period.endExclusive else period.start
+                if (period.start < end) TemporalAxisPeriod(period.start, end) else null
+            }
+            else -> emptyList()
+        }
+        return IntervalSet.of(ranges.mapNotNull { period ->
+            val start = window?.let { maxOf(period.start, it.start) } ?: period.start
+            val end = window?.let { minOf(period.endExclusive, it.endExclusive) } ?: period.endExclusive
+            if (start >= end) return@mapNotNull null
             TemporalInterval(
-                timelineId = requireNotNull(byId[timelineId]).assertionScopeId,
-                start = from?.let { IntervalBoundary(it, inclusive = true) },
-                end = to?.let { IntervalBoundary(it, inclusive = true) },
+                extent.assertionTimelineId,
+                IntervalBoundary(start, inclusive = true),
+                IntervalBoundary(end, inclusive = false),
             )
         })
     }
@@ -420,3 +612,10 @@ class TimelineCatalog private constructor(
             TimelineCatalog(timelines)
     }
 }
+
+// Gregorian leap-day and ISO week-53 patterns repeat within at most eight years.
+// Two extra years keep endpoint pairing explicit without expanding an unbounded recurrence.
+private const val CALENDAR_PATTERN_RANGE_CONTEXT_YEARS = 10
+// A yearly range may cross one year boundary, but it must not skip a cycle to find a missing endpoint.
+// ISO week-years can contain 53 weeks, so their maximum cycle is 371 days rather than 366.
+private const val CALENDAR_PATTERN_MAX_YEAR_CYCLE_DAYS = 371L
