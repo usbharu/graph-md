@@ -3,8 +3,9 @@ import MarkdownIt from "markdown-it";
 // @ts-ignore The GraphMD plugin is materialized from the bundled runtime.
 import { graphMdPlugin } from "../vendor/markdown-it-graphmd.js";
 import { site } from "./site";
+import type { SiteDocument } from "./site";
 
-export function renderMarkdown(source: string): string {
+export function renderMarkdown(source: string, embeds: SiteDocument["embeds"] = []): string {
   const markdown = new MarkdownIt({ html: false, linkify: true, typographer: true });
   const slugCounts = new Map<string, number>();
   markdown.renderer.rules.heading_open = (tokens, index, options, _env, renderer) => {
@@ -24,6 +25,9 @@ export function renderMarkdown(source: string): string {
   graphMdPlugin(markdown, {
     hrefTransform: (target: string) =>
       (site.routes as Record<string, string>)[target] ?? null,
+    embedResolver: (directive: { kind: string; value: string }) =>
+      embeds.find((embed) => embed.kind === directive.kind && embed.value === directive.value)
+        ?? { status: "pending" },
   });
   return markdown.render(source);
 }

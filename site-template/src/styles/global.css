@@ -79,7 +79,7 @@ h1 { font-size:clamp(2rem, 4vw, 3rem); letter-spacing:-.03em; }
 .article-actions { display:flex; gap:20px; align-items:center; border-bottom:1px solid var(--line); font-size:.82rem; }
 .article-actions > * { padding:8px 1px; }
 .article-actions > span { color:var(--text); font-weight:600; border-bottom:2px solid var(--text); }
-.markdown { font-family:"Noto Serif JP", Georgia, serif; margin-top:34px; line-height:1.9; }
+.markdown { min-width:0; max-width:100%; overflow-x:auto; font-family:"Noto Serif JP", Georgia, serif; margin-top:34px; line-height:1.9; }
 .markdown > :first-child { margin-top:0; }
 .markdown h1 { font-size:1.75rem; border-bottom:1px solid var(--line); padding-bottom:.25em; margin-top:1.6em; }
 .markdown h2 { font-size:1.42rem; border-bottom:1px solid var(--line-soft); padding-bottom:.3em; margin:2em 0 .7em; }
@@ -91,7 +91,9 @@ h1 { font-size:clamp(2rem, 4vw, 3rem); letter-spacing:-.03em; }
 .markdown pre { overflow:auto; background:#202122; color:#eaecf0; padding:18px 20px; border-radius:3px; line-height:1.6; }
 .markdown pre code { background:transparent; padding:0; }
 .markdown img { max-width:100%; height:auto; }
-.markdown table { margin:1.5em 0; }
+.markdown table { max-width:100%; margin:1.5em 0; }
+.markdown .graphmd-embed { table-layout:fixed; }
+.markdown .graphmd-embed th, .markdown .graphmd-embed td { min-width:0; overflow-wrap:anywhere; word-break:break-word; }
 .graphmd-props { font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
 .graphmd-props--inline { display:inline-flex; align-items:baseline; gap:.4em; max-width:100%; margin:0 .08em; vertical-align:baseline; }
 .graphmd-props--inline .graphmd-prop { position:relative; display:inline-flex; align-items:baseline; min-width:0; }

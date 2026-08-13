@@ -21,6 +21,19 @@ export type SiteDocument = {
   type: string | null;
   url: string | null;
   body: string;
+  embeds: Array<{
+    kind: "query" | "back-link";
+    value: string;
+  } & ({
+    status: "ready";
+    table: {
+      columns: Array<{ name: string; type: string }>;
+      rows: Array<{ cells: Array<{ text: string; targetId: string | null }> }>;
+    };
+  } | {
+    status: "error";
+    message: string;
+  })>;
   properties: Array<{
     name: string;
     value: unknown;

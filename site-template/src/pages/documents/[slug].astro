@@ -13,7 +13,7 @@ export function getStaticPaths() {
 }
 
 const { document } = Astro.props;
-const html = renderMarkdown(document.body);
+const html = renderMarkdown(document.body, document.embeds);
 const headings = extractHeadings(document.body);
 const groupProperties = (properties: typeof document.properties) => Object.values(
   properties.reduce((groups, property) => {

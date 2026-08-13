@@ -27,6 +27,7 @@ class GraphMdAstroCompiler {
             documents = parsed.mapNotNull { it.document }.sortedBy { it.id },
             diagnostics = graph.diagnostics,
             search = search,
+            sources = sources,
         )
     }
 }
@@ -36,6 +37,7 @@ data class AstroCompilation(
     val documents: List<GraphDocument>,
     val diagnostics: List<Diagnostic>,
     val search: StaticSearchBundle?,
+    val sources: List<SourceDocument>,
 ) {
     val successful: Boolean
         get() = diagnostics.none { it.severity == Severity.Error }

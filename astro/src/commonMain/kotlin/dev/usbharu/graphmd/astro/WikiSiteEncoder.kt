@@ -1,14 +1,24 @@
 package dev.usbharu.graphmd.astro
 
+import dev.usbharu.graphmd.core.BodySyntaxExtractor
 import dev.usbharu.graphmd.core.model.*
+import dev.usbharu.graphmd.query.GraphSearchEngine
+import dev.usbharu.graphmd.query.embed.EmbedEngine
+import dev.usbharu.graphmd.query.embed.EmbedTable
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.EmptyCoroutineContext
+import kotlin.coroutines.startCoroutine
 
 internal class WikiSiteEncoder(
     base: String,
     private val documents: List<GraphDocument>,
     private val graph: GraphCompilationResult,
+    sources: List<SourceDocument> = emptyList(),
 ) {
     private val base = normalizeBase(base)
     private val routes = documents.associate { it.id to "${this.base}documents/${safeSlug(it.id)}/" }
+    private val embedEngine = EmbedEngine(GraphSearchEngine.build(graph, sources))
 
     fun encode(): String {
         val incoming = graph.relations.groupBy { it.to }
@@ -109,6 +119,7 @@ internal class WikiSiteEncoder(
             "type" to jsonNullableString(node?.type),
             "url" to jsonNullableString(node?.url),
             "body" to jsonString(document.body),
+            "embeds" to encodeEmbeds(document),
             "properties" to properties,
             "schema" to jsonArray(schema),
             "nodeType" to (encodeNodeType(document as? NodeTypeDocument) ?: JsonValue.Null),
@@ -123,6 +134,50 @@ internal class WikiSiteEncoder(
             }),
         )
     }
+
+    private fun encodeEmbeds(document: GraphDocument): JsonValue {
+        if (document.kind != DocumentKind.Node && document.kind != DocumentKind.Media) {
+            return jsonArray(emptyList())
+        }
+        val blocks = BodySyntaxExtractor().extract(document.body, document.sourcePath, document.id).blocks
+        return jsonArray(blocks.mapNotNull { block ->
+            val directive = block.embed ?: return@mapNotNull null
+            val result = runAstroSuspend { embedEngine.render(directive, document.id) }
+            val (kind, value) = when (directive) {
+                is EmbedDirective.Query -> "query" to directive.query
+                is EmbedDirective.BackLink -> "back-link" to directive.relType
+            }
+            if (result.isSuccess) {
+                jsonObject(
+                    "kind" to jsonString(kind),
+                    "value" to jsonString(value),
+                    "status" to jsonString("ready"),
+                    "table" to encodeEmbedTable(checkNotNull(result.table)),
+                )
+            } else {
+                jsonObject(
+                    "kind" to jsonString(kind),
+                    "value" to jsonString(value),
+                    "status" to jsonString("error"),
+                    "message" to jsonString(result.diagnostics.joinToString("\n") { "${it.code}: ${it.message}" }),
+                )
+            }
+        })
+    }
+
+    private fun encodeEmbedTable(table: EmbedTable): JsonValue = jsonObject(
+        "columns" to jsonArray(table.columns.map { column ->
+            jsonObject("name" to jsonString(column.name), "type" to jsonString(column.type))
+        }),
+        "rows" to jsonArray(table.rows.map { row ->
+            jsonObject("cells" to jsonArray(row.cells.map { cell ->
+                jsonObject(
+                    "text" to jsonString(cell.text),
+                    "targetId" to jsonNullableString(cell.targetId),
+                )
+            }))
+        }),
+    )
 
     private fun encodeNodeType(current: NodeTypeDocument?): JsonValue? = current?.let {
         fun typeLink(id: String): JsonValue = jsonObject(
@@ -217,3 +272,16 @@ private fun firstHeading(body: String): String? = body.lineSequence().map(String
     ?.takeIf(String::isNotEmpty)
 
 private fun normalizeBase(base: String): String = "/" + base.trim().trim('/').let { if (it.isEmpty()) "" else "$it/" }
+
+private fun <T> runAstroSuspend(block: suspend () -> T): T {
+    var outcome: Result<T>? = null
+    block.startCoroutine(
+        object : Continuation<T> {
+            override val context: CoroutineContext = EmptyCoroutineContext
+            override fun resumeWith(result: Result<T>) {
+                outcome = result
+            }
+        },
+    )
+    return checkNotNull(outcome) { "Astro embed execution suspended unexpectedly" }.getOrThrow()
+}

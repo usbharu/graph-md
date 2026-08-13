@@ -48,7 +48,7 @@ class GraphMdAstroCompilerTest {
             ),
         )
 
-        val site = WikiSiteEncoder("/wiki", result.documents, result.graph).encode()
+        val site = WikiSiteEncoder("/wiki", result.documents, result.graph, result.sources).encode()
 
         assertTrue(site.contains("\"base\":\"/wiki/\""))
         assertTrue(site.contains("\"schema\":[{\"name\":\"name\""))
@@ -57,6 +57,35 @@ class GraphMdAstroCompilerTest {
         assertTrue(site.contains("\"usage\":[{\"id\":\"alice\""))
         assertTrue(site.contains("\"properties\":[{\"name\":\"name\",\"value\":\"Alice\""))
         assertTrue(site.contains("\"relationUsage\":[{\"from\":\"alice\""))
+    }
+
+    @Test
+    fun `resolves query and backlink embeds for the Astro renderer`() {
+        val sources = listOf(
+            source("Person", "NodeType"),
+            source("friend", "RelType", "from: [Person]\nto: [Person]"),
+            source("alice", "Node", "type: Person", "@link[Bob](bob friend)"),
+            source(
+                "bob",
+                "Node",
+                "type: Person",
+                """
+                ::: embed:query="MATCH (n:Person) RETURN ID(n) AS id ORDER BY id"
+                stale
+                :::
+                ::: embed:back-link=friend
+                stale
+                :::
+                """.trimIndent(),
+            ),
+        )
+        val result = GraphMdAstroCompiler().compile(sources)
+
+        val site = WikiSiteEncoder("/", result.documents, result.graph, result.sources).encode()
+
+        assertTrue(site.contains("\"kind\":\"query\",\"value\":\"MATCH (n:Person) RETURN ID(n) AS id ORDER BY id\",\"status\":\"ready\""))
+        assertTrue(site.contains("\"kind\":\"back-link\",\"value\":\"friend\",\"status\":\"ready\""))
+        assertTrue(site.contains("\"targetId\":\"alice\""))
     }
 
     private fun source(id: String, kind: String, fields: String = "", body: String = "") = SourceDocument(
