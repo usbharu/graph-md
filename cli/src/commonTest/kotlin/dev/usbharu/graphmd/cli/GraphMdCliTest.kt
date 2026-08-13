@@ -176,6 +176,25 @@ class GraphMdCliTest {
     }
 
     @Test
+    fun `site force compares UNC paths case insensitively`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "//server/share/docs/person.md" to nodeType("Person"),
+                "//SERVER/Share/docs/keep.txt" to "must survive",
+            ),
+            aliases = mapOf(
+                "/source" to "//server/share/docs",
+                "/output" to "//SERVER/Share/docs",
+            ),
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/output", "/source", "--force"))
+
+        assertEquals(2, result.exitCode)
+        assertEquals("must survive", fileSystem.contentsUnder("//SERVER/Share/docs").getValue("//SERVER/Share/docs/keep.txt"))
+    }
+
+    @Test
     fun `site creates nested template paths with Windows separators`() {
         val fileSystem = FakeFileSystem(
             mapOf("/workspace/person.md" to nodeType("Person")),

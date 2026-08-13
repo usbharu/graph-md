@@ -144,7 +144,7 @@ private fun isFileSystemRoot(path: String): Boolean {
 private fun isSameOrAncestor(ancestor: String, candidate: String): Boolean {
     val normalizedAncestor = normalizeSafetyPath(ancestor)
     val normalizedCandidate = normalizeSafetyPath(candidate)
-    val ignoreCase = WINDOWS_PATH.matches(normalizedAncestor) || WINDOWS_PATH.matches(normalizedCandidate)
+    val ignoreCase = isWindowsPath(normalizedAncestor) || isWindowsPath(normalizedCandidate)
     return normalizedCandidate.equals(normalizedAncestor, ignoreCase) ||
         normalizedCandidate.startsWith("$normalizedAncestor/", ignoreCase)
 }
@@ -153,6 +153,8 @@ private fun normalizeSafetyPath(path: String): String {
     val normalized = path.replace('\\', '/')
     return if (normalized == "/") normalized else normalized.trimEnd('/')
 }
+
+private fun isWindowsPath(path: String): Boolean = WINDOWS_PATH.matches(path) || path.startsWith("//")
 
 private val WINDOWS_PATH = Regex("^[A-Za-z]:/.*")
 private val WINDOWS_VOLUME_ROOT = Regex("^[A-Za-z]:$")
