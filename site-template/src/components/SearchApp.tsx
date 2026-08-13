@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type Document = {
   id: string;
@@ -38,6 +38,7 @@ export default function SearchApp({
   const [result, setResult] = useState<QueryResult>();
   const [error, setError] = useState("");
   const [searched, setSearched] = useState(false);
+  const requestSequence = useRef(0);
   const routes = useMemo(
     () => Object.fromEntries(documents.map((document) => [document.id, document.route])),
     [documents],
@@ -71,7 +72,10 @@ export default function SearchApp({
         await Promise.all(
           names.map(async (name) => {
             shards[name] = await fetch(`${base}search-index/${name}`).then(
-              (response) => response.text(),
+              (response) => {
+                if (!response.ok) throw new Error("検索索引を取得できません");
+                return response.text();
+              },
             );
           }),
         );
@@ -107,11 +111,17 @@ export default function SearchApp({
       setError("検索エンジンを読み込み中です");
       return;
     }
+    const request = ++requestSequence.current;
+    setResult(undefined);
     try {
       setError("");
-      setResult(JSON.parse(await engine.queryGmql(text, params)));
+      const nextResult = JSON.parse(await engine.queryGmql(text, params));
+      if (request === requestSequence.current) setResult(nextResult);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (request === requestSequence.current) {
+        setResult(undefined);
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
     }
   }
 

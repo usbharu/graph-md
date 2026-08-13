@@ -146,9 +146,18 @@ async function readSources(roots, extensions, projectRoot) {
     const excludeProject = root !== projectRoot && isInside(projectRoot, root);
     await walk(root, extensions, files, { explicit: true, projectRoot, excludeProject });
   }
-  files.sort((left, right) => left.file.localeCompare(right.file));
+  const uniqueFiles = new Map();
+  for (const entry of files) {
+    const existing = uniqueFiles.get(entry.file);
+    uniqueFiles.set(entry.file, {
+      file: entry.file,
+      explicit: entry.explicit || existing?.explicit || false,
+    });
+  }
+  const sortedFiles = [...uniqueFiles.values()]
+    .sort((left, right) => left.file.localeCompare(right.file));
   const sources = await Promise.all(
-    files.map(async ({ file, explicit }) => ({
+    sortedFiles.map(async ({ file, explicit }) => ({
       explicit,
       path: normalizePath(path.relative(projectRoot, file)),
       text: await fs.readFile(file, "utf8"),
