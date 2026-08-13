@@ -237,6 +237,27 @@ class GraphMdCliTest {
     }
 
     @Test
+    fun `site force restores the complete output when preserving node modules fails`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "/workspace/person.md" to nodeType("Person"),
+                "/site/old.txt" to "old site",
+                "/site/node_modules/package/index.js" to "old dependency",
+            ),
+            failAtomicMoveAt = setOf(3),
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/site", "/workspace", "--force"))
+
+        assertEquals(1, result.exitCode)
+        assertEquals("old site", fileSystem.contentsUnder("/site").getValue("/site/old.txt"))
+        assertEquals(
+            "old dependency",
+            fileSystem.contentsUnder("/site").getValue("/site/node_modules/package/index.js"),
+        )
+    }
+
+    @Test
     fun `safe site slug encodes non path characters without collisions`() {
         assertEquals("alice", safeSlug("alice"))
         assertEquals("~41lice", safeSlug("Alice"))
@@ -1675,9 +1696,11 @@ private class FakeFileSystem(
     private val aliases: Map<String, String> = emptyMap(),
     private val failWriteAt: Int? = null,
     private val emittedSeparator: Char = '/',
+    private val failAtomicMoveAt: Set<Int> = emptySet(),
 ) : CliFileSystem {
     private val mutableFiles = files.toMutableMap()
     private var writeCount = 0
+    private var atomicMoveCount = 0
     private val directories: MutableSet<String> = buildSet {
         add("/")
         files.keys.forEach { file ->
@@ -1742,6 +1765,8 @@ private class FakeFileSystem(
     }
 
     override fun atomicMove(source: String, destination: String) {
+        atomicMoveCount++
+        if (atomicMoveCount in failAtomicMoveAt) error("simulated atomic move failure")
         val from = canonical(source)
         val to = canonical(destination)
         if (kind(from) == null || kind(to) != null) error("Cannot move $source to $destination")

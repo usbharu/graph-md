@@ -94,23 +94,20 @@ private fun installStagedSite(fileSystem: CliFileSystem, staging: String, output
     val backup = unusedSibling(fileSystem, output, "graphmd-backup")
     fileSystem.atomicMove(output, backup)
     val oldModules = fileSystem.child(backup, "node_modules")
-    val stagedModules = fileSystem.child(staging, "node_modules")
-    var modulesMoved = false
+    val installedModules = fileSystem.child(output, "node_modules")
+    var installed = false
     try {
-        if (fileSystem.kind(oldModules) == FileKind.Directory) {
-            fileSystem.atomicMove(oldModules, stagedModules)
-            modulesMoved = true
-        }
         fileSystem.atomicMove(staging, output)
+        installed = true
+        if (fileSystem.kind(oldModules) == FileKind.Directory) fileSystem.atomicMove(oldModules, installedModules)
     } catch (exception: Throwable) {
-        if (modulesMoved && fileSystem.kind(stagedModules) == FileKind.Directory) {
-            runCatching { fileSystem.atomicMove(stagedModules, oldModules) }
+        if (installed && fileSystem.kind(output) == FileKind.Directory) {
+            runCatching { fileSystem.atomicMove(output, staging) }
         }
-        if (fileSystem.kind(output) == FileKind.Directory) runCatching { deleteTree(fileSystem, output) }
         if (fileSystem.kind(backup) == FileKind.Directory) runCatching { fileSystem.atomicMove(backup, output) }
         throw exception
     }
-    deleteTree(fileSystem, backup)
+    runCatching { deleteTree(fileSystem, backup) }
 }
 
 private fun unusedSibling(fileSystem: CliFileSystem, output: String, suffix: String): String {
