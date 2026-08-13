@@ -6,13 +6,14 @@ const groups = site.documents.reduce((all, document) => {
   (all[document.kind] ??= []).push(document);
   return all;
 }, {} as Record<string, typeof site.documents>);
+const nodeTypeCount = site.documents.filter((document) => document.kind === "NodeType").length;
 const excerpt = (body: string) => body.replace(/[#*`\[\]]/g, "").split("\n").filter(Boolean).slice(1, 2)[0];
 ---
 
 <WikiLayout title="メインページ">
   <section class="welcome-panel">
     <div><span class="eyebrow">Graph-based knowledge</span><h1>GraphMD Wiki</h1><p>つながりから知識を探索する、構造化されたドキュメントWiki。</p></div>
-    <dl><div><dt>{site.documents.length}</dt><dd>記事</dd></div><div><dt>{site.graph.edges.length}</dt><dd>リンク</dd></div><div><dt>{Object.keys(groups).length}</dt><dd>分類</dd></div></dl>
+    <dl><div><dt>{site.documents.length}</dt><dd>記事</dd></div><div><dt>{site.graph.edges.length}</dt><dd>リンク</dd></div><div><dt>{nodeTypeCount}</dt><dd>ノードタイプ</dd></div></dl>
   </section>
   <div class="page-heading"><div><span class="eyebrow">Explore</span><h2>記事を探す</h2></div><a href={site.base + "graph/"}>グラフを開く →</a></div>
   {Object.entries(groups).map(([kind, documents]) => (
