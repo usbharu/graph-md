@@ -1,18 +1,15 @@
 ---
 import { site } from "../lib/site";
+import { groupByKey } from "../lib/grouping";
 import "../styles/global.css";
 
 const { title, description = "GraphMDで構築された知識ベース", activePath = Astro.url.pathname } = Astro.props;
-const nodeTypeGroups = site.documents.reduce((all, document) => {
-  const nodeType = document.type ?? document.kind;
-  (all[nodeType] ??= []).push(document);
-  return all;
-}, {} as Record<string, typeof site.documents>);
+const nodeTypeGroups = groupByKey(site.documents, (document) => document.type ?? document.kind);
 const specialNodeTypes = ["RelType", "NodeType", "Timeline"];
 const specialGroups = specialNodeTypes.flatMap((nodeType) =>
-  nodeTypeGroups[nodeType] ? [[nodeType, nodeTypeGroups[nodeType]] as const] : [],
+  nodeTypeGroups.has(nodeType) ? [[nodeType, nodeTypeGroups.get(nodeType)!] as const] : [],
 );
-const regularGroups = Object.entries(nodeTypeGroups)
+const regularGroups = [...nodeTypeGroups.entries()]
   .filter(([nodeType]) => !specialNodeTypes.includes(nodeType))
   .sort(([left], [right]) => left.localeCompare(right, "ja"));
 const orderedGroups = [...specialGroups, ...regularGroups];

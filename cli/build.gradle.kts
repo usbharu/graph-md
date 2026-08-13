@@ -136,7 +136,7 @@ val updateEmbeddedWebRuntime by tasks.registering(Exec::class) {
 val siteTemplateFiles = fileTree(siteTemplateDirectory) {
     exclude(
         "node_modules/**", "dist/**", ".astro/**", "public/runtime/**", "public/search-index/**",
-        "src/vendor/**", "vendor/**",
+        "src/vendor/**", "vendor/**", "tests/**",
     )
 }
 
@@ -237,6 +237,15 @@ tasks.register<JavaExec>("run") {
 }
 
 val jvmMainCompilation = kotlin.targets.getByName("jvm").compilations.getByName("main")
+
+tasks.named<Test>("jvmTest") {
+    val embeddedQueryRuntime = embeddedWebRuntimeDirectory.file("graph-md-query-runtime.js.gz.b64")
+    inputs.file(embeddedQueryRuntime)
+    systemProperty(
+        "graphmd.embeddedQueryRuntime",
+        embeddedQueryRuntime.asFile.absolutePath,
+    )
+}
 
 tasks.register<Jar>("jvmReleaseJar") {
     group = "distribution"

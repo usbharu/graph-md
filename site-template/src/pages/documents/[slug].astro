@@ -3,6 +3,7 @@ import WikiLayout from "../../layouts/WikiLayout.astro";
 import TimelineGraph from "../../components/TimelineGraph";
 import HumanValue from "../../components/HumanValue";
 import { extractHeadings, renderMarkdown } from "../../lib/markdown";
+import { groupByKey } from "../../lib/grouping";
 import { site } from "../../lib/site";
 
 export function getStaticPaths() {
@@ -15,15 +16,11 @@ export function getStaticPaths() {
 const { document } = Astro.props;
 const html = renderMarkdown(document.body, document.embeds);
 const headings = extractHeadings(document.body);
-const groupProperties = (properties: typeof document.properties) => Object.values(
-  properties.reduce((groups, property) => {
-    (groups[property.name] ??= { name: property.name, assertions: [] }).assertions.push(property);
-    return groups;
-  }, {} as Record<string, {name: string; assertions: typeof document.properties}>),
-).map((group) => ({
-  ...group,
-  assertions: group.assertions.toSorted((left, right) => Number(left.fallback) - Number(right.fallback)),
-}));
+const groupProperties = (properties: typeof document.properties) =>
+  [...groupByKey(properties, (property) => property.name)].map(([name, assertions]) => ({
+    name,
+    assertions: assertions.toSorted((left, right) => Number(left.fallback) - Number(right.fallback)),
+  }));
 const propertyGroups = groupProperties(document.properties);
 const rational = (value: { numerator: number; denominator: number }) =>
   value.denominator === 1 ? String(value.numerator) : `${value.numerator}/${value.denominator}`;

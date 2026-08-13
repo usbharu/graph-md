@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "astro dev",
     "check": "astro check",
+    "test:prototype-keys": "node tests/prototype-keys-build.mjs",
     "build": "astro build",
     "preview": "astro preview"
   },

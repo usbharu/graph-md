@@ -80,7 +80,11 @@ internal fun GraphMdCli.site(command: CliCommand.Site, json: Boolean): CliResult
 private fun GraphMdCli.resolveSiteOutput(command: CliCommand.Site): String? {
     if (fileSystem.kind(command.outputDirectory) != null) return fileSystem.canonical(command.outputDirectory)
     val normalized = command.outputDirectory.replace('\\', '/').trimEnd('/')
-    val parent = normalized.substringBeforeLast('/', missingDelimiterValue = ".").ifEmpty { "/" }
+    val rawParent = normalized.substringBeforeLast('/', missingDelimiterValue = ".").ifEmpty { "/" }
+    // On Windows, `C:` means the current directory on drive C, whereas `C:/`
+    // means the drive root. Preserve that distinction when resolving an
+    // absolute path whose final component does not exist yet.
+    val parent = if (WINDOWS_DRIVE_PREFIX.matches(rawParent)) "$rawParent/" else rawParent
     val name = normalized.substringAfterLast('/')
     if (name.isEmpty() || fileSystem.kind(parent) != FileKind.Directory) return null
     return fileSystem.child(fileSystem.canonical(parent), name)
@@ -101,13 +105,31 @@ private fun installStagedSite(fileSystem: CliFileSystem, staging: String, output
         installed = true
         if (fileSystem.kind(oldModules) == FileKind.Directory) fileSystem.atomicMove(oldModules, installedModules)
     } catch (exception: Throwable) {
+        val rollbackFailures = mutableListOf<String>()
         if (installed && fileSystem.kind(output) == FileKind.Directory) {
-            runCatching { fileSystem.atomicMove(output, staging) }
+            rollbackMove(fileSystem, output, staging)?.let { rollbackFailure ->
+                rollbackFailures += "cannot move the new site aside: ${rollbackFailure.message ?: "I/O error"}"
+            }
         }
-        if (fileSystem.kind(backup) == FileKind.Directory) runCatching { fileSystem.atomicMove(backup, output) }
+        if (fileSystem.kind(backup) == FileKind.Directory) {
+            rollbackMove(fileSystem, backup, output)?.let { rollbackFailure ->
+                rollbackFailures += "cannot restore the previous site from $backup: ${rollbackFailure.message ?: "I/O error"}"
+            }
+        }
+        if (rollbackFailures.isNotEmpty()) {
+            throw CliIoException(
+                "${exception.message ?: "Site installation failed"}; rollback failed: ${rollbackFailures.joinToString("; ")}. " +
+                    "The previous site remains at $backup",
+            )
+        }
         throw exception
     }
     runCatching { deleteTree(fileSystem, backup) }
+}
+
+private fun rollbackMove(fileSystem: CliFileSystem, source: String, destination: String): Throwable? {
+    if (runCatching { fileSystem.atomicMove(source, destination) }.isSuccess) return null
+    return runCatching { fileSystem.move(source, destination) }.exceptionOrNull()
 }
 
 private fun unusedSibling(fileSystem: CliFileSystem, output: String, suffix: String): String {
@@ -155,6 +177,7 @@ private fun isWindowsPath(path: String): Boolean = WINDOWS_PATH.matches(path) ||
 
 private val WINDOWS_PATH = Regex("^[A-Za-z]:/.*")
 private val WINDOWS_VOLUME_ROOT = Regex("^[A-Za-z]:$")
+private val WINDOWS_DRIVE_PREFIX = Regex("^[A-Za-z]:$")
 private val UNC_ROOT = Regex("^//[^/]+/[^/]+$")
 
 internal fun safeSlug(id: String): String = buildString {

@@ -54,6 +54,8 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Install site template dependencies
+        run: pnpm --dir site-template install --frozen-lockfile
       - name: Build Markdown preview plugin
         run: pnpm --filter markdown-it-graphmd build
       - name: Compile VS Code extension
@@ -67,3 +69,7 @@ jobs:
             run: pnpm --filter graph-md-vscode exec tsc -p ./tsconfig.json --noEmit
           - name: Test VS Code extension
             run: pnpm --filter graph-md-vscode exec node --test
+          - name: Check site template
+            run: pnpm --dir site-template check
+          - name: Test site template edge cases
+            run: pnpm --dir site-template test:prototype-keys

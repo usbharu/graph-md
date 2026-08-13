@@ -263,6 +263,99 @@ class GraphMdCliTest {
     }
 
     @Test
+    fun `site force restores output when the first backup restore attempt fails`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "/workspace/person.md" to nodeType("Person"),
+                "/site/old.txt" to "old site",
+                "/site/node_modules/package/index.js" to "old dependency",
+            ),
+            failAtomicMoveAt = setOf(3, 5),
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/site", "/workspace", "--force"))
+
+        assertEquals(1, result.exitCode)
+        assertEquals("old site", fileSystem.contentsUnder("/site").getValue("/site/old.txt"))
+        assertEquals(
+            "old dependency",
+            fileSystem.contentsUnder("/site").getValue("/site/node_modules/package/index.js"),
+        )
+        assertFalse(fileSystem.allPaths().any { ".graphmd-backup-" in it })
+    }
+
+    @Test
+    fun `site force restores output when moving the failed installation aside needs fallback`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "/workspace/person.md" to nodeType("Person"),
+                "/site/old.txt" to "old site",
+                "/site/node_modules/package/index.js" to "old dependency",
+            ),
+            failAtomicMoveAt = setOf(3, 4),
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/site", "/workspace", "--force"))
+
+        assertEquals(1, result.exitCode)
+        assertEquals("old site", fileSystem.contentsUnder("/site").getValue("/site/old.txt"))
+        assertEquals(
+            "old dependency",
+            fileSystem.contentsUnder("/site").getValue("/site/node_modules/package/index.js"),
+        )
+        assertFalse(fileSystem.allPaths().any { ".graphmd-backup-" in it })
+    }
+
+    @Test
+    fun `site force preserves the backup and reports its path when rollback cannot complete`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "/workspace/person.md" to nodeType("Person"),
+                "/site/old.txt" to "old site",
+                "/site/node_modules/package/index.js" to "old dependency",
+            ),
+            failAtomicMoveAt = setOf(3, 4),
+            failMoveAt = setOf(1),
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "/site", "/workspace", "--force"))
+
+        assertEquals(1, result.exitCode)
+        assertTrue(result.stderr.contains("rollback failed"), result.stderr)
+        assertTrue(result.stderr.contains("/site.graphmd-backup-0"), result.stderr)
+        assertEquals(
+            "old site",
+            fileSystem.contentsUnder("/site.graphmd-backup-0").getValue("/site.graphmd-backup-0/old.txt"),
+        )
+        assertEquals(
+            "old dependency",
+            fileSystem.contentsUnder("/site.graphmd-backup-0")
+                .getValue("/site.graphmd-backup-0/node_modules/package/index.js"),
+        )
+    }
+
+    @Test
+    fun `site resolves a missing Windows drive absolute output from the drive root`() {
+        val fileSystem = FakeFileSystem(
+            mapOf(
+                "C:/repo/docs/person.md" to nodeType("Person"),
+                "C:/repo/site/keep.txt" to "unrelated existing directory",
+            ),
+            currentDirectory = "C:/repo",
+            windowsDriveCurrentDirectories = mapOf("C:" to "C:/repo"),
+        )
+
+        val result = GraphMdCli(fileSystem).run(listOf("site", "C:\\site", "C:/repo/docs", "--force"))
+
+        assertEquals(0, result.exitCode, result.stderr)
+        assertEquals(
+            "unrelated existing directory",
+            fileSystem.contentsUnder("C:/repo/site").getValue("C:/repo/site/keep.txt"),
+        )
+        assertTrue("C:/site/package.json" in fileSystem.contentsUnder("C:/site"))
+    }
+
+    @Test
     fun `safe site slug encodes non path characters without collisions`() {
         assertEquals("alice", safeSlug("alice"))
         assertEquals("~41lice", safeSlug("Alice"))
@@ -1873,10 +1966,14 @@ private class FakeFileSystem(
     failWriteAt: Int? = null,
     private val emittedSeparator: Char = '/',
     private val failAtomicMoveAt: Set<Int> = emptySet(),
+    private val failMoveAt: Set<Int> = emptySet(),
+    private val currentDirectory: String = "/workspace",
+    private val windowsDriveCurrentDirectories: Map<String, String> = emptyMap(),
 ) : CliFileSystem {
     private val mutableFiles = files.toMutableMap()
     private var writeCount = 0
     private var atomicMoveCount = 0
+    private var moveCount = 0
     private var failureWriteNumber = failWriteAt
     private val directories: MutableSet<String> = buildSet {
         add("/")
@@ -1885,6 +1982,10 @@ private class FakeFileSystem(
             while (current.isNotEmpty()) {
                 add(current)
                 if (current == "/") break
+                if (WINDOWS_TEST_DRIVE_PREFIX.matches(current)) {
+                    add("$current/")
+                    break
+                }
                 current = current.substringBeforeLast('/', missingDelimiterValue = "/")
             }
         }
@@ -1899,8 +2000,9 @@ private class FakeFileSystem(
     override fun canonical(path: String): String {
         val normalized = path.replace('\\', '/')
         val absolute = when (normalized) {
-            "." -> "/workspace"
-            else -> normalized.removeSuffix("/").ifEmpty { "/" }
+            "." -> currentDirectory
+            in windowsDriveCurrentDirectories -> windowsDriveCurrentDirectories.getValue(normalized)
+            else -> if (WINDOWS_TEST_DRIVE_ROOT.matches(normalized)) normalized else normalized.removeSuffix("/").ifEmpty { "/" }
         }
         return aliases[absolute] ?: absolute
     }
@@ -1916,7 +2018,13 @@ private class FakeFileSystem(
     override fun readText(path: String): String = mutableFiles.getValue(canonical(path))
 
     override fun child(path: String, name: String): String =
-        canonical(path).let { if (it == "/") "/$name" else "$it/$name" }
+        canonical(path).let {
+            when {
+                it == "/" -> "/$name"
+                WINDOWS_TEST_DRIVE_ROOT.matches(it) -> "$it$name"
+                else -> "$it/$name"
+            }
+        }
             .let { if (emittedSeparator == '\\') it.replace('/', '\\') else it }
 
     override fun createDirectories(path: String) {
@@ -1940,6 +2048,8 @@ private class FakeFileSystem(
     }
 
     override fun move(source: String, destination: String) {
+        moveCount++
+        if (moveCount in failMoveAt) error("simulated move failure")
         val canonicalSource = canonical(source)
         val canonicalDestination = canonical(destination)
         check(kind(canonicalDestination) == null) { "Destination already exists: $destination" }
@@ -1997,3 +2107,6 @@ private class FakeFileSystem(
 
     fun allPaths(): Set<String> = mutableFiles.keys + directories
 }
+
+private val WINDOWS_TEST_DRIVE_PREFIX = Regex("^[A-Za-z]:$")
+private val WINDOWS_TEST_DRIVE_ROOT = Regex("^[A-Za-z]:/$")
