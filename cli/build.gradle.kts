@@ -145,10 +145,11 @@ val stageSiteTemplate by tasks.registering(Sync::class) {
     from(siteTemplateFiles)
     filesMatching(listOf("package.json", "pnpm-lock.yaml")) {
         filter { line ->
-            line.replace(
+            val relocated = line.replace(
                 "../astro/build/dist/js/productionLibrary",
                 "./vendor/graph-md-astro",
             )
+            if (relocated.contains("\"test:prototype-keys\"")) "" else relocated
         }
     }
     from(rootProject.layout.projectDirectory.dir("astro/build/dist/js/productionLibrary")) {
