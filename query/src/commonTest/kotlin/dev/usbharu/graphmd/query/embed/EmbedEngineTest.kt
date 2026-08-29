@@ -32,6 +32,7 @@ class EmbedEngineTest {
 
         assertTrue(result.isSuccess)
         assertEquals(listOf("alice", "bob"), result.table!!.rows.map { it.cells.single().text })
+        assertEquals(listOf("alice", "bob"), result.table.rows.map { it.cells.single().targetId })
         assertFalse(limited.isSuccess)
         assertEquals("GMQL5001", limited.diagnostics.single().code)
     }

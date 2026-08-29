@@ -1,0 +1,124 @@
+---
+import WikiLayout from "../../layouts/WikiLayout.astro";
+import TimelineGraph from "../../components/TimelineGraph";
+import HumanValue from "../../components/HumanValue";
+import { extractHeadings, renderMarkdown } from "../../lib/markdown";
+import { groupByKey } from "../../lib/grouping";
+import { site } from "../../lib/site";
+
+export function getStaticPaths() {
+  return site.documents.map((document) => ({
+    params: { slug: document.slug },
+    props: { document },
+  }));
+}
+
+const { document } = Astro.props;
+const html = renderMarkdown(document.body, document.embeds);
+const headings = extractHeadings(document.body);
+const groupProperties = (properties: typeof document.properties) =>
+  [...groupByKey(properties, (property) => property.name)].map(([name, assertions]) => ({
+    name,
+    assertions: assertions.toSorted((left, right) => Number(left.fallback) - Number(right.fallback)),
+  }));
+const propertyGroups = groupProperties(document.properties);
+const rational = (value: { numerator: number; denominator: number }) =>
+  value.denominator === 1 ? String(value.numerator) : `${value.numerator}/${value.denominator}`;
+---
+
+<WikiLayout title={document.title} description={`${document.title} — GraphMD Wiki`}>
+  <article class="wiki-article">
+    <nav class="breadcrumbs" aria-label="パンくずリスト"><a href={site.base}>メインページ</a><span>›</span><span>{document.kind}</span></nav>
+    <header class="article-header">
+      <div class="eyebrow">
+      {document.kind}{document.type && ` · ${document.type}`}
+      </div>
+      <h1>{document.title}</h1>
+      <div class="article-actions">
+        <span>記事</span>
+        <a href={site.base + "graph/"}>グラフで見る</a>
+        {document.url && <a href={document.url}>原典を開く ↗</a>}
+      </div>
+    </header>
+    <div class="markdown" set:html={html} />
+    {(document.kind === "Node" || document.kind === "Media") && document.properties.length > 0 && (
+      <section class="structured-section" id="properties">
+        <div class="section-title"><span class="eyebrow">Properties</span><h2>プロパティ</h2></div>
+        <dl class="property-grid">
+          {propertyGroups.map((property) => (
+            <div><dt>{property.name}</dt><dd><div class="property-assertions">{property.assertions.map((assertion) => <div class:list={["property-assertion", {"is-fallback": assertion.fallback}]}><HumanValue value={assertion.value} validTime={assertion.validTime} fallback={assertion.fallback} showFallback={assertion.fallback && property.assertions.length > 1} /></div>)}</div></dd></div>
+          ))}
+        </dl>
+      </section>
+    )}
+    {document.kind === "NodeType" && (
+      <>
+      {document.nodeType && <section class="structured-section" id="inheritance">
+        <div class="section-title"><span class="eyebrow">Inheritance</span><h2>継承関係</h2></div>
+        <div class="inheritance-flow">
+          <div class="inheritance-column"><span class="inheritance-label">親</span>{document.nodeType.parents.length > 0 ? document.nodeType.parents.map((type) => type.route ? <a class="type-node" href={type.route}><strong>{type.title}</strong><small>{type.id}</small></a> : <span class="type-node"><strong>{type.title}</strong><small>{type.id}</small></span>) : <span class="inheritance-empty">なし</span>}</div>
+          <span class="inheritance-arrow" aria-hidden="true">→</span>
+          <div class="inheritance-column current"><span class="inheritance-label">現在</span><span class="type-node"><strong>{document.title}</strong><small>{document.id}</small></span></div>
+          <span class="inheritance-arrow" aria-hidden="true">→</span>
+          <div class="inheritance-column"><span class="inheritance-label">子</span>{document.nodeType.children.length > 0 ? document.nodeType.children.map((type) => type.route ? <a class="type-node" href={type.route}><strong>{type.title}</strong><small>{type.id}</small></a> : <span class="type-node"><strong>{type.title}</strong><small>{type.id}</small></span>) : <span class="inheritance-empty">なし</span>}</div>
+        </div>
+      </section>}
+      <section class="structured-section" id="schema">
+        <div class="section-title"><span class="eyebrow">Schema</span><h2>プロパティ定義</h2></div>
+        {document.schema.length > 0 ? <div class="schema-table-wrap"><table class="schema-table"><thead><tr><th>プロパティ</th><th>型</th><th>要件</th><th>制約</th></tr></thead><tbody>
+          {document.schema.map(({name, schema}) => <tr><th>{name}</th><td><code>{schema.type}{schema.items && "[]"}</code></td><td>{schema.required ? <span class="required-badge">必須</span> : <span class="optional-badge">任意</span>}</td><td>{schema.enum?.length ? <div class="enum-values">{schema.enum.map((value) => <span><HumanValue value={value} /></span>)}</div> : schema.timeline || schema.timelines ? <HumanValue value={schema.timeline ?? schema.timelines} /> : <span class="muted">—</span>}</td></tr>)}
+        </tbody></table></div> : <p class="muted">定義されたプロパティはありません。</p>}
+      </section>
+      {document.nodeType && <section class="structured-section" id="type-usage">
+        <div class="section-title"><span class="eyebrow">Instances</span><h2>このNodeTypeを使うページ</h2><span class="count-badge">{document.nodeType.usage.length}</span></div>
+        {document.nodeType.usage.length > 0 ? <div class="type-usage-grid">{document.nodeType.usage.map((item) => item.route ? <a class="type-usage-card" href={item.route}><span>{item.kind}</span><strong>{item.title}</strong><small>{item.id}</small></a> : <span class="type-usage-card"><span>{item.kind}</span><strong>{item.title}</strong><small>{item.id}</small></span>)}</div> : <p class="muted">このNodeTypeを直接使うNodeまたはMediaはありません。</p>}
+      </section>}
+      </>
+    )}
+    {document.kind === "RelType" && (
+      <section class="structured-section" id="relation-usage">
+        <div class="section-title"><span class="eyebrow">Usage</span><h2>このRelTypeを使うリンク</h2><span class="count-badge">{document.relationUsage.length}</span></div>
+        {document.relationUsage.length > 0 ? <ol class="relation-list">
+          {document.relationUsage.map((relation) => <li><div class="relation-path">{relation.fromRoute ? <a href={relation.fromRoute}>{relation.from}</a> : <span>{relation.from}</span>}<span class="relation-arrow"><small>{document.id}</small>→</span>{relation.toRoute ? <a href={relation.toRoute}>{relation.to}</a> : <span>{relation.to}</span>}</div>{relation.label && <p>{relation.label}</p>}{relation.properties.length > 0 && <dl class="relation-properties">{groupProperties(relation.properties).map((property) => <div><dt>{property.name}</dt><dd><div class="property-assertions">{property.assertions.map((assertion) => <div class="property-assertion"><HumanValue value={assertion.value} validTime={assertion.validTime} fallback={assertion.fallback} showFallback={assertion.fallback && property.assertions.length > 1} /></div>)}</div></dd></div>)}</dl>}</li>)}
+        </ol> : <p class="muted">このRelTypeを使うリンクはありません。</p>}
+      </section>
+    )}
+    {document.kind === "Timeline" && document.timeline && (
+      <section class="structured-section timeline-section" id="timeline-model">
+        <div class="section-title"><span class="eyebrow">Temporal model</span><h2>タイムライン系譜</h2></div>
+        <TimelineGraph client:visible elements={[...site.timelineGraph.nodes, ...site.timelineGraph.edges]} selected={document.id} />
+        <div class="timeline-facts">
+          <div><span>Axis</span><strong>{document.timeline.axis}</strong></div><div><span>Domain</span><strong>{document.timeline.domain}</strong></div><div><span>Coordinate</span><HumanValue value={document.timeline.coordinate} /></div>
+        </div>
+        {(document.timeline.parent || document.timeline.lineage) && <div class="lineage-cards">
+          {document.timeline.parent && <article><span class="relation-kind same-axis">Same axis</span><strong>{document.timeline.parentRoute ? <a href={document.timeline.parentRoute}>{document.timeline.parent}</a> : document.timeline.parent}</strong></article>}
+          {document.timeline.lineage && <article><span class="relation-kind lineage">{document.timeline.lineage.kind}</span><strong>{document.timeline.lineageRoute ? <a href={document.timeline.lineageRoute}>{document.timeline.lineage.sourceTimeline}</a> : document.timeline.lineage.sourceTimeline}</strong></article>}
+        </div>}
+        <div class="mapping-heading"><h3>Mappings</h3><span>{document.timeline.mappings.length}</span></div>
+        {document.timeline.mappings.length > 0 ? <ol class="mapping-list">{document.timeline.mappings.map((mapping) => <li>
+          <div class="mapping-route"><span class:list={["direction-badge", mapping.direction]}>{mapping.direction === "outgoing" ? "OUT" : "IN"}</span>{mapping.sourceRoute ? <a href={mapping.sourceRoute}>{mapping.source}</a> : mapping.source}<span>→</span>{mapping.targetRoute ? <a href={mapping.targetRoute}>{mapping.target}</a> : mapping.target}</div>
+          <dl><div><dt>Kind</dt><dd>{mapping.definition.kind}</dd></div><div><dt>Precision</dt><dd>{mapping.definition.precision}</dd></div><div><dt>Scale</dt><dd>{rational(mapping.definition.scale)}</dd></div><div><dt>Offset</dt><dd>{rational(mapping.definition.offset)}</dd></div></dl>
+        </li>)}</ol> : <p class="muted">このタイムラインに接続するmappingはありません。</p>}
+      </section>
+    )}
+    <footer class="backlinks">
+      <div><span class="eyebrow">Connections</span><h2>このページへのリンク</h2></div>
+      {document.backlinks.length ? (
+        <ul class="backlink-list">
+          {document.backlinks.map((link) => (
+            <li>
+              {link.route ? <a href={link.route}>{link.id}</a> : link.id}
+              {" "}<small>{link.type}</small>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p class="muted">このページを参照している記事はありません。</p>
+      )}
+    </footer>
+  </article>
+  <div slot="context">
+    {headings.length > 0 && <nav class="toc" aria-label="目次"><h2>目次</h2>{headings.map((heading) => <a class:list={{nested: heading.level === 3}} href={`#${heading.id}`}>{heading.title}</a>)}</nav>}
+    <section class="page-details"><h2>ページ情報</h2><dl><div><dt>種類</dt><dd>{document.kind}</dd></div>{document.type && <div><dt>タイプ</dt><dd>{document.type}</dd></div>}<div><dt>ID</dt><dd>{document.id}</dd></div></dl></section>
+  </div>
+</WikiLayout>

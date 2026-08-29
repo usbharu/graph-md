@@ -19,6 +19,7 @@ internal interface CliFileSystem {
     fun writeText(path: String, text: String)
     fun move(source: String, destination: String)
     fun delete(path: String, mustExist: Boolean = true)
+    fun atomicMove(source: String, destination: String)
 }
 
 internal object SystemCliFileSystem : CliFileSystem {
@@ -62,6 +63,10 @@ internal object SystemCliFileSystem : CliFileSystem {
 
     override fun delete(path: String, mustExist: Boolean) {
         SystemFileSystem.delete(Path(path), mustExist)
+    }
+
+    override fun atomicMove(source: String, destination: String) {
+        SystemFileSystem.atomicMove(Path(source), Path(destination))
     }
 }
 

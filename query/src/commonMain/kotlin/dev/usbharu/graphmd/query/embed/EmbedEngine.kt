@@ -38,6 +38,13 @@ class EmbedEngine(
     private val searchEngine: GraphSearchEngine,
     private val maxRows: Int = DEFAULT_EMBED_ROW_LIMIT,
 ) {
+    private val linkableIds = buildSet {
+        searchEngine.graph.nodes.mapTo(this) { it.id.value }
+        searchEngine.graph.nodeTypeIds.mapTo(this) { it.value }
+        searchEngine.graph.relationTypeIds.mapTo(this) { it.value }
+        searchEngine.graph.timelines.mapTo(this) { it.id.value }
+    }
+
     init {
         require(maxRows > 0)
     }
@@ -64,10 +71,22 @@ class EmbedEngine(
             table = EmbedTable(
                 columns = result.columns.map { EmbedColumn(it.name, it.type.embedTypeName()) },
                 rows = result.rows.map { row ->
-                    EmbedRow(row.values.map { EmbedCell(formatEmbedValue(it)) })
+                    EmbedRow(row.values.map { value ->
+                        EmbedCell(formatEmbedValue(value), embedTargetId(value))
+                    })
                 },
             ),
         )
+    }
+
+    private fun embedTargetId(value: GmqlValue): String? {
+        val candidate = when (value) {
+            is GmqlValue.NodeValue -> value.id.value
+            is GmqlValue.StringValue -> value.value
+            is GmqlValue.TypeRefValue -> value.name
+            else -> null
+        }
+        return candidate.takeIf { it in linkableIds }
     }
 
     private fun renderBackLinks(relType: String, currentNodeId: String): EmbedRenderResult {

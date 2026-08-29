@@ -22,6 +22,10 @@ function dataProps(html: string): string | null {
     .replace(/&gt;/g, ">");
 }
 
+function visibleProps(html: string): string {
+  return html.replace(/ data-props-bind="[^"]*"/, "");
+}
+
 describe("relation link", () => {
   it("renders the recommended hyperlink form", () => {
     const html = render("Hello @link[Bob](bob friendOf)");
@@ -132,9 +136,10 @@ describe("relation link", () => {
 describe("@props", () => {
   it("renders bound properties as visible values", () => {
     const html = render('@props{name = "Alice"}');
-    expect(html).toContain('class="graphmd-props"');
-    expect(html).not.toContain("hidden");
-    expect(html).toContain('data-props-name="name"><span class="graphmd-prop-value">Alice</span><span class="graphmd-prop-annotations"><sub class="graphmd-prop-name">name</sub>');
+    expect(html).toContain('class="graphmd-props graphmd-props--block"');
+    expect(html).toContain('data-props-name="name"');
+    expect(html).toContain('<span class="graphmd-prop-name">name</span>');
+    expect(html).toContain('<span class="graphmd-prop-value graphmd-prop-value--plain">Alice</span>');
     expect(html).toContain("&quot;name&quot;:&quot;Alice&quot;");
     expect(dataProps(html)).toBe('{"name":"Alice"}');
   });
@@ -143,52 +148,75 @@ describe("@props", () => {
     const html = render('@props{name = "<Alice>",age=20}');
     expect(html.indexOf('data-props-name="name"')).toBeLessThan(html.indexOf('data-props-name="age"'));
     expect(html).toContain("&lt;Alice&gt;");
-    expect(html).toContain('<span class="graphmd-prop-value">20</span><span class="graphmd-prop-annotations"><sub class="graphmd-prop-name">age</sub>');
+    expect(html).toContain('<span class="graphmd-prop-value graphmd-prop-value--plain">20</span>');
   });
 
-  it("renders a subscript property name immediately before its value in prose", () => {
+  it("keeps the value readable in prose and exposes a restrained property label", () => {
     const html = render("年齢は@props{age=25}歳");
-    expect(html).toContain('年齢は<span class="graphmd-props"');
-    expect(html).toContain('<span class="graphmd-prop-value">25</span><span class="graphmd-prop-annotations"><sub class="graphmd-prop-name">age</sub>');
+    expect(html).toContain('年齢は<span class="graphmd-props graphmd-props--inline"');
+    expect(html).toContain('<span class="graphmd-prop-name" aria-hidden="true">age</span>');
+    expect(html).toContain('<span class="graphmd-prop-value graphmd-prop-value--plain">25</span>');
     expect(html).toContain("歳</p>");
   });
 
-  it("renders validTime next to its value and accepts spaces around equals", () => {
+  it("renders validTime as a human-readable timeline label", () => {
     const html = render("年齢は@props(validTime = CommonEra){age = 25}歳");
-    expect(html).toContain('<span class="graphmd-prop-value">25<sup class="graphmd-prop-valid-time">CommonEra</sup></span><span class="graphmd-prop-annotations"><sub class="graphmd-prop-name">age</sub>');
+    expect(html).toContain('<span class="graphmd-prop-value graphmd-prop-value--temporal">25</span>');
+    expect(html).toContain('<span class="graphmd-prop-timeline">CommonEra</span>');
   });
 
-  it("renders each validTime next to the property assertion it applies to", () => {
+  it("renders fallback and timed values as separate assertions without JSON punctuation", () => {
     const html = render("@props{age(validTime=TimelineA)=17,age=18}");
-    expect(html).toContain('<span class="graphmd-prop-value">[18,17<sup class="graphmd-prop-valid-time">TimelineA</sup>]</span><span class="graphmd-prop-annotations"><sub class="graphmd-prop-name">age</sub>');
+    expect(html).toContain('<span class="graphmd-prop-value graphmd-prop-value--default">18</span>');
+    expect(html).toContain('<span class="graphmd-prop-value graphmd-prop-value--temporal">17</span>');
+    expect(html).toContain('<span class="graphmd-prop-timeline">TimelineA</span>');
+    expect(html).not.toContain(">[18,");
   });
 
   it("keeps multiple timelines on their own property assertion", () => {
     const html = render("@props{age(validTime=[TimelineA,TimelineB,TimelineA])=17,age(validTime=TimelineC)=18}");
-    expect(html).toContain('[17<sup class="graphmd-prop-valid-time">TimelineA,TimelineB</sup>,18<sup class="graphmd-prop-valid-time">TimelineC</sup>]');
+    expect(html.match(/<span class="graphmd-prop-timeline">TimelineA<\/span>/g)).toHaveLength(1);
+    expect(html).toContain('<span class="graphmd-prop-timeline">TimelineB</span>');
+    expect(html).toContain('<span class="graphmd-prop-timeline">TimelineC</span>');
+  });
+
+  it("renders validity bounds as a range instead of serialised JSON", () => {
+    const html = render('@props{name(validTime=Branch(from=1,to=2))="Alice"}');
+    expect(html).toContain('<span class="graphmd-prop-timeline">Branch</span>');
+    expect(html).toContain('<span class="graphmd-prop-valid-range"><span>1</span>');
+    expect(html).toContain('<span>2</span></span>');
+    expect(visibleProps(html)).not.toContain('{&quot;timeline&quot;');
+  });
+
+  it("renders keyed text values as labelled alternatives instead of an object literal", () => {
+    const html = render('@props{name(key="lang:ja")="アリス",name(key="lang:us")="Alice"}');
+    expect(html).toContain('<span class="graphmd-prop-field-name">ja</span>');
+    expect(html).toContain('<span class="graphmd-prop-field-value">アリス</span>');
+    expect(html).toContain('<span class="graphmd-prop-field-name">us</span>');
+    expect(visibleProps(html)).not.toContain('{&quot;lang:ja&quot;');
   });
 
   it("handles a multi-line block", () => {
     const html = render("@props{\n  height = 162.5\n  active = true\n}");
-    expect(html).toMatch(/^<div class="graphmd-props"/);
+    expect(html).toMatch(/^<div class="graphmd-props graphmd-props--block"/);
     expect(dataProps(html)).toBe('{"height":162.5,"active":true}');
   });
 
   it("keeps a standalone props directive with trailing whitespace as a block", () => {
     const html = render("@props{x = 1} \t");
-    expect(html).toMatch(/^<div class="graphmd-props"/);
+    expect(html).toMatch(/^<div class="graphmd-props graphmd-props--block"/);
     expect(dataProps(html)).toBe('{"x":1}');
   });
 
   it("supports inline occurrence inside a paragraph", () => {
     const html = render("leading @props{x = 1} trailing");
-    expect(html).toContain('class="graphmd-props"');
+    expect(html).toContain('class="graphmd-props graphmd-props--inline"');
     expect(dataProps(html)).toBe('{"x":1}');
   });
 
   it("preserves prose and markdown after props at the start of a line", () => {
     const html = render('@props{name = "Alice"}です。 **表示されます**');
-    expect(html).toMatch(/^<p><span class="graphmd-props"/);
+    expect(html).toMatch(/^<p><span class="graphmd-props graphmd-props--inline"/);
     expect(html).toContain("です。 <strong>表示されます</strong></p>");
     expect(dataProps(html)).toBe('{"name":"Alice"}');
   });

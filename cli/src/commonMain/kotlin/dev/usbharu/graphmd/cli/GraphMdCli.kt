@@ -28,7 +28,7 @@ private enum class Visibility(val wireName: String) {
 }
 
 class GraphMdCli internal constructor(
-    private val fileSystem: CliFileSystem = SystemCliFileSystem,
+    internal val fileSystem: CliFileSystem = SystemCliFileSystem,
 ) {
     fun run(arguments: List<String>): CliResult {
         return when (val parsed = CliArguments.parse(arguments)) {
@@ -53,6 +53,7 @@ class GraphMdCli internal constructor(
     private fun execute(invocation: ParseResult.Run): CliResult {
         val command = invocation.command
         if (command is CliCommand.Demo) return demo(command, invocation.json)
+        if (command is CliCommand.Site) return site(command, invocation.json)
         if (command is CliCommand.Search && command.indexDirectory != null) {
             return search(loadStaticEngine(command.indexDirectory), emptyList(), command, invocation.json)
         }
@@ -78,6 +79,7 @@ class GraphMdCli internal constructor(
             )
             is CliCommand.Index -> index(compilation, sources, command, invocation.json)
             is CliCommand.Embed -> embed(compilation, sources, invocation.json)
+            is CliCommand.Site -> error("site is executed before workspace loading")
             is CliCommand.Demo -> error("demo is executed before workspace loading")
         }
     }

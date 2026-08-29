@@ -1,0 +1,122 @@
+---
+import { site } from "../lib/site";
+import { groupByKey } from "../lib/grouping";
+import "../styles/global.css";
+
+const { title, description = "GraphMDで構築された知識ベース", activePath = Astro.url.pathname } = Astro.props;
+const nodeTypeGroups = groupByKey(site.documents, (document) => document.type ?? document.kind);
+const specialNodeTypes = ["RelType", "NodeType", "Timeline"];
+const specialGroups = specialNodeTypes.flatMap((nodeType) =>
+  nodeTypeGroups.has(nodeType) ? [[nodeType, nodeTypeGroups.get(nodeType)!] as const] : [],
+);
+const regularGroups = [...nodeTypeGroups.entries()]
+  .filter(([nodeType]) => !specialNodeTypes.includes(nodeType))
+  .sort(([left], [right]) => left.localeCompare(right, "ja"));
+const orderedGroups = [...specialGroups, ...regularGroups];
+---
+
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content={description} />
+    <meta name="color-scheme" content="light dark" />
+    <title>{title} · GraphMD</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#content">本文へ移動</a>
+    <header class="site-header">
+      <button class="icon-button menu-button" type="button" aria-label="メニューを開く" aria-controls="site-sidebar" aria-expanded="false">☰</button>
+      <a class="brand" href={site.base} aria-label="GraphMD Wiki ホーム">
+        <span class="brand-mark" aria-hidden="true">G</span>
+        <span><strong>GraphMD</strong><small>The knowledge wiki</small></span>
+      </a>
+      <form class="header-search" action={site.base + "search/"} role="search">
+        <label class="sr-only" for="site-search">Wiki内を検索</label>
+        <span aria-hidden="true">⌕</span>
+        <input id="site-search" name="q" type="search" placeholder="Wiki内を検索" autocomplete="off" />
+        <kbd>⌘ K</kbd>
+      </form>
+      <nav class="top-nav" aria-label="主要ナビゲーション">
+        <a class:list={{active: activePath.includes("/search/")}} href={site.base + "search/"}>検索</a>
+        <a class:list={{active: activePath.includes("/graph/")}} href={site.base + "graph/"}>グラフ</a>
+        <button class="appearance-button" type="button" aria-label="表示設定" aria-expanded="false">Aa</button>
+      </nav>
+    </header>
+    <div class="sidebar-scrim" data-close-sidebar></div>
+    <div class="appearance-panel" hidden>
+      <strong>表示</strong>
+      <div class="setting-row" role="group" aria-label="文字サイズ">
+        <button data-font="compact" type="button">小</button><button data-font="default" type="button">標準</button><button data-font="large" type="button">大</button>
+      </div>
+      <label class="theme-toggle"><span>ダークモード</span><input type="checkbox" data-theme-toggle /></label>
+    </div>
+    <div class="wiki-shell">
+      <aside class="site-sidebar" id="site-sidebar">
+        <nav aria-label="Wikiナビゲーション">
+          <a class:list={["sidebar-home", {active: activePath === site.base}]} href={site.base}><span aria-hidden="true">⌂</span>メインページ</a>
+          {orderedGroups.map(([nodeType, documents], index) => (
+            <>
+              {index === 0 && specialGroups.length > 0 && <div class="sidebar-label">System</div>}
+              {index === specialGroups.length && regularGroups.length > 0 && (
+                <>
+                  {specialGroups.length > 0 && <div class="folder-divider" role="separator"></div>}
+                  <div class="sidebar-label">Node types</div>
+                </>
+              )}
+              <details
+                class:list={["nav-folder", {"nav-folder-special": index < specialGroups.length}]}
+                data-node-type={nodeType}
+                open={documents.some((doc) => activePath === doc.route) || (activePath === site.base && index === 0)}
+              >
+                <summary>
+                  <span class="folder-icon" aria-hidden="true"></span>
+                  <span>{nodeType}</span>
+                  <small>{documents.length}</small>
+                </summary>
+                <div class="folder-children">
+                {documents.map((doc) => (
+                  <a class:list={{active: activePath === doc.route}} href={doc.route} aria-current={activePath === doc.route ? "page" : undefined}>
+                    {doc.title}<small>{doc.kind} · {doc.id}</small>
+                  </a>
+                ))}
+                </div>
+              </details>
+            </>
+          ))}
+        </nav>
+        <footer><a href={site.base + "graph/"}>知識グラフ</a><span>{site.documents.length}ページ</span></footer>
+      </aside>
+      <main id="content"><slot /></main>
+      <aside class="context-sidebar"><slot name="context" /></aside>
+    </div>
+    <script is:inline>
+      const root = document.documentElement;
+      const menu = document.querySelector('.menu-button');
+      const closeSidebar = () => { document.body.classList.remove('sidebar-open'); menu?.setAttribute('aria-expanded', 'false'); };
+      menu?.addEventListener('click', () => { const open = document.body.classList.toggle('sidebar-open'); menu.setAttribute('aria-expanded', String(open)); });
+      document.querySelector('[data-close-sidebar]')?.addEventListener('click', closeSidebar);
+      document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') { closeSidebar(); document.querySelector('.appearance-panel')?.setAttribute('hidden', ''); }
+        if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); document.querySelector('#site-search')?.focus(); }
+      });
+      const appearanceButton = document.querySelector('.appearance-button');
+      const panel = document.querySelector('.appearance-panel');
+      appearanceButton?.addEventListener('click', () => { const hidden = panel?.toggleAttribute('hidden'); appearanceButton.setAttribute('aria-expanded', String(!hidden)); });
+      const savedFont = localStorage.getItem('wiki-font') || 'default';
+      root.dataset.font = savedFont;
+      document.querySelectorAll('[data-font]').forEach(button => button.addEventListener('click', () => { root.dataset.font = button.dataset.font; localStorage.setItem('wiki-font', button.dataset.font); }));
+      const themeToggle = document.querySelector('[data-theme-toggle]');
+      const savedTheme = localStorage.getItem('wiki-theme');
+      if (savedTheme === 'dark') { root.dataset.theme = 'dark'; themeToggle.checked = true; }
+      themeToggle?.addEventListener('change', () => { root.dataset.theme = themeToggle.checked ? 'dark' : 'light'; localStorage.setItem('wiki-theme', root.dataset.theme); });
+      document.querySelectorAll('.nav-folder').forEach(folder => {
+        const key = `wiki-folder:${folder.dataset.nodeType}`;
+        const saved = localStorage.getItem(key);
+        if (saved !== null && !folder.querySelector('[aria-current="page"]')) folder.open = saved === 'open';
+        folder.addEventListener('toggle', () => localStorage.setItem(key, folder.open ? 'open' : 'closed'));
+      });
+    </script>
+  </body>
+</html>
