@@ -3970,8 +3970,9 @@ private data class IndexedDocument(
     }
 
     fun isGraphDocumentCandidate(): Boolean {
+        val firstLine = text.substringBefore('\n').removeSuffix("\r")
+        if (firstLine != "---") return false
         val hasGraphSyntax = "@props" in text || "@link" in text
-        if (!text.startsWith("---")) return hasGraphSyntax
         val frontMatterEnd = text.indexOf("\n---", startIndex = 3).takeIf { it >= 0 } ?: text.length
         val frontMatter = text.substring(3, frontMatterEnd)
         val hasId = Regex("""(?m)^id\s*:""").containsMatchIn(frontMatter)

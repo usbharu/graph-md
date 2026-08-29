@@ -399,6 +399,50 @@ class GraphMdLanguageServerTest {
     }
 
     @Test
+    fun `search and embed ignore graph syntax examples in ordinary markdown`() {
+        val root = Files.createTempDirectory("graphmd-ordinary-markdown")
+        try {
+            Files.writeString(root.resolve("Person.md"), "---\r\nid: Person\r\nkind: NodeType\r\n---")
+            val node = root.resolve("alice.md")
+            Files.writeString(node, "---\nid: alice\nkind: Node\ntype: Person\n---")
+            Files.writeString(
+                root.resolve("README.md"),
+                """
+                    # GraphMD examples
+
+                    `@props{name = "Alice"}`
+
+                    ```markdown
+                    @link[Bob](bob friendOf)
+                    ::: embed:query="MATCH (n) RETURN n"
+                    :::
+                    ```
+                """.trimIndent(),
+            )
+            val server = GraphMdLanguageServer()
+            server.initialize(
+                InitializeParams().apply {
+                    workspaceFolders = listOf(WorkspaceFolder(root.toUri().toString(), "ordinary-markdown"))
+                },
+            ).get()
+
+            val search = server.search(
+                GraphMdSearchParams("MATCH (n:Person) RETURN ID(n) AS id"),
+            ).get()
+            val embed = server.renderEmbed(
+                GraphMdEmbedParams(node.toUri().toString(), "query", "MATCH (n:Person) RETURN ID(n) AS id"),
+            ).get()
+
+            assertEquals(listOf("alice"), search.rows.map { it.values.single() })
+            assertTrue(search.diagnostics.isEmpty(), search.diagnostics.toString())
+            assertEquals(listOf("alice"), embed.rows.map { it.cells.single().text })
+            assertTrue(embed.diagnostics.isEmpty(), embed.diagnostics.toString())
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `render embed reports workspace compilation errors`() {
         val root = Files.createTempDirectory("graphmd-embed-compile-error")
         try {
