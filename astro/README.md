@@ -28,13 +28,13 @@ Pages and components can import these build-time virtual modules:
 | `virtual:graphmd/diagnostics` | Structured compiler diagnostics |
 
 Roots may be files or directories outside the Astro project. The integration
-recompiles and reloads the page whenever a source Markdown file is added,
+recompiles and reloads the page whenever a GraphMD source file is added,
 changed, or removed; source files do not need to be copied into the site.
 
-Explicitly configured files are parsed regardless of their first line.
-Recursively discovered `.md` files are considered GraphMD only when their first
-line is `---`. Missing roots are ignored so an empty development project can
-still start.
+Explicitly configured files are parsed regardless of their extension or first
+line. Recursively discovered `.md` files match the extension case-insensitively
+and are considered GraphMD only when their first line is `---`. Missing roots
+are ignored so an empty development project can still start.
 
 ## Build and development behavior
 

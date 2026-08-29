@@ -88,10 +88,11 @@ Astro statically generates:
 - `/search/` — React search island backed by the static GMQL index;
 - `/graph/` — React/Cytoscape graph island.
 
-Document links are resolved from the compiler-produced ID-to-route map. A
-safe ID preserves ASCII letters, digits, `_`, `-`, and `.`, and encodes every
-other UTF-8 byte as `~HH`. Route construction does not guess from source file
-names.
+Document links are resolved from the compiler-produced ID-to-route map. A safe
+ID preserves lowercase ASCII letters, digits, `_`, and `-`, and encodes every
+other UTF-8 byte as `~HH`. Encoding uppercase letters and `.` keeps routes
+distinct on case-insensitive filesystems and avoids special path segments.
+Route construction does not guess from source file names.
 
 The Markdown renderer disables raw HTML. `markdown-it-graphmd` receives the
 same ID-to-route map, so GraphMD links resolve consistently with Astro routes.

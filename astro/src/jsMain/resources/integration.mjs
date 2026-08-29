@@ -19,7 +19,9 @@ const EXCLUDED_DIRECTORIES = new Set([".git", ".astro", "node_modules", "build",
  * Source data stays in memory and Markdown edits trigger a fresh compilation.
  */
 export default function graphMdIntegration(options = {}) {
-  const extensions = new Set(options.extensions ?? [".md"]);
+  const extensions = new Set(
+    (options.extensions ?? [".md"]).map((extension) => extension.toLowerCase()),
+  );
   const configuredRoots = options.roots ?? ["documents"];
   let projectRoot = process.cwd();
   let siteBase = "/";
@@ -182,9 +184,10 @@ async function walk(directory, extensions, output, context) {
     throw error;
   }
   if (metadata.isFile()) {
-    if (extensions.has(path.extname(directory))) {
-      output.push({ file: directory, explicit: context.explicit });
-    }
+    // A file root is explicit and follows the CLI rule: validate it regardless
+    // of its extension. Extension filtering only applies while walking a root
+    // directory.
+    output.push({ file: directory, explicit: context.explicit });
     return;
   }
   if (!metadata.isDirectory()) return;
@@ -201,7 +204,7 @@ async function walk(directory, extensions, output, context) {
     const absolute = path.join(directory, entry.name);
     if (entry.isDirectory()) {
       await walk(absolute, extensions, output, { ...context, explicit: false });
-    } else if (entry.isFile() && extensions.has(path.extname(entry.name))) {
+    } else if (entry.isFile() && hasExtension(entry.name, extensions)) {
       output.push({ file: absolute, explicit: false });
     }
   }
@@ -218,10 +221,14 @@ function isInside(candidate, parent) {
 
 function isGraphMdSource(file, roots, extensions) {
   const absolute = path.resolve(file);
-  return (
-    extensions.has(path.extname(absolute)) &&
-    roots.some((root) => absolute === root || absolute.startsWith(`${root}${path.sep}`))
+  return roots.some((root) =>
+    absolute === root ||
+    (absolute.startsWith(`${root}${path.sep}`) && hasExtension(absolute, extensions)),
   );
+}
+
+function hasExtension(file, extensions) {
+  return extensions.has(path.extname(file).toLowerCase());
 }
 
 function formatDiagnostics(diagnostics) {
