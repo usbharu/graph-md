@@ -55,7 +55,8 @@ The public JavaScript entry points and TypeScript declarations live in
 ```
 
 Direct `site-template` development consumes that output through
-`file:../astro/build/dist/js/productionLibrary`. During CLI packaging,
+`link:../astro/build/dist/js/productionLibrary`. Using a link lets package
+managers update the lockfile before the Kotlin/JS distribution is built. During CLI packaging,
 `:cli:stageSiteTemplate` copies the same distribution into
 `vendor/graph-md-astro` and rewrites the dependency to the vendored path. A
 generated site therefore does not depend on the source monorepo for this
