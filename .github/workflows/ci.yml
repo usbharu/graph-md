@@ -65,6 +65,12 @@ jobs:
         run: pnpm --dir site-template install --frozen-lockfile
       - name: Build Markdown preview plugin
         run: pnpm --filter markdown-it-graphmd build
+      - name: Test runtime build scripts
+        run: node --test scripts/*.test.mjs
+      - name: Verify embedded browser runtimes
+        run: |
+          ./gradlew :cli:updateEmbeddedWebRuntime
+          git diff --exit-code -- site-template/runtime-encoded
       - name: Compile VS Code extension
         run: pnpm --filter graph-md-vscode compile
       - parallel:

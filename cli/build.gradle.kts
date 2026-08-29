@@ -91,6 +91,10 @@ val bundleMarkdownItGraphMd by tasks.registering(Exec::class) {
     configureDevelopmentTools()
     commandLine(pnpmExecutable?.absolutePath ?: "pnpm", "--dir", "markdown-it-graphmd", "exec", "tsup", "--minify", "--sourcemap=false")
     inputs.files(fileTree(rootProject.file("markdown-it-graphmd/src")) { include("**/*.ts") })
+    inputs.files(
+        rootProject.file("markdown-it-graphmd/tsup.config.ts"),
+        rootProject.file("scripts/normalize-kotlin-js-metadata.mjs"),
+    )
     outputs.file(rootProject.file("markdown-it-graphmd/dist/index.js"))
 }
 
@@ -99,18 +103,18 @@ val bundleQueryWebRuntime by tasks.registering(Exec::class) {
     dependsOn(":query:jsProductionLibraryCompileSync")
     workingDir(rootProject.projectDir)
     val queryEntry = rootProject.file("query/build/compileSync/js/main/productionLibrary/kotlin/graph-md-query.js")
+    val bundleScript = rootProject.file("scripts/bundle-query-runtime.mjs")
     inputs.file(queryEntry)
     inputs.files(
         rootProject.file("query/build/compileSync/js/main/productionLibrary/kotlin/graph-md-core.js"),
         rootProject.file("query/build/compileSync/js/main/productionLibrary/kotlin/kotlin-kotlin-stdlib.js"),
     )
+    inputs.files(bundleScript, rootProject.file("scripts/normalize-kotlin-js-metadata.mjs"))
     outputs.file(bundledQueryRuntime)
     configureDevelopmentTools()
     commandLine(
-        pnpmExecutable?.absolutePath ?: "pnpm", "exec", "esbuild", queryEntry.absolutePath,
-        "--bundle", "--platform=browser", "--format=iife", "--global-name=GraphMdQueryRuntime",
-        "--minify",
-        "--outfile=${bundledQueryRuntime.get().asFile.absolutePath}",
+        nodeExecutable?.absolutePath ?: "node", bundleScript.absolutePath,
+        queryEntry.absolutePath, bundledQueryRuntime.get().asFile.absolutePath,
     )
 }
 
