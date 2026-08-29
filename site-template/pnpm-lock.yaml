@@ -16,7 +16,7 @@ importers:
         version: 6.4.8(rollup@4.62.4)(yaml@2.9.0)
       cytoscape:
         specifier: ^3.33.1
-        version: 3.34.0
+        version: 3.34.2
       markdown-it:
         specifier: ^14.1.0
         version: 14.3.0
@@ -1133,8 +1133,8 @@ packages:
   csstype@3.2.3:
     resolution: {integrity: sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==}
 
-  cytoscape@3.34.0:
-    resolution: {integrity: sha512-62rNSrioXw93uliKFBwjukeQyeWwH2PqDrTac31r2P6464u3AUvTk0xS4LVvT251g7IgkFunrI48ZEZGjywSOg==}
+  cytoscape@3.34.2:
+    resolution: {integrity: sha512-Cm2jaj1X/PBNlzV9yH8zcfGOxO7U+CJ/+mxSBVPSchLaugdp4jtlGx5qaHtPRZ6tgiZ5P+o1XoRfJA+ba6KM3g==}
     engines: {node: '>=0.10'}
 
   debug@4.4.3:
@@ -3193,7 +3193,7 @@ snapshots:
 
   csstype@3.2.3: {}
 
-  cytoscape@3.34.0: {}
+  cytoscape@3.34.2: {}
 
   debug@4.4.3:
     dependencies:
