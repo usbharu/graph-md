@@ -169,8 +169,10 @@ pnpm check
 pnpm build
 ```
 
-The local template package points at `../astro/build/dist/js/productionLibrary`.
-Generated sites instead receive the vendored `./vendor/graph-md-astro` copy.
+The local template package links to `../astro/build/dist/js/productionLibrary`.
+This keeps lockfile updates independent of whether the Kotlin/JS distribution
+has already been built. Generated sites instead link to the vendored
+`./vendor/graph-md-astro` copy.
 
 ### Change the query API or Markdown plugin
 
@@ -234,7 +236,7 @@ above, or stop and restart the daemon after fixing its environment.
 
 Run `./gradlew :astro:jsNodeProductionLibraryDistribution` from the repository
 root, then reinstall the template dependencies. The direct-development
-package reference intentionally points to that local build output.
+package link intentionally points to that local build output.
 
 ### Search-index requests fail
 

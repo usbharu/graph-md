@@ -50,10 +50,10 @@ class GraphMdCliTest {
         assertTrue(generated.getValue("/site/src/lib/site.ts").contains("virtual:graphmd/site"))
         assertFalse("/site/src/generated/site.json" in generated)
         assertFalse(generated.getValue("/site/package.json").contains("workspace:"))
-        assertTrue(generated.getValue("/site/package.json").contains("file:./vendor/graph-md-astro"))
+        assertTrue(generated.getValue("/site/package.json").contains("link:./vendor/graph-md-astro"))
         assertFalse(generated.getValue("/site/package.json").contains("test:prototype-keys"))
         assertFalse(generated.getValue("/site/pnpm-lock.yaml").contains("astro/build/dist"))
-        assertTrue(generated.getValue("/site/pnpm-lock.yaml").contains("directory: ./vendor/graph-md-astro"))
+        assertTrue(generated.getValue("/site/pnpm-lock.yaml").contains("link:./vendor/graph-md-astro"))
         assertTrue(generated.getValue("/site/package.json").contains("\"@astrojs/react\": \"5.0.7\""))
         assertTrue(generated.getValue("/site/package.json").contains("\"astro\": \"6.4.8\""))
     }
