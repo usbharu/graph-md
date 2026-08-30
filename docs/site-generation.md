@@ -148,6 +148,10 @@ changes in the checked-in encoded runtimes. KT-68281 also reports this metadata
 ordering problem; the fix released in Kotlin 2.4 sorts the separately reported
 polyfills but does not sort these interface lists.
 
+CI compares the generated JavaScript with the decompressed checked-in assets.
+It intentionally does not compare gzip bytes, because equivalent input can be
+encoded differently by different Node.js/zlib builds.
+
 ## Development workflows
 
 ### Work on the Wiki UI

@@ -69,8 +69,10 @@ jobs:
         run: node --test scripts/*.test.mjs
       - name: Verify embedded browser runtimes
         run: |
-          ./gradlew :cli:updateEmbeddedWebRuntime
-          git diff --exit-code -- site-template/runtime-encoded
+          ./gradlew :cli:bundleQueryWebRuntime :cli:bundleMarkdownItGraphMd
+          node scripts/verify-embedded-web-runtime.mjs \
+            site-template/runtime-encoded/graph-md-query-runtime.js.gz.b64 cli/build/webRuntime/graph-md-query-runtime.js \
+            site-template/runtime-encoded/markdown-it-graphmd.js.gz.b64 markdown-it-graphmd/dist/index.js
       - name: Compile VS Code extension
         run: pnpm --filter graph-md-vscode compile
       - parallel:
