@@ -52,8 +52,10 @@ fun Exec.configureDevelopmentTools() {
     }
 }
 
-version = providers.gradleProperty("releaseVersion").orElse("0.1.0-SNAPSHOT").get()
-val cliReleaseVersion = version.toString()
+// Keep the Kotlin/JS workspace package version stable so release builds do not
+// invalidate kotlin-js-store/package-lock.json for every release tag.
+version = "0.1.0-SNAPSHOT"
+val cliReleaseVersion = providers.gradleProperty("releaseVersion").orElse(version.toString()).get()
 val generatedVersionDirectory = layout.buildDirectory.dir("generated/cliVersion")
 val generatedVersionSource = resources.text.fromString(
     """
@@ -256,7 +258,7 @@ tasks.register<Jar>("jvmReleaseJar") {
     group = "distribution"
     description = "Builds a self-contained JVM CLI jar."
     dependsOn("jvmMainClasses")
-    archiveFileName.set("graphmd-jvm-${project.version}.jar")
+    archiveFileName.set("graphmd-jvm-$cliReleaseVersion.jar")
     destinationDirectory.set(layout.buildDirectory.dir("distributions"))
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     manifest {
@@ -273,7 +275,7 @@ tasks.register<Zip>("jsReleaseArchive") {
     group = "distribution"
     description = "Builds the Node.js CLI archive."
     dependsOn("jsProductionExecutableCompileSync")
-    archiveFileName.set("graphmd-node-${project.version}.zip")
+    archiveFileName.set("graphmd-node-$cliReleaseVersion.zip")
     destinationDirectory.set(layout.buildDirectory.dir("distributions"))
     from(layout.buildDirectory.dir("compileSync/js/main/productionExecutable/kotlin"))
 }
@@ -287,7 +289,7 @@ fun registerNativeTar(
         group = "distribution"
         dependsOn("linkReleaseExecutable$targetName")
         compression = Compression.GZIP
-        archiveFileName.set("graphmd-$platformName-${project.version}.tar.gz")
+        archiveFileName.set("graphmd-$platformName-$cliReleaseVersion.tar.gz")
         destinationDirectory.set(layout.buildDirectory.dir("distributions"))
         filePermissions {
             unix("rwxr-xr-x")
@@ -305,7 +307,7 @@ registerNativeTar("linuxX64ReleaseArchive", "LinuxX64", "linux-x64")
 tasks.register<Zip>("mingwX64ReleaseArchive") {
     group = "distribution"
     dependsOn("linkReleaseExecutableMingwX64")
-    archiveFileName.set("graphmd-windows-x64-${project.version}.zip")
+    archiveFileName.set("graphmd-windows-x64-$cliReleaseVersion.zip")
     destinationDirectory.set(layout.buildDirectory.dir("distributions"))
     from(layout.buildDirectory.file("bin/mingwX64/releaseExecutable/graphmd.exe"))
 }
