@@ -63,6 +63,14 @@ jobs:
         run: ./gradlew :astro:jsNodeProductionLibraryDistribution
       - name: Install site template dependencies
         run: pnpm --dir site-template install --frozen-lockfile
+      - name: Test runtime build scripts
+        run: node --test scripts/*.test.mjs
+      - name: Verify embedded browser runtimes
+        run: |
+          ./gradlew :cli:bundleQueryWebRuntime :cli:bundleMarkdownItGraphMd
+          node scripts/verify-embedded-web-runtime.mjs \
+            site-template/runtime-encoded/graph-md-query-runtime.js.gz.b64 cli/build/webRuntime/graph-md-query-runtime.js \
+            site-template/runtime-encoded/markdown-it-graphmd.js.gz.b64 markdown-it-graphmd/dist/index.js
       - name: Build Markdown preview plugin
         run: pnpm --filter markdown-it-graphmd build
       - name: Compile VS Code extension

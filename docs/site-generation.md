@@ -122,7 +122,7 @@ files instead.
 | --- | --- | --- | --- |
 | `:cli:syncMarkdownCoreVendor` | Copies Kotlin/JS `core` files used while bundling `markdown-it-graphmd` | Gradle/Kotlin JS | No |
 | `:cli:bundleMarkdownItGraphMd` | Builds the minified Markdown plugin | pnpm, tsup | No; `dist/` is intermediate |
-| `:cli:bundleQueryWebRuntime` | Bundles the Kotlin/JS query API for browsers | pnpm, esbuild | No; `cli/build/` is intermediate |
+| `:cli:bundleQueryWebRuntime` | Normalizes Kotlin/JS metadata and bundles the query API for browsers | Node.js, esbuild | No; `cli/build/` is intermediate |
 | `:cli:updateEmbeddedWebRuntime` | Compresses both bundles into `site-template/runtime-encoded/` | Node.js and pnpm through dependencies | Yes |
 | `:cli:stageSiteTemplate` | Copies the clean template and vendors `graph-md-astro` | Gradle/Kotlin JS | No |
 | `:cli:generateSiteTemplate` | Encodes the staged project into generated Kotlin source | Gradle | No |
@@ -140,6 +140,17 @@ The task dependencies are:
 
 Normal template packaging uses the checked-in runtime assets and does not run
 `updateEmbeddedWebRuntime` automatically.
+
+The runtime bundlers sort Kotlin/JS metadata interface lists before invoking
+esbuild or tsup. Their order has no runtime meaning, but Kotlin/JS can otherwise
+emit them in a different order on identical clean builds and create noisy
+changes in the checked-in encoded runtimes. KT-68281 also reports this metadata
+ordering problem; the fix released in Kotlin 2.4 sorts the separately reported
+polyfills but does not sort these interface lists.
+
+CI compares the generated JavaScript with the decompressed checked-in assets.
+It intentionally does not compare gzip bytes, because equivalent input can be
+encoded differently by different Node.js/zlib builds.
 
 ## Development workflows
 
