@@ -14,7 +14,7 @@
     "@astrojs/react": "5.0.7",
     "astro": "6.4.8",
     "cytoscape": "^3.33.1",
-    "markdown-it": "^14.1.0",
+    "markdown-it": "^15.0.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
