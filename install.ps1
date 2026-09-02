@@ -1,11 +1,13 @@
-$script:GraphMdPreviousErrorActionPreference = $ErrorActionPreference
+& {
+param([string[]] $GraphMdInstallerArguments)
+
 $ErrorActionPreference = "Stop"
 
-$script:GraphMdRepository = "usbharu/graph-md"
-$script:GraphMdReleasesUrl = if ($env:GRAPHMD_INSTALLER_RELEASES_URL) {
+$GraphMdRepository = "usbharu/graph-md"
+$GraphMdReleasesUrl = if ($env:GRAPHMD_INSTALLER_RELEASES_URL) {
     $env:GRAPHMD_INSTALLER_RELEASES_URL.TrimEnd("/")
 } else {
-    "https://github.com/$($script:GraphMdRepository)/releases"
+    "https://github.com/$GraphMdRepository/releases"
 }
 
 function Show-GraphMdInstallerUsage {
@@ -136,9 +138,9 @@ function Invoke-GraphMdInstaller([string[]] $Arguments) {
     $releaseVersion = Get-GraphMdNormalizedVersion $version
     $target = Get-GraphMdTarget
     $downloadRoot = if ($releaseVersion -eq "latest") {
-        "$($script:GraphMdReleasesUrl)/latest/download"
+        "$GraphMdReleasesUrl/latest/download"
     } else {
-        "$($script:GraphMdReleasesUrl)/download/$releaseVersion"
+        "$GraphMdReleasesUrl/download/$releaseVersion"
     }
 
     $temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ("graphmd-install-" + [guid]::NewGuid())
@@ -194,21 +196,9 @@ function Invoke-GraphMdInstaller([string[]] $Arguments) {
     }
 }
 
-if ($env:GRAPHMD_INSTALLER_TESTING -ne "1") {
-    try {
-        Invoke-GraphMdInstaller $args
-    } catch {
-        throw "graphmd installer: $($_.Exception.Message)"
-    } finally {
-        $ErrorActionPreference = $script:GraphMdPreviousErrorActionPreference
-        Remove-Variable GraphMdPreviousErrorActionPreference -Scope Script -ErrorAction SilentlyContinue
-        Remove-Variable GraphMdRepository -Scope Script -ErrorAction SilentlyContinue
-        Remove-Variable GraphMdReleasesUrl -Scope Script -ErrorAction SilentlyContinue
-        Remove-Item Function:Show-GraphMdInstallerUsage -ErrorAction SilentlyContinue
-        Remove-Item Function:Get-GraphMdNormalizedVersion -ErrorAction SilentlyContinue
-        Remove-Item Function:Get-GraphMdTarget -ErrorAction SilentlyContinue
-        Remove-Item Function:Receive-GraphMdFile -ErrorAction SilentlyContinue
-        Remove-Item Function:Get-GraphMdChecksumEntry -ErrorAction SilentlyContinue
-        Remove-Item Function:Invoke-GraphMdInstaller -ErrorAction SilentlyContinue
-    }
+try {
+    Invoke-GraphMdInstaller $GraphMdInstallerArguments
+} catch {
+    throw "graphmd installer: $($_.Exception.Message)"
 }
+} $(if ($MyInvocation.MyCommand.CommandType -eq [System.Management.Automation.CommandTypes]::ExternalScript) { ,$args } else { ,@() })

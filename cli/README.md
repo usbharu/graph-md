@@ -40,7 +40,7 @@ export PATH="$HOME/.local/bin:$PATH"
 On Windows x64, run the PowerShell installer:
 
 ```powershell
-irm https://raw.githubusercontent.com/usbharu/graph-md/main/install.ps1 | iex
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/usbharu/graph-md/main/install.ps1)))
 ```
 
 It installs to `%LOCALAPPDATA%\Programs\GraphMD\bin\graphmd.exe`. Environment
@@ -49,7 +49,7 @@ variables work well with the piped form:
 ```powershell
 $env:GRAPHMD_VERSION = "0.1.0"
 $env:GRAPHMD_INSTALL_DIR = "$HOME\bin"
-irm https://raw.githubusercontent.com/usbharu/graph-md/main/install.ps1 | iex
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/usbharu/graph-md/main/install.ps1)))
 ```
 
 Alternatively, download the script and pass `--version` or `--install-dir`

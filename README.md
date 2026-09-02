@@ -75,7 +75,7 @@ curl -fsSL https://raw.githubusercontent.com/usbharu/graph-md/main/install.sh | 
 On Windows x64, run this from PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/usbharu/graph-md/main/install.ps1 | iex
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/usbharu/graph-md/main/install.ps1)))
 ```
 
 Installers verify release archives against the published `SHA256SUMS` before
