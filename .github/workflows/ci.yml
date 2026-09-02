@@ -63,6 +63,23 @@ jobs:
         run: ./gradlew :astro:jsNodeProductionLibraryDistribution
       - name: Install site template dependencies
         run: pnpm --dir site-template install --frozen-lockfile
+      - name: Generate site project with CLI
+        run: |
+          ./gradlew :cli:run \
+            --args="site ${RUNNER_TEMP}/graphmd-generated-site ${GITHUB_WORKSPACE}/site-template/tests/fixtures/prototype-keys --base /wiki/ --json"
+      - name: Install generated site dependencies
+        run: pnpm --dir "${RUNNER_TEMP}/graphmd-generated-site" install --frozen-lockfile
+      - name: Check and build generated site
+        run: |
+          pnpm --dir "${RUNNER_TEMP}/graphmd-generated-site" check
+          pnpm --dir "${RUNNER_TEMP}/graphmd-generated-site" build
+          test -f "${RUNNER_TEMP}/graphmd-generated-site/dist/index.html"
+          test -f "${RUNNER_TEMP}/graphmd-generated-site/dist/documents/prototype-item/index.html"
+          test -f "${RUNNER_TEMP}/graphmd-generated-site/dist/search/index.html"
+          test -f "${RUNNER_TEMP}/graphmd-generated-site/dist/graph/index.html"
+          test -f "${RUNNER_TEMP}/graphmd-generated-site/dist/search-index/manifest.json"
+          test -f "${RUNNER_TEMP}/graphmd-generated-site/dist/runtime/graph-md-query-runtime.js"
+          grep -Fq 'href="/wiki/' "${RUNNER_TEMP}/graphmd-generated-site/dist/index.html"
       - name: Test runtime build scripts
         run: node --test scripts/*.test.mjs
       - name: Verify embedded browser runtimes
