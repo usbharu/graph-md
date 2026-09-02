@@ -13,6 +13,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  installer:
+    name: Installer / ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+          - name: macOS
+            os: macos-latest
+          - name: Windows
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test POSIX installer
+        if: runner.os != 'Windows'
+        run: sh scripts/install-sh.test.sh
+      - name: Test release checksums
+        if: runner.os != 'Windows'
+        run: sh scripts/generate-release-checksums.test.sh
+      - name: Test PowerShell installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/install-powershell.test.ps1
+
   gradle:
     name: Gradle / ${{ matrix.name }}
     runs-on: ubuntu-latest
