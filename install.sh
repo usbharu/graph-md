@@ -181,8 +181,9 @@ main() {
     GRAPHMD_TEMP_DIRECTORY=$(mktemp -d "${TMPDIR:-/tmp}/graphmd-install.XXXXXX") || fail "cannot create a temporary directory"
     trap cleanup EXIT HUP INT TERM
     graphmd_checksums="$GRAPHMD_TEMP_DIRECTORY/SHA256SUMS"
-    if ! download_file "$graphmd_download_root/SHA256SUMS" "$graphmd_checksums"; then
-        fail "failed to download SHA256SUMS; GraphMD v0.0.7 and earlier are not supported"
+    graphmd_checksum_url="$graphmd_download_root/SHA256SUMS"
+    if ! download_file "$graphmd_checksum_url" "$graphmd_checksums"; then
+        fail "failed to download required checksum file from $graphmd_checksum_url; check network access and ensure the release publishes SHA256SUMS (v0.0.7 and earlier do not)"
     fi
 
     graphmd_entry=$(checksum_entry "$graphmd_checksums" "$graphmd_target" "$graphmd_release_version")

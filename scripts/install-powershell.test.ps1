@@ -21,6 +21,18 @@ function Assert-Throws([scriptblock] $Action, [string] $Message) {
     throw "$Message`: expected an error"
 }
 
+function Assert-ThrowsMatching([scriptblock] $Action, [string] $Pattern, [string] $Message) {
+    try {
+        & $Action
+    } catch {
+        if ($_.Exception.Message -notmatch $Pattern) {
+            throw "$Message`: error '$($_.Exception.Message)' did not match '$Pattern'"
+        }
+        return
+    }
+    throw "$Message`: expected an error"
+}
+
 function Wait-ForServer([string] $HealthUrl) {
     for ($attempt = 0; $attempt -lt 50; $attempt++) {
         try {
@@ -137,9 +149,9 @@ try {
     } "Missing checksum"
 
     $env:GRAPHMD_INSTALLER_RELEASES_URL = "http://127.0.0.1:1/releases"
-    Assert-Throws {
+    Assert-ThrowsMatching {
         & $installerPath --version 1.2.3 --install-dir (Join-Path $testDirectory "download-failure") | Out-Null
-    } "Download failure"
+    } 'required checksum file from http://127\.0\.0\.1:1/releases/download/v1\.2\.3/SHA256SUMS' "Download failure"
     $env:GRAPHMD_INSTALLER_RELEASES_URL = "${prefix}releases"
 
     Assert-Throws { & $installerPath --version 1.2 --install-dir (Join-Path $testDirectory "invalid-version") | Out-Null } "Invalid version"

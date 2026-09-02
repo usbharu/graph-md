@@ -135,6 +135,24 @@ if (PATH=/nonexistent file_sha256 "$fixture_directory/SHA256SUMS") >/dev/null 2>
     exit 1
 fi
 
+download_error=$(
+    (
+        detect_target() { printf '%s\n' 'linux-x64'; }
+        download_file() { return 1; }
+        main --version 1.2.3 --install-dir "$test_directory/download-failure"
+    ) 2>&1
+) && {
+    printf 'Checksum download failure unexpectedly succeeded\n' >&2
+    exit 1
+}
+case "$download_error" in
+    *"required checksum file from https://github.com/usbharu/graph-md/releases/download/v1.2.3/SHA256SUMS"*) ;;
+    *)
+        printf 'Checksum download error did not include the attempted URL: %s\n' "$download_error" >&2
+        exit 1
+        ;;
+esac
+
 [ "$(normalize_version latest)" = latest ]
 [ "$(normalize_version 1.2.3)" = v1.2.3 ]
 [ "$(normalize_version v1.2.3)" = v1.2.3 ]

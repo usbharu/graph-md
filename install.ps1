@@ -148,10 +148,11 @@ function Invoke-GraphMdInstaller([string[]] $Arguments) {
     New-Item -ItemType Directory -Path $temporaryDirectory | Out-Null
     try {
         $checksumFile = Join-Path $temporaryDirectory "SHA256SUMS"
+        $checksumUrl = "$downloadRoot/SHA256SUMS"
         try {
-            Receive-GraphMdFile "$downloadRoot/SHA256SUMS" $checksumFile
+            Receive-GraphMdFile $checksumUrl $checksumFile
         } catch {
-            throw "failed to download SHA256SUMS; GraphMD v0.0.7 and earlier are not supported"
+            throw "failed to download required checksum file from $checksumUrl ($($_.Exception.Message)); check network access and ensure the release publishes SHA256SUMS (v0.0.7 and earlier do not)"
         }
 
         $entry = Get-GraphMdChecksumEntry $checksumFile $target $releaseVersion
