@@ -66,6 +66,23 @@ for its query and distribution APIs.
 
 The `graphmd` CLI is implemented in the `cli` multiplatform module.
 
+Install the latest native CLI on macOS or Linux:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/usbharu/graph-md/main/install.sh | sh
+```
+
+On Windows x64, run this from PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/usbharu/graph-md/main/install.ps1 | iex
+```
+
+Installers verify release archives against the published `SHA256SUMS` before
+replacing an existing binary. They are supported starting with the first release
+after v0.0.7 that contains that checksum file. See the [CLI guide](cli/README.md#install-the-cli)
+for version pinning, custom installation directories, `wget`, and PATH setup.
+
 ```sh
 ./gradlew :cli:run --args="list ./documents --kind node --type Person"
 ./gradlew :cli:run --args="show alice ./documents --json"

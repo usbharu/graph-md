@@ -131,6 +131,11 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
+      - name: Generate and verify release checksums
+        run: |
+          sh scripts/generate-release-checksums.sh release-assets release-assets/SHA256SUMS
+          cd release-assets
+          sha256sum --check SHA256SUMS
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -156,6 +161,7 @@ jobs:
             echo "- graphmd-jvm-$VERSION.jar"
             echo "- graphmd-node-$VERSION.zip"
             echo "- Native archives for macOS arm64/x64, Linux x64, and Windows x64"
+            echo "- SHA256SUMS"
             echo
             printf '%s\n' "$generated_notes"
           } > "$notes_file"

@@ -6,6 +6,56 @@ Wiki generation and its CLI-owned build tasks. See the
 [project documentation index](../docs/README.md) for the language, query, and
 LSP guides.
 
+## Install the CLI
+
+The installer downloads the native archive for the current platform and verifies
+it against the release's `SHA256SUMS` before replacing an existing installation.
+Releases v0.0.7 and earlier do not contain that file and are not supported by the
+installer; use the first later release containing `SHA256SUMS` or newer.
+
+On macOS arm64/x64 or Linux x64, use either `curl` or `wget`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/usbharu/graph-md/main/install.sh | sh
+# or
+wget -qO- https://raw.githubusercontent.com/usbharu/graph-md/main/install.sh | sh
+```
+
+The default destination is `~/.local/bin/graphmd`. Pin a version or choose a
+different directory by passing arguments through `sh`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/usbharu/graph-md/main/install.sh \
+  | sh -s -- --version v0.1.0 --install-dir "$HOME/bin"
+```
+
+`GRAPHMD_VERSION` and `GRAPHMD_INSTALL_DIR` provide the same settings; explicit
+arguments take precedence. Add the chosen directory to `PATH` if it is not
+already present, for example:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+On Windows x64, run the PowerShell installer:
+
+```powershell
+irm https://raw.githubusercontent.com/usbharu/graph-md/main/install.ps1 | iex
+```
+
+It installs to `%LOCALAPPDATA%\Programs\GraphMD\bin\graphmd.exe`. Environment
+variables work well with the piped form:
+
+```powershell
+$env:GRAPHMD_VERSION = "0.1.0"
+$env:GRAPHMD_INSTALL_DIR = "$HOME\bin"
+irm https://raw.githubusercontent.com/usbharu/graph-md/main/install.ps1 | iex
+```
+
+Alternatively, download the script and pass `--version` or `--install-dir`
+directly. The installer prints a reminder when its destination is not on `PATH`;
+it never edits shell profiles or the Windows user environment automatically.
+
 ## Generate a static Wiki project
 
 ```text
@@ -113,4 +163,5 @@ outputs, and dependency graph are listed in
 The module also defines `jvmReleaseJar`, `jsReleaseArchive`,
 `macosArm64ReleaseArchive`, `macosX64ReleaseArchive`,
 `linuxX64ReleaseArchive`, and `mingwX64ReleaseArchive`. These package the CLI;
-they do not build or deploy a generated Wiki's `dist/` directory.
+they do not build or deploy a generated Wiki's `dist/` directory. Tagged releases
+also publish `SHA256SUMS`, which is required by both native CLI installers.
