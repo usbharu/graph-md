@@ -69,7 +69,7 @@ download_file() {
     if command -v curl >/dev/null 2>&1; then
         curl --fail --silent --show-error --location "$graphmd_url" --output "$graphmd_output"
     elif command -v wget >/dev/null 2>&1; then
-        wget --quiet "$graphmd_url" --output-document="$graphmd_output"
+        wget -q -O "$graphmd_output" "$graphmd_url"
     else
         fail "curl or wget is required"
     fi
@@ -200,7 +200,7 @@ main() {
     fi
 
     mkdir "$GRAPHMD_TEMP_DIRECTORY/extracted"
-    tar -xzf "$graphmd_archive" -C "$GRAPHMD_TEMP_DIRECTORY/extracted" || fail "failed to extract $graphmd_asset"
+    tar -xzf "$graphmd_archive" -C "$GRAPHMD_TEMP_DIRECTORY/extracted" graphmd || fail "failed to extract graphmd from $graphmd_asset"
     graphmd_extracted_binary="$GRAPHMD_TEMP_DIRECTORY/extracted/graphmd"
     [ -f "$graphmd_extracted_binary" ] || fail "$graphmd_asset does not contain graphmd"
 

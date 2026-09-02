@@ -116,10 +116,11 @@ printf '%s\n' 'wget fixture' > "$test_directory/wget-source"
         [ "$2" = wget ]
     }
     wget() {
-        shift
-        wget_source=${1#file://}
-        shift
-        cp "$wget_source" "${1#*=}"
+        [ "$1" = '-q' ]
+        [ "$2" = '-O' ]
+        wget_output=$3
+        wget_source=${4#file://}
+        cp "$wget_source" "$wget_output"
     }
     download_file "file://$test_directory/wget-source" "$test_directory/wget-output"
 )
