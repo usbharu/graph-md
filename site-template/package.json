@@ -11,8 +11,8 @@
     "preview": "astro preview"
   },
   "dependencies": {
-    "@astrojs/react": "5.0.7",
-    "astro": "6.4.8",
+    "@astrojs/react": "6.0.5",
+    "astro": "7.3.1",
     "cytoscape": "^3.33.1",
     "markdown-it": "^15.0.0",
     "react": "^19.2.0",
