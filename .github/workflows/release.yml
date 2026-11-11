@@ -39,7 +39,7 @@ jobs:
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "25"
           cache: gradle
       - uses: pnpm/action-setup@v6
         with:
@@ -76,7 +76,7 @@ jobs:
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "25"
           cache: gradle
       - name: Build JVM and Node.js releases
         env:
@@ -112,7 +112,7 @@ jobs:
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "25"
           cache: gradle
       - name: Build native release
         run: ./gradlew "-PreleaseVersion=${{ needs.prepare.outputs.version }}" :cli:${{ matrix.task }}
